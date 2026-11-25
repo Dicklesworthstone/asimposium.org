@@ -219,11 +219,18 @@ const CLAIM_READ_SQL = normalizeSql(`SELECT id, problem_id, statement, payload_s
 const OUTBOX_READ_SQL = normalizeSql(`SELECT event_id, problem_id, kind, dedupe_key,
   payload_sha256, state FROM outbox
   WHERE event_id = ? AND problem_id = ? AND kind = 'search.index'`);
+const CLAIM_PROJECTION_SOURCE_SQL = normalizeSql(`FROM events e
+  JOIN problems p ON p.id = e.problem_id
+  JOIN idempotency i ON i.problem_id = e.problem_id AND i.idempotency_key = ?
+  WHERE e.id = ? AND e.problem_id = ? AND e.seq = ? AND e.object_id = ?
+    AND e.type = 'claim.created' AND e.object_kind = 'claim' AND e.object_version = 1
+    AND e.payload_sha256 = ? AND i.event_id IS NULL`);
 const CLAIM_INSERT_SELECT_SQL = normalizeSql(`INSERT INTO claims
   (id, problem_id, statement, payload_sha256, norm_hash, source_seq, statement_version, statement_drift, created_at)
-  SELECT ?, p.id, ?, ?, ?, p.public_seq, p.current_statement_version, 0, ? FROM problems p
-  JOIN idempotency i ON i.problem_id = p.id AND i.idempotency_key = ?
-  WHERE p.id = ? AND i.event_id IS NULL`);
+  SELECT e.object_id, e.problem_id, ?, e.payload_sha256, ?, e.seq, p.current_statement_version, 0, e.created_at ${CLAIM_PROJECTION_SOURCE_SQL}`);
+const PROJECTION_INSERT_SELECT_SQL = normalizeSql(`INSERT INTO claim_projections
+  (claim_id, problem_id, source_seq, projection_version, build_digest, stale, updated_at)
+  SELECT e.object_id, e.problem_id, e.seq, 1, e.row_digest, 0, e.created_at ${CLAIM_PROJECTION_SOURCE_SQL}`);
 const EVENT_INSERT_SELECT_SQL = normalizeSql(`INSERT INTO events
   (id, problem_id, seq, type, object_kind, object_id, object_version, payload_sha256,
   row_digest, chain_digest, created_at,
@@ -235,8 +242,7 @@ const EVENT_INSERT_SELECT_SQL = normalizeSql(`INSERT INTO events
   WHERE p.id = ? AND i.event_id IS NULL`);
 const OUTBOX_INSERT_SELECT_SQL = normalizeSql(`INSERT INTO outbox
   (event_id, problem_id, kind, dedupe_key, payload_sha256, created_at)
-  SELECT ?, ?, 'search.index', ?, ?, ? FROM idempotency i
-  WHERE i.problem_id = ? AND i.idempotency_key = ? AND i.event_id IS NULL`);
+  SELECT e.id, e.problem_id, 'search.index', ?, e.payload_sha256, ? ${CLAIM_PROJECTION_SOURCE_SQL}`);
 
 function ensureProblemHarness(): {
   readonly db: Parameters<typeof ensureProblem>[0];
@@ -538,11 +544,9 @@ function retryingWriteHarness(
         throw new Error("retry-harness problem advance lost pending idempotency ownership");
       }
       const projectionOwnsPendingIdempotency =
-        /FROM problems p\s+JOIN idempotency i ON i\.problem_id = p\.id AND i\.idempotency_key = \?\s+WHERE p\.id = \? AND i\.event_id IS NULL/.test(
-          projectionInsert.sql,
-        ) &&
-        projectionInsert.bindings[3] === idempotencyKey &&
-        projectionInsert.bindings[4] === problemId;
+        normalizeSql(projectionInsert.sql) === PROJECTION_INSERT_SELECT_SQL &&
+        projectionInsert.bindings[0] === idempotencyKey &&
+        projectionInsert.bindings[2] === problemId;
       if (!projectionOwnsPendingIdempotency) {
         throw new Error(
           "retry-harness projection INSERT lost selected pending-idempotency authority",
@@ -564,21 +568,21 @@ function retryingWriteHarness(
       const checkpointBindings = checkpointInsert.bindings;
       const outboxBindings = outboxInsert.bindings;
       const ownsPendingIdempotency = idempotency.request_digest === idempotencyBindings[2];
-      const projectionSelects =
-        projectionOwnsPendingIdempotency &&
-        !options.forceProjectionPredicateMiss &&
-        ownsPendingIdempotency;
       const nextSeq = publicSeq + 1;
       chainDigest = updateProblem.bindings[0] as string;
       publicSeq = nextSeq;
       const claimExecutionBindings = [...claimBindings] as (string | number | null)[];
       const eventExecutionBindings = [...eventBindings] as (string | number | null)[];
+      const projectionExecutionBindings = [...projectionBindings] as (string | number | null)[];
       const outboxExecutionBindings = [...outboxBindings] as (string | number | null)[];
       if (options.forceClaimPredicateMiss) {
-        claimExecutionBindings[5] = `${idempotencyKey}:missing`;
+        claimExecutionBindings[2] = `${idempotencyKey}:missing`;
+      }
+      if (options.forceProjectionPredicateMiss) {
+        projectionExecutionBindings[0] = `${idempotencyKey}:missing`;
       }
       if (options.forceOutboxPredicateMiss) {
-        outboxExecutionBindings[6] = `${idempotencyKey}:missing`;
+        outboxExecutionBindings[2] = `${idempotencyKey}:missing`;
       }
       const scratch = new Database(":memory:");
       try {
@@ -605,6 +609,15 @@ function retryingWriteHarness(
             created_at TEXT NOT NULL,
             statement_version INTEGER NOT NULL,
             statement_drift INTEGER NOT NULL
+          );
+          CREATE TABLE claim_projections (
+            claim_id TEXT PRIMARY KEY,
+            problem_id TEXT NOT NULL,
+            source_seq INTEGER NOT NULL,
+            projection_version INTEGER NOT NULL,
+            build_digest TEXT NOT NULL,
+            stale INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL
           );
           CREATE TABLE events (
             id TEXT PRIMARY KEY,
@@ -645,8 +658,11 @@ function retryingWriteHarness(
           )
           .run(problemId, idempotencyKey);
         scratch.run("INSERT INTO companion_effects (phase) VALUES ('pending'), ('settled')");
-        scratch.query(claimInsert.sql).run(...claimExecutionBindings);
         scratch.query(eventInsert.sql).run(...eventExecutionBindings);
+        scratch.query(claimInsert.sql).run(...claimExecutionBindings);
+        if (ownsPendingIdempotency) {
+          scratch.query(projectionInsert.sql).run(...projectionExecutionBindings);
+        }
         scratch.query(outboxInsert.sql).run(...outboxExecutionBindings);
         for (const current of observed) {
           if (
@@ -672,6 +688,12 @@ function retryingWriteHarness(
         persistedClaim = scratch
           .query("SELECT id, problem_id, statement, payload_sha256, source_seq FROM claims LIMIT 1")
           .get() as Record<string, unknown> | null;
+        persistedProjection = scratch
+          .query(
+            `SELECT claim_id, problem_id, source_seq, projection_version, build_digest, stale
+             FROM claim_projections LIMIT 1`,
+          )
+          .get() as Record<string, unknown> | null;
         persistedEvent = scratch
           .query(
             `SELECT id, problem_id, seq, type, object_kind, object_id, object_version,
@@ -690,22 +712,14 @@ function retryingWriteHarness(
       } finally {
         scratch.close();
       }
-      if (projectionSelects) {
-        persistedProjection = {
-          claim_id: projectionBindings[0],
-          problem_id: projectionBindings[4],
-          source_seq: nextSeq,
-          projection_version: 1,
-          build_digest: projectionBindings[1],
-          stale: 0,
-        };
+      if (persistedProjection !== null) {
         observedProjection = {
-          claimId: projectionBindings[0] as string,
-          problemId: projectionBindings[4] as string,
-          sourceSeq: nextSeq,
-          projectionVersion: 1,
-          buildDigest: projectionBindings[1] as string,
-          stale: false,
+          claimId: persistedProjection.claim_id as string,
+          problemId: persistedProjection.problem_id as string,
+          sourceSeq: Number(persistedProjection.source_seq),
+          projectionVersion: Number(persistedProjection.projection_version),
+          buildDigest: persistedProjection.build_digest as string,
+          stale: Number(persistedProjection.stale) !== 0,
         };
       }
       if (ownsPendingIdempotency) {

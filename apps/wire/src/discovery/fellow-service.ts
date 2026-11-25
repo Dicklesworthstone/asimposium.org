@@ -347,6 +347,23 @@ export async function loadFellowCard(
     transferEffectiveAt = null;
   }
 
+  // Fable §9.5: aggregate count of workshop force_note: true overrides.
+  // Only the integer count is projected; private workshop objects remain strictly private (Rule A2).
+  let forceNoteCount = 0;
+  try {
+    const forceNoteRow = await db
+      .prepare(
+        "SELECT COUNT(*) AS count FROM workshop_objects WHERE fellow_id = ? AND force_note = 1",
+      )
+      .bind(fellow.fellow_id)
+      .first<CountRecord>();
+    if (forceNoteRow && Number.isSafeInteger(forceNoteRow.count) && forceNoteRow.count >= 0) {
+      forceNoteCount = forceNoteRow.count;
+    }
+  } catch {
+    forceNoteCount = 0;
+  }
+
   // Last awaited read: calibration revalidates scientific witnesses and current
   // public cuts before release, just as the individual scientific faces do.
   const outcomes = await loadFellowCalibration(db, fellow.fellow_id);
@@ -374,6 +391,8 @@ export async function loadFellowCard(
       refutations_self_corrected: outcomes.selfCorrected,
       refutations_externally_refuted: outcomes.externallyRefuted,
       reviews_verified_survival: outcomes.survivingReviews,
+      claims_by_kind_and_disposition: outcomes.claimsByKindAndDisposition,
+      force_note_count: forceNoteCount,
     },
     omitted: [
       "private, unlisted and hidden problems are excluded from contribution and review lists and all activity counts",

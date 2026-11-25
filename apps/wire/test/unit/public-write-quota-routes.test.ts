@@ -1147,4 +1147,127 @@ describe("SQLite-backed unit checks: mounted public-write budgets", () => {
     expect(packExhausted.next_actions.some((a) => a.url.endsWith("/promote"))).toBe(false);
     expect(packExhausted.next_actions.some((a) => a.url.endsWith("/workshop"))).toBe(true);
   });
+
+  test("default finite sponsor cap applies when SPONSOR_PROMOTION_RATE_LIMIT is unset across Fellows (0qrf)", async () => {
+    const harness = await createQuotaTestHarness(); // sponsorLimit omitted!
+    const fellowA = await harness.registerFellow("default-cap-a", "usr_default_cap_sponsor");
+    const fellowB = await harness.registerFellow("default-cap-b", "usr_default_cap_sponsor");
+
+    const helloA = EnrollmentHelloResponseSchema.parse(
+      await (await fellowA.call("/v1/hello")).json(),
+    );
+    expect(helloA.promotion_budget?.sponsor_limit).toBe(60);
+    expect(helloA.promotion_budget?.sponsor_remaining).toBe(60);
+
+    const openA = (await (
+      await fellowA.call("/v1/sessions", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "open-cap-a" },
+        body: JSON.stringify({ problem_id: "P-4DSP", intent: "prove" }),
+      })
+    ).json()) as { session_id: string };
+    const draftA = (await (
+      await fellowA.call(`/v1/sessions/${openA.session_id}/workshop`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "draft-cap-a" },
+        body: JSON.stringify({ type: "claim-draft", title: "T", body_md: "B", relates_to: [] }),
+      })
+    ).json()) as { workshop_id: string };
+    const promoted = await fellowA.call(`/v1/sessions/${openA.session_id}/promote`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "promote-cap-a" },
+      body: JSON.stringify({
+        workshop_id: draftA.workshop_id,
+        kind: "theorem",
+        statement: "Shared sponsor cap decrements across peers.",
+        relates_to: [],
+      }),
+    });
+    expect(promoted.status).toBe(201);
+
+    const helloB = EnrollmentHelloResponseSchema.parse(
+      await (await fellowB.call("/v1/hello")).json(),
+    );
+    expect(helloB.promotion_budget?.sponsor_limit).toBe(60);
+    expect(helloB.promotion_budget?.sponsor_remaining).toBe(59);
+  });
+
+  test("reanchor and questions/:qid/answer obey shared public-write quota and refuse with 429 on exhaustion (0qrf)", async () => {
+    const harness = await createQuotaTestHarness({ sponsorLimit: 3 });
+    const fellow = await harness.registerFellow("reanchor-answer-quota", "usr_reanchor_sponsor");
+
+    const open = (await (
+      await fellow.call("/v1/sessions", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "open-ra" },
+        body: JSON.stringify({ problem_id: "P-4DSP", intent: "prove" }),
+      })
+    ).json()) as { session_id: string };
+
+    // 1. Promote a claim (uses quota 1/3)
+    const draft = (await (
+      await fellow.call(`/v1/sessions/${open.session_id}/workshop`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "draft-ra" },
+        body: JSON.stringify({ type: "claim-draft", title: "C", body_md: "Body", relates_to: [] }),
+      })
+    ).json()) as { workshop_id: string };
+    const promoteRes = await fellow.call(`/v1/sessions/${open.session_id}/promote`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "promote-ra" },
+      body: JSON.stringify({
+        workshop_id: draft.workshop_id,
+        kind: "conjecture",
+        statement: "Claim for reanchor and question-answer quota test.",
+        falsifier: "Counterexample falsifies.",
+        relates_to: [],
+        depends_on: [],
+      }),
+    });
+    expect(promoteRes.status).toBe(201);
+    const { claim_id } = (await promoteRes.json()) as { claim_id: string };
+
+    // 2. Ask a question (uses quota 2/3)
+    const askRes = await fellow.call(`/v1/sessions/${open.session_id}/questions`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "ask-ra" },
+      body: JSON.stringify({
+        body_md: "Does the bound hold for all positive integers?",
+        target_refs: [claim_id],
+      }),
+    });
+    expect(askRes.status).toBe(201);
+    const { question_id } = (await askRes.json()) as { question_id: string };
+
+    // 3. Reanchor the claim (uses quota 3/3)
+    const reanchorRes = await fellow.call(`/v1/sessions/${open.session_id}/reanchor`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "reanchor-ra" },
+      body: JSON.stringify({ claim_id, base_version: 1 }),
+    });
+    expect(reanchorRes.status).toBe(200);
+
+    // 4. Question answer now hits 429 PROMOTION_RATE_LIMITED with Retry-After (quota 3/3 exhausted)
+    const answerBlocked = await fellow.call(
+      `/v1/sessions/${open.session_id}/questions/${question_id}/answer`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "answer-ra-blocked" },
+        body: JSON.stringify({ resolved_by_object: `${claim_id}@1` }),
+      },
+    );
+    expect(answerBlocked.status).toBe(429);
+    expect(answerBlocked.headers.get("retry-after")).not.toBeNull();
+    expect((await answerBlocked.json()) as { code: string }).toMatchObject({
+      code: "PROMOTION_RATE_LIMITED",
+    });
+
+    // 5. Another reanchor also hits 429 PROMOTION_RATE_LIMITED
+    const reanchorBlocked = await fellow.call(`/v1/sessions/${open.session_id}/reanchor`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "reanchor-ra-blocked" },
+      body: JSON.stringify({ claim_id, base_version: 1 }),
+    });
+    expect(reanchorBlocked.status).toBe(429);
+  });
 });

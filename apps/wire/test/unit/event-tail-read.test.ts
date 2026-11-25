@@ -212,7 +212,8 @@ describe("W6.4 actual SQLite public event tail", () => {
         expect(body).toContain("dead_end.recorded");
         expect(body).not.toContain("PRIVATE-");
       }
-      expect(parseEventTailToon(renderEventTailToon(page)).events[0]).toMatchObject({
+      expect(parseEventTailToon(renderEventTailToon(page))).toEqual(page);
+      expect(parseEventTailToon(renderEventTailToon(page)).events[0]?.event).toMatchObject({
         type: "dead_end.recorded",
         object_id: "DE-1",
       });
@@ -331,7 +332,7 @@ describe("W6.4 actual SQLite public event tail", () => {
         expect(body).not.toContain("PRIVATE-");
       }
       expect(
-        parseEventTailToon(renderEventTailToon(page)).events.map((row) => row.object_id),
+        parseEventTailToon(renderEventTailToon(page)).events.map((row) => row.event?.object_id),
       ).toEqual(ids);
     } finally {
       f.sql.close();
@@ -473,7 +474,9 @@ describe("W6.4 actual SQLite public event tail", () => {
       expect(JSON.parse(renderEventTail(page, "ndjson").split("\n")[2]!).event.caused_by).toEqual(
         parents,
       );
-      expect(parseEventTailToon(renderEventTailToon(page)).events[2]?.caused_by).toEqual(parents);
+      expect(parseEventTailToon(renderEventTailToon(page)).events[2]?.event?.caused_by).toEqual(
+        parents,
+      );
       const markdown = renderEventTailMarkdown(page);
       expect(markdown).toContain("explicitly recorded as empty for this batch root");
       expect(markdown).toContain("not recorded; no empty parent set is asserted");

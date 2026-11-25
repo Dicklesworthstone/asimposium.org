@@ -9,7 +9,12 @@ import {
 import type { D1Database } from "@cloudflare/workers-types";
 import { inboxNoticeStatement } from "../inbox/notice-write";
 import { canonicalJson, sha256Hex } from "../krater/krater";
-import { AUTOMATED_REJECTION_DECIDED_BY, logScreeningCaseOutcome, mintModerationId } from "./store";
+import {
+  AUTOMATED_REJECTION_DECIDED_BY,
+  logScreeningCaseOutcome,
+  mintModerationId,
+  sponsorCaseActorId,
+} from "./store";
 
 export class ScreeningAppealError extends Error {
   constructor(readonly code: "NOT_FOUND" | "CONFLICT" | "STEP_UP" | "REVIEWER") {
@@ -35,6 +40,17 @@ const OWNED_CASE = `c.sponsor_id = ?1 AND f.sponsor_id = ?1 AND s.tombstoned_at 
   AND NOT EXISTS (SELECT 1 FROM private_draft_erasures e WHERE e.problem_id = c.problem_id)`;
 const JOIN_OWNER = `JOIN enrollment_fellows f ON f.fellow_id = c.fellow_id
   JOIN sponsors s ON s.sponsor_id = f.sponsor_id`;
+const OWNED_SPONSOR_CASE = `c.sponsor_id = ?1 AND s.tombstoned_at IS NULL
+  AND NOT EXISTS (SELECT 1 FROM sponsor_suspension_events se WHERE se.sponsor_id = s.sponsor_id)
+  AND NOT EXISTS (SELECT 1 FROM private_draft_erasures e WHERE e.problem_id = c.problem_id)`;
+const JOIN_SPONSOR_OWNER = `JOIN sponsors s ON s.sponsor_id = c.sponsor_id`;
+function isMissingSponsorAppealsTable(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    (error.message.includes("no such table: sponsor_screening_cases") ||
+      error.message.includes("no such table: sponsor_screening_case_appeals"))
+  );
+}
 function receipt(row: AppealRow) {
   return ScreeningAppealReceiptSchema.parse({
     appeal_id: row.appeal_id,
@@ -50,15 +66,39 @@ async function keyDigest(key: string) {
   return sha256Hex(key);
 }
 export async function sponsorScreeningCases(db: D1Database, sponsorId: string, caseId?: string) {
-  const rows = await db
-    .prepare(`SELECT c.*, a.appeal_id, a.state AS appeal_state,
-    a.submitted_at, a.decided_at AS appeal_decided_at, a.audit_event_id
-    FROM screening_cases c ${JOIN_OWNER}
-    LEFT JOIN screening_case_appeals a ON a.case_id = c.case_id
-    WHERE ${OWNED_CASE} AND (?2 IS NULL OR c.case_id = ?2)
-    ORDER BY c.created_at DESC, c.case_id DESC LIMIT 51`)
-    .bind(sponsorId, caseId ?? null)
-    .all<Record<string, unknown>>();
+  let rows: { results: Record<string, unknown>[] };
+  try {
+    rows = await db
+      .prepare(`SELECT * FROM (
+        SELECT c.case_id, c.problem_id, c.fellow_id, c.route, c.state, c.created_at,
+        a.appeal_id, a.state AS appeal_state,
+        a.submitted_at, a.decided_at AS appeal_decided_at, a.audit_event_id
+        FROM screening_cases c ${JOIN_OWNER}
+        LEFT JOIN screening_case_appeals a ON a.case_id = c.case_id
+        WHERE ${OWNED_CASE} AND (?2 IS NULL OR c.case_id = ?2)
+        UNION ALL
+        SELECT c.case_id, c.problem_id, 'sponsor:' || c.sponsor_id AS fellow_id, c.route, c.state,
+        c.created_at, a.appeal_id, a.state AS appeal_state,
+        a.submitted_at, a.decided_at AS appeal_decided_at, a.audit_event_id
+        FROM sponsor_screening_cases c ${JOIN_SPONSOR_OWNER}
+        LEFT JOIN sponsor_screening_case_appeals a ON a.case_id = c.case_id
+        WHERE ${OWNED_SPONSOR_CASE} AND (?2 IS NULL OR c.case_id = ?2)
+      )
+      ORDER BY created_at DESC, case_id DESC LIMIT 51`)
+      .bind(sponsorId, caseId ?? null)
+      .all<Record<string, unknown>>();
+  } catch (error) {
+    if (!isMissingSponsorAppealsTable(error)) throw error;
+    rows = await db
+      .prepare(`SELECT c.*, a.appeal_id, a.state AS appeal_state,
+      a.submitted_at, a.decided_at AS appeal_decided_at, a.audit_event_id
+      FROM screening_cases c ${JOIN_OWNER}
+      LEFT JOIN screening_case_appeals a ON a.case_id = c.case_id
+      WHERE ${OWNED_CASE} AND (?2 IS NULL OR c.case_id = ?2)
+      ORDER BY c.created_at DESC, c.case_id DESC LIMIT 51`)
+      .bind(sponsorId, caseId ?? null)
+      .all<Record<string, unknown>>();
+  }
   return SponsorScreeningCasesResponseSchema.parse({
     has_more: rows.results.length > 50,
     cases: rows.results.slice(0, 50).map((row) => ({
@@ -90,16 +130,33 @@ export async function submitScreeningAppeal(
   const keyHash = await keyDigest(key),
     digest = await sha256Hex(canonicalJson(request));
   // Replays also recheck current ownership; old sponsorship cannot read an appeal.
-  const owned = await db
+  let sponsorOwned = false;
+  let owned = await db
     .prepare(`SELECT c.coarse_category, c.decided_by FROM screening_cases c ${JOIN_OWNER}
     WHERE ${OWNED_CASE} AND c.case_id = ?2 AND c.state = 'rejected'`)
     .bind(sponsorId, request.case_id)
     .first<{ coarse_category: string; decided_by: string }>();
+  if (!owned) {
+    try {
+      owned = await db
+        .prepare(`SELECT c.coarse_category, c.decided_by FROM sponsor_screening_cases c ${JOIN_SPONSOR_OWNER}
+        WHERE ${OWNED_SPONSOR_CASE} AND c.case_id = ?2 AND c.state = 'rejected'`)
+        .bind(sponsorId, request.case_id)
+        .first<{ coarse_category: string; decided_by: string }>();
+      if (owned) sponsorOwned = true;
+    } catch (error) {
+      if (!isMissingSponsorAppealsTable(error)) throw error;
+    }
+  }
   if (!owned) throw new ScreeningAppealError("NOT_FOUND");
+  const appealTable = sponsorOwned ? "sponsor_screening_case_appeals" : "screening_case_appeals";
+  const caseTable = sponsorOwned ? "sponsor_screening_cases" : "screening_cases";
+  const joinOwner = sponsorOwned ? JOIN_SPONSOR_OWNER : JOIN_OWNER;
+  const ownedCase = sponsorOwned ? OWNED_SPONSOR_CASE : OWNED_CASE;
   const prior = await db
-    .prepare(`SELECT a.* FROM screening_case_appeals a
-    JOIN screening_cases c ON c.case_id = a.case_id ${JOIN_OWNER}
-    WHERE ${OWNED_CASE} AND a.sponsor_id = ?1 AND (a.key_hash = ?2 OR a.case_id = ?3)`)
+    .prepare(`SELECT a.* FROM ${appealTable} a
+    JOIN ${caseTable} c ON c.case_id = a.case_id ${joinOwner}
+    WHERE ${ownedCase} AND a.sponsor_id = ?1 AND (a.key_hash = ?2 OR a.case_id = ?3)`)
     .bind(sponsorId, keyHash, request.case_id)
     .all<AppealRow>();
   if (prior.results.length) {
@@ -116,7 +173,7 @@ export async function submitScreeningAppeal(
   }
   const appealId = mintModerationId("AP");
   await db
-    .prepare(`INSERT INTO screening_case_appeals
+    .prepare(`INSERT INTO ${appealTable}
     (appeal_id,case_id,sponsor_id,statement,request_digest,key_hash,submitted_at)
     VALUES(?,?,?,?,?,?,?) ON CONFLICT DO NOTHING`)
     .bind(
@@ -130,9 +187,9 @@ export async function submitScreeningAppeal(
     )
     .run();
   const row = await db
-    .prepare(`SELECT a.* FROM screening_case_appeals a
-    JOIN screening_cases c ON c.case_id = a.case_id ${JOIN_OWNER}
-    WHERE ${OWNED_CASE} AND a.sponsor_id = ?1 AND a.key_hash = ?2`)
+    .prepare(`SELECT a.* FROM ${appealTable} a
+    JOIN ${caseTable} c ON c.case_id = a.case_id ${joinOwner}
+    WHERE ${ownedCase} AND a.sponsor_id = ?1 AND a.key_hash = ?2`)
     .bind(sponsorId, keyHash)
     .first<AppealRow>();
   if (!row || row.case_id !== request.case_id || row.request_digest !== digest)
@@ -148,22 +205,50 @@ export async function submitScreeningAppeal(
   return receipt(row);
 }
 export async function operatorScreeningAppeals(db: D1Database, appealId?: string) {
-  const rows = await db
-    .prepare(`SELECT a.*, c.problem_id, c.fellow_id, c.decided_by AS original_operator_id
-    FROM screening_case_appeals a JOIN screening_cases c ON c.case_id = a.case_id
-    ${JOIN_OWNER} WHERE ((?1 IS NULL AND a.state = 'pending') OR a.appeal_id = ?1) AND c.state = 'rejected'
-      AND c.sponsor_id = a.sponsor_id AND f.sponsor_id = a.sponsor_id AND s.tombstoned_at IS NULL
-      AND NOT EXISTS (SELECT 1 FROM private_draft_erasures e WHERE e.problem_id = c.problem_id)
-    ORDER BY a.submitted_at, a.appeal_id LIMIT 51`)
-    .bind(appealId ?? null)
-    .all<
-      AppealRow & {
-        problem_id: string;
-        fellow_id: string;
-        original_operator_id: string;
-        route: string;
-      }
-    >();
+  type OperatorAppealQueryRow = AppealRow & {
+    problem_id: string;
+    fellow_id: string;
+    original_operator_id: string;
+    route: string;
+  };
+  let rows: { results: OperatorAppealQueryRow[] };
+  try {
+    rows = await db
+      .prepare(`SELECT * FROM (
+        SELECT a.appeal_id, a.case_id, a.sponsor_id, a.statement, a.request_digest,
+        a.key_hash, a.submitted_at, a.state, a.decided_at, a.decided_by, a.decision_digest,
+        a.decision_key_hash, a.audit_event_id, c.problem_id, c.fellow_id,
+        c.decided_by AS original_operator_id, c.route
+        FROM screening_case_appeals a JOIN screening_cases c ON c.case_id = a.case_id
+        ${JOIN_OWNER} WHERE ((?1 IS NULL AND a.state = 'pending') OR a.appeal_id = ?1) AND c.state = 'rejected'
+          AND c.sponsor_id = a.sponsor_id AND f.sponsor_id = a.sponsor_id AND s.tombstoned_at IS NULL
+          AND NOT EXISTS (SELECT 1 FROM private_draft_erasures e WHERE e.problem_id = c.problem_id)
+        UNION ALL
+        SELECT a.appeal_id, a.case_id, a.sponsor_id, a.statement, a.request_digest,
+        a.key_hash, a.submitted_at, a.state, a.decided_at, a.decided_by, a.decision_digest,
+        a.decision_key_hash, a.audit_event_id, c.problem_id, 'sponsor:' || c.sponsor_id AS fellow_id,
+        c.decided_by AS original_operator_id, c.route
+        FROM sponsor_screening_case_appeals a JOIN sponsor_screening_cases c ON c.case_id = a.case_id
+        ${JOIN_SPONSOR_OWNER} WHERE ((?1 IS NULL AND a.state = 'pending') OR a.appeal_id = ?1) AND c.state = 'rejected'
+          AND c.sponsor_id = a.sponsor_id AND s.tombstoned_at IS NULL
+          AND NOT EXISTS (SELECT 1 FROM sponsor_suspension_events se WHERE se.sponsor_id = s.sponsor_id)
+          AND NOT EXISTS (SELECT 1 FROM private_draft_erasures e WHERE e.problem_id = c.problem_id)
+      )
+      ORDER BY submitted_at, appeal_id LIMIT 51`)
+      .bind(appealId ?? null)
+      .all<OperatorAppealQueryRow>();
+  } catch (error) {
+    if (!isMissingSponsorAppealsTable(error)) throw error;
+    rows = await db
+      .prepare(`SELECT a.*, c.problem_id, c.fellow_id, c.decided_by AS original_operator_id, c.route
+      FROM screening_case_appeals a JOIN screening_cases c ON c.case_id = a.case_id
+      ${JOIN_OWNER} WHERE ((?1 IS NULL AND a.state = 'pending') OR a.appeal_id = ?1) AND c.state = 'rejected'
+        AND c.sponsor_id = a.sponsor_id AND f.sponsor_id = a.sponsor_id AND s.tombstoned_at IS NULL
+        AND NOT EXISTS (SELECT 1 FROM private_draft_erasures e WHERE e.problem_id = c.problem_id)
+      ORDER BY a.submitted_at, a.appeal_id LIMIT 51`)
+      .bind(appealId ?? null)
+      .all<OperatorAppealQueryRow>();
+  }
   return OperatorScreeningAppealsResponseSchema.parse({
     has_more: rows.results.length > 50,
     appeals: rows.results.slice(0, 50).map((row) => ({
@@ -202,7 +287,15 @@ export async function decideScreeningAppeal(
       reason: request.reason,
     }),
   );
-  const row = await db
+  type DecisionRow = AppealRow & {
+    fellow_id: string;
+    problem_id: string;
+    coarse_category: string;
+    original_operator_id: string;
+    route: string;
+  };
+  let sponsorOwned = false;
+  let row = await db
     .prepare(`SELECT a.*, c.fellow_id, c.problem_id, c.coarse_category, c.route,
     c.decided_by AS original_operator_id FROM screening_case_appeals a
     JOIN screening_cases c ON c.case_id = a.case_id ${JOIN_OWNER}
@@ -210,15 +303,27 @@ export async function decideScreeningAppeal(
       AND f.sponsor_id = a.sponsor_id AND s.tombstoned_at IS NULL
       AND NOT EXISTS (SELECT 1 FROM private_draft_erasures e WHERE e.problem_id = c.problem_id)`)
     .bind(request.appeal_id)
-    .first<
-      AppealRow & {
-        fellow_id: string;
-        problem_id: string;
-        coarse_category: string;
-        original_operator_id: string;
-        route: string;
+    .first<DecisionRow>();
+  if (!row) {
+    try {
+      const sponsorRow = await db
+        .prepare(`SELECT a.*, c.problem_id, c.coarse_category, c.route,
+        c.decided_by AS original_operator_id FROM sponsor_screening_case_appeals a
+        JOIN sponsor_screening_cases c ON c.case_id = a.case_id ${JOIN_SPONSOR_OWNER}
+        WHERE a.appeal_id = ? AND c.state = 'rejected' AND c.sponsor_id = a.sponsor_id
+          AND s.tombstoned_at IS NULL
+          AND NOT EXISTS (SELECT 1 FROM sponsor_suspension_events se WHERE se.sponsor_id = s.sponsor_id)
+          AND NOT EXISTS (SELECT 1 FROM private_draft_erasures e WHERE e.problem_id = c.problem_id)`)
+        .bind(request.appeal_id)
+        .first<Omit<DecisionRow, "fellow_id">>();
+      if (sponsorRow) {
+        row = { ...sponsorRow, fellow_id: sponsorCaseActorId(sponsorRow.sponsor_id) };
+        sponsorOwned = true;
       }
-    >();
+    } catch (error) {
+      if (!isMissingSponsorAppealsTable(error)) throw error;
+    }
+  }
   if (!row) throw new ScreeningAppealError("NOT_FOUND");
   if (
     operatorId === row.sponsor_id ||
@@ -238,11 +343,11 @@ export async function decideScreeningAppeal(
   const at = new Date().toISOString(),
     auditId = mintModerationId("OA");
   const state = request.decision === "release" ? "released" : "upheld";
-  const guard =
-    "EXISTS(SELECT 1 FROM screening_case_appeals WHERE appeal_id = ? AND audit_event_id = ?)";
+  const appealTable = sponsorOwned ? "sponsor_screening_case_appeals" : "screening_case_appeals";
+  const guard = `EXISTS(SELECT 1 FROM ${appealTable} WHERE appeal_id = ? AND audit_event_id = ?)`;
   await db.batch([
     db
-      .prepare(`UPDATE screening_case_appeals SET state = ?, decided_at = ?, decided_by = ?,
+      .prepare(`UPDATE ${appealTable} SET state = ?, decided_at = ?, decided_by = ?,
       decision_reason = ?, decision_key_hash = ?, decision_digest = ?, audit_event_id = ?
       WHERE appeal_id = ? AND state = 'pending'`)
       .bind(state, at, operatorId, request.reason, keyHash, digest, auditId, row.appeal_id),
@@ -276,31 +381,35 @@ export async function decideScreeningAppeal(
         row.appeal_id,
         auditId,
       ),
-    await inboxNoticeStatement(
-      db,
-      {
-        fellowId: row.fellow_id,
-        problemId: row.problem_id,
-        noticeType: "moderation_outcome",
-        title:
-          state === "released"
-            ? "A screening appeal was released"
-            : "A screening appeal was upheld",
-        detail:
-          state === "released"
-            ? row.route === "artifact-publications"
-              ? `Case ${row.case_id}: the sponsor's appeal approved the held artifact. Read its publication status and use its recovery action with a current owned session. Fresh consent and unchanged sources are required before publication.`
-              : `Case ${row.case_id}: the sponsor's appeal was released. Resubmit exactly the original request to publish after the current authorization and context checks. No content was published by the appeal.`
-            : `Case ${row.case_id}: a different reviewer upheld the rejection after considering the sponsor's appeal. No content was published.`,
-        causedByEventId: auditId,
-        targetId: row.case_id,
-        createdAt: Date.parse(at),
-      },
-      { sql: guard, bindings: [row.appeal_id, auditId] },
-    ),
+    ...(sponsorOwned
+      ? []
+      : [
+          await inboxNoticeStatement(
+            db,
+            {
+              fellowId: row.fellow_id,
+              problemId: row.problem_id,
+              noticeType: "moderation_outcome",
+              title:
+                state === "released"
+                  ? "A screening appeal was released"
+                  : "A screening appeal was upheld",
+              detail:
+                state === "released"
+                  ? row.route === "artifact-publications"
+                    ? `Case ${row.case_id}: the sponsor's appeal approved the held artifact. Read its publication status and use its recovery action with a current owned session. Fresh consent and unchanged sources are required before publication.`
+                    : `Case ${row.case_id}: the sponsor's appeal was released. Resubmit exactly the original request to publish after the current authorization and context checks. No content was published by the appeal.`
+                  : `Case ${row.case_id}: a different reviewer upheld the rejection after considering the sponsor's appeal. No content was published.`,
+              causedByEventId: auditId,
+              targetId: row.case_id,
+              createdAt: Date.parse(at),
+            },
+            { sql: guard, bindings: [row.appeal_id, auditId] },
+          ),
+        ]),
   ]);
   const decided = await db
-    .prepare("SELECT * FROM screening_case_appeals WHERE appeal_id = ?")
+    .prepare(`SELECT * FROM ${appealTable} WHERE appeal_id = ?`)
     .bind(row.appeal_id)
     .first<AppealRow>();
   if (

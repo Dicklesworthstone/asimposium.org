@@ -1,7 +1,9 @@
 import {
   roomCursor,
+  roomId,
   roomName,
   roomProblem,
+  workshopRoomName,
 } from "../../../../packages/contracts/src/herald-room-model.ts";
 
 export interface HeraldDatabase {
@@ -131,4 +133,53 @@ export async function deliverHeraldRooms(
     }
   }
   return report;
+}
+
+/** Best-effort wake for a private sponsor workshop room after a committed
+ * workshop_objects insert. Sends only a nonnegative integer cursor hint; the
+ * workshop room DO always re-verifies live D1 authorization and reads D1 head. */
+export async function nudgeWorkshopRoom(
+  namespace: HeraldNamespace | undefined,
+  fellowId: string,
+  problemId: string,
+  cursor: number,
+): Promise<void> {
+  if (
+    namespace === undefined ||
+    !roomId(fellowId) ||
+    !roomProblem(problemId) ||
+    !roomCursor(cursor)
+  ) {
+    return;
+  }
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const deadline = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => {
+        controller.abort();
+        reject(new Error("HERALD_WORKSHOP_NUDGE_TIMEOUT"));
+      }, 3_000);
+    });
+    const attempt = Promise.resolve().then(async () => {
+      const stub = namespace.get(namespace.idFromName(workshopRoomName(fellowId, problemId)));
+      const response = await stub.fetch(
+        new Request(
+          `https://herald.internal/_herald/workshop/${encodeURIComponent(fellowId)}/${encodeURIComponent(problemId)}/nudge`,
+          {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ cursor }),
+            signal: controller.signal,
+          },
+        ),
+      );
+      void response.body?.cancel().catch(() => {});
+    });
+    await Promise.race([attempt, deadline]);
+  } catch {
+    // Best-effort liveness nudge; committed workshop write stays authoritative.
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
 }

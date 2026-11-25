@@ -1122,4 +1122,125 @@ describe("pure table/property tests: getRemainingBudget and problem formatting",
     expect(body.fix_hint).toContain("smaller complete batch with its causal dependencies included");
     expect(response.headers.get("ratelimit-remaining")).toBe("3");
   });
+
+  test("sponsor commentary attempts share the sponsor hourly budget with Fellow promotions and batches (Wave 19)", async () => {
+    const db = testDb();
+    const now = 1_700_000_000_000;
+    const sponsorId = "usr_shared_cap";
+    const problemId = "P-SHARED";
+    const digest = "a".repeat(64);
+
+    // Seed 2 sponsor commentary attempts within the rolling hour.
+    for (let i = 0; i < 2; i++) {
+      await db
+        .prepare(
+          `INSERT INTO sponsor_commentary_attempt_reservations (
+             reservation_id, sponsor_id, problem_id, idempotency_key,
+             request_digest, reserved_at, expires_at, status
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, 'settled_published')`,
+        )
+        .bind(
+          `CQ-shared-${i}`,
+          sponsorId,
+          problemId,
+          `comm-k-${i}`,
+          digest,
+          now - 10_000 + i * 1_000,
+          now + 50_000,
+        )
+        .run();
+    }
+
+    // Budget reflects the 2 commentary attempts against sponsorLimit = 3.
+    const budget = await getRemainingBudget(db, {
+      fellowId: "fel_shared",
+      problemId,
+      sponsorId,
+      sponsorLimit: 3,
+      now,
+    });
+    expect(budget.sponsor_limit).toBe(3);
+    expect(budget.sponsor_remaining).toBe(1);
+
+    // A 2-member batch is refused because only 1 shared sponsor slot remains.
+    const batchRefused = await checkAndReserveQuotaBatch(db, {
+      fellowId: "fel_shared",
+      problemId,
+      sponsorId,
+      sessionId: "S-shared",
+      members: [
+        { route: "promote", idempotencyKey: "b-1", requestDigest: digest },
+        { route: "promote", idempotencyKey: "b-2", requestDigest: digest },
+      ],
+      sponsorLimit: 3,
+      now,
+    });
+    expect(batchRefused.allowed).toBe(false);
+    if (!batchRefused.allowed) {
+      expect(batchRefused.reason).toBe("RATE_LIMITED");
+      if (batchRefused.reason === "RATE_LIMITED") {
+        expect(batchRefused.dimension).toBe("sponsor");
+        expect(batchRefused.retryAfterSeconds).toBeGreaterThan(3500);
+      }
+    }
+
+    // One single promotion consumes the 3rd and final shared sponsor slot.
+    const thirdAllowed = await checkAndReserveQuota(db, {
+      fellowId: "fel_shared",
+      problemId,
+      sponsorId,
+      sessionId: "S-shared",
+      route: "promote",
+      idempotencyKey: "p-3",
+      requestDigest: digest,
+      sponsorLimit: 3,
+      now,
+    });
+    expect(thirdAllowed.allowed).toBe(true);
+    if (thirdAllowed.allowed) {
+      expect(thirdAllowed.budget.sponsor_remaining).toBe(0);
+    }
+
+    // The 4th combined attempt (2nd promotion) is blocked by the shared sponsor hourly cap.
+    const fourthRefused = await checkAndReserveQuota(db, {
+      fellowId: "fel_shared",
+      problemId,
+      sponsorId,
+      sessionId: "S-shared",
+      route: "promote",
+      idempotencyKey: "p-4",
+      requestDigest: digest,
+      sponsorLimit: 3,
+      now: now + 500,
+    });
+    expect(fourthRefused.allowed).toBe(false);
+    if (!fourthRefused.allowed) {
+      expect(fourthRefused.reason).toBe("RATE_LIMITED");
+      if (fourthRefused.reason === "RATE_LIMITED") {
+        expect(fourthRefused.dimension).toBe("sponsor");
+        expect(fourthRefused.budget.sponsor_remaining).toBe(0);
+      }
+    }
+
+    // Wave 20: retrying the exact same in-flight key that holds the sponsor's final
+    // hourly slot must return IN_FLIGHT_CONFLICT (Retry-After: 1), never RATE_LIMITED (3600).
+    const sameKeyRetry = await checkAndReserveQuota(db, {
+      fellowId: "fel_shared",
+      problemId,
+      sponsorId,
+      sessionId: "S-shared",
+      route: "promote",
+      idempotencyKey: "p-3",
+      requestDigest: digest,
+      sponsorLimit: 3,
+      now: now + 600,
+    });
+    expect(sameKeyRetry.allowed).toBe(false);
+    if (!sameKeyRetry.allowed) {
+      expect(sameKeyRetry.reason).toBe("IN_FLIGHT_CONFLICT");
+      if (sameKeyRetry.reason === "IN_FLIGHT_CONFLICT") {
+        expect(sameKeyRetry.retryAfterSeconds).toBe(1);
+      }
+    }
+  });
 });

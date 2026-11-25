@@ -69,6 +69,13 @@ export type QuotaBatchCheckResult =
       readonly budget: RateLimitBudget;
     };
 
+function isMissingCommentaryAttemptsTable(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    error.message.includes("no such table: sponsor_commentary_attempt_reservations")
+  );
+}
+
 /**
  * Parse and validate configured sponsor promotion rate limit (Rule A5 / 0qrf).
  * - undefined, null, or blank string: returns `DEFAULT_SPONSOR_PROMOTION_RATE_LIMIT_PER_HOUR` (60/hr)
@@ -146,6 +153,41 @@ async function quotaRetryDelay(
     if (count > capacity) return Number.POSITIVE_INFINITY;
     // Count and the required expiry share one database snapshot. Only the
     // indexed timestamp is returned; no attempt history leaves storage.
+    if (dimension === "sponsor") {
+      const sponsorId = params.sponsorId ?? "";
+      const windowStart = params.now - PROMOTION_RATE_LIMIT_WINDOW_MS;
+      try {
+        const row = await db
+          .prepare(`WITH sponsor_attempts AS (
+            SELECT reserved_at, reservation_id FROM public_write_attempt_reservations
+             WHERE sponsor_id = ? AND reserved_at > ?
+            UNION ALL
+            SELECT reserved_at, reservation_id FROM sponsor_commentary_attempt_reservations
+             WHERE sponsor_id = ? AND reserved_at > ?
+          )
+          SELECT CASE WHEN COUNT(*) + ? <= ? THEN ? ELSE (
+            SELECT reserved_at + ? FROM sponsor_attempts
+             ORDER BY reserved_at, reservation_id LIMIT 1
+             OFFSET (SELECT MAX(0, COUNT(*) + ? - ? - 1) FROM sponsor_attempts)
+          ) END AS available_at FROM sponsor_attempts`)
+          .bind(
+            sponsorId,
+            windowStart,
+            sponsorId,
+            windowStart,
+            count,
+            capacity,
+            params.now,
+            PROMOTION_RATE_LIMIT_WINDOW_MS,
+            count,
+            capacity,
+          )
+          .first<{ available_at: number | null }>();
+        return row?.available_at ?? params.now + PROMOTION_RATE_LIMIT_WINDOW_MS;
+      } catch (error) {
+        if (!isMissingCommentaryAttemptsTable(error)) throw error;
+      }
+    }
     const row = await db
       .prepare(`SELECT CASE WHEN COUNT(*) + ? <= ? THEN ? ELSE (
       SELECT reserved_at + ? FROM public_write_attempt_reservations
@@ -267,9 +309,11 @@ export async function checkAndReserveQuota(
   // 2. Every attempted reservation consumes capacity, including uncertain,
   // lost or recovered attempts. Read the same policy exposed by hello/pack.
   const initialBudget = await getRemainingBudget(db, budgetParams);
-  if (initialBudget.sponsor_remaining === 0) return refuse("sponsor", initialBudget);
 
-  // 4. Check for in-flight reservation for this exact (fellow_id, route, idempotency_key)
+  // 3. Check for an active in-flight reservation for this exact
+  // (fellow_id, route, idempotency_key) BEFORE refusing on exhausted budget,
+  // so retrying a request that holds the final Fellow or sponsor slot returns
+  // IN_FLIGHT_CONFLICT (Retry-After: 1) rather than 429 RATE_LIMITED (3600s).
   const inflight = await db
     .prepare(
       `SELECT reservation_id, request_digest, expires_at
@@ -291,34 +335,104 @@ export async function checkAndReserveQuota(
     return { allowed: false, reason: "IN_FLIGHT_CONFLICT", retryAfterSeconds: 1 };
   }
 
+  if (initialBudget.sponsor_remaining === 0) return refuse("sponsor", initialBudget);
   if (initialBudget.remaining === 0) return refuse("fellow_problem", initialBudget);
 
-  // 5. Atomic reservation insert
+  // 5. Atomic reservation insert (enforces combined sponsor hourly budget across
+  // Fellow promotions and sponsor commentary attempts in a single SQL statement).
   const reservationId = `Q-${crypto.randomUUID()}`;
   const expiresAt = now + RESERVATION_EXPIRY_MS;
+  const windowStart = now - PROMOTION_RATE_LIMIT_WINDOW_MS;
 
   try {
-    await db
-      .prepare(
-        `INSERT INTO public_write_attempt_reservations (
-           reservation_id, fellow_id, problem_id, sponsor_id, session_id,
-           route, idempotency_key, request_digest, reserved_at, expires_at, sponsor_limit, status
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'reserved')`,
-      )
-      .bind(
-        reservationId,
-        params.fellowId,
-        params.problemId,
-        params.sponsorId,
-        params.sessionId,
-        params.route,
-        params.idempotencyKey,
-        params.requestDigest,
-        now,
-        expiresAt,
-        sponsorLimit,
-      )
-      .run();
+    let insertedChanges = 1;
+    try {
+      const insertResult = await db
+        .prepare(
+          `INSERT INTO public_write_attempt_reservations (
+             reservation_id, fellow_id, problem_id, sponsor_id, session_id,
+             route, idempotency_key, request_digest, reserved_at, expires_at, sponsor_limit, status
+           ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'reserved'
+              WHERE (
+                (SELECT COUNT(*) FROM public_write_attempt_reservations
+                  WHERE sponsor_id = ? AND reserved_at > ?) +
+                (SELECT COUNT(*) FROM sponsor_commentary_attempt_reservations
+                  WHERE sponsor_id = ? AND reserved_at > ?)
+              ) < ?`,
+        )
+        .bind(
+          reservationId,
+          params.fellowId,
+          params.problemId,
+          params.sponsorId,
+          params.sessionId,
+          params.route,
+          params.idempotencyKey,
+          params.requestDigest,
+          now,
+          expiresAt,
+          sponsorLimit,
+          params.sponsorId,
+          windowStart,
+          params.sponsorId,
+          windowStart,
+          sponsorLimit,
+        )
+        .run();
+      insertedChanges = insertResult.meta?.changes ?? 1;
+    } catch (innerError) {
+      if (!isMissingCommentaryAttemptsTable(innerError)) throw innerError;
+      await db
+        .prepare(
+          `INSERT INTO public_write_attempt_reservations (
+             reservation_id, fellow_id, problem_id, sponsor_id, session_id,
+             route, idempotency_key, request_digest, reserved_at, expires_at, sponsor_limit, status
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'reserved')`,
+        )
+        .bind(
+          reservationId,
+          params.fellowId,
+          params.problemId,
+          params.sponsorId,
+          params.sessionId,
+          params.route,
+          params.idempotencyKey,
+          params.requestDigest,
+          now,
+          expiresAt,
+          sponsorLimit,
+        )
+        .run();
+    }
+    if (insertedChanges === 0) {
+      // Distinguish a concurrent same-key in-flight retry on the final sponsor slot
+      // (Retry-After: 1) from a new request exceeding the shared hourly sponsor budget.
+      const racedInflight = await db
+        .prepare(
+          `SELECT reservation_id
+             FROM public_write_attempt_reservations
+            WHERE fellow_id = ?
+              AND route = ?
+              AND idempotency_key = ?
+              AND status = 'reserved'
+              AND expires_at > ?
+            LIMIT 1`,
+        )
+        .bind(params.fellowId, params.route, params.idempotencyKey, now)
+        .first<{ reservation_id: string }>();
+      if (racedInflight !== null && racedInflight !== undefined) {
+        await logQuotaDecision({
+          route: params.route,
+          fellowId: params.fellowId,
+          problemId: params.problemId,
+          sponsorId: params.sponsorId,
+          decision: "conflict",
+          durationMs: Date.now() - startTime,
+        });
+        return { allowed: false, reason: "IN_FLIGHT_CONFLICT", retryAfterSeconds: 1 };
+      }
+      return refuse("sponsor", await getRemainingBudget(db, budgetParams));
+    }
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
     if (msg.includes("SPONSOR_PROMOTION_RATE_LIMIT_EXCEEDED")) {
@@ -422,13 +536,43 @@ export async function checkAndReserveQuotaBatch(
     return quotaRefusal(db, budgetParams, count, budget, dimension);
   };
   const initialBudget = await getRemainingBudget(db, budgetParams);
+  const hasInFlightMember = async (): Promise<boolean> => {
+    for (const member of params.members) {
+      const existing = await db
+        .prepare(
+          `SELECT reservation_id
+             FROM public_write_attempt_reservations
+            WHERE fellow_id = ?
+              AND route = ?
+              AND idempotency_key = ?
+              AND status = 'reserved'
+              AND expires_at > ?
+            LIMIT 1`,
+        )
+        .bind(params.fellowId, member.route, member.idempotencyKey, now)
+        .first<{ reservation_id: string }>();
+      if (existing !== null && existing !== undefined) return true;
+    }
+    return false;
+  };
   if (
     initialBudget.sponsor_remaining !== null &&
     initialBudget.sponsor_remaining !== undefined &&
     initialBudget.sponsor_remaining < count
-  )
+  ) {
+    if (sponsorLimit > 0 && count <= sponsorLimit && (await hasInFlightMember())) {
+      await log("conflict");
+      return { allowed: false, reason: "IN_FLIGHT_CONFLICT", retryAfterSeconds: 1 };
+    }
     return rateLimited(initialBudget, "sponsor");
-  if (initialBudget.remaining < count) return rateLimited(initialBudget, "fellow_problem");
+  }
+  if (initialBudget.remaining < count) {
+    if (count <= initialBudget.limit && (await hasInFlightMember())) {
+      await log("conflict");
+      return { allowed: false, reason: "IN_FLIGHT_CONFLICT", retryAfterSeconds: 1 };
+    }
+    return rateLimited(initialBudget, "fellow_problem");
+  }
 
   const reservations: QuotaReservation[] = params.members.map((member) => ({
     reservationId: `Q-${crypto.randomUUID()}`,
@@ -441,35 +585,54 @@ export async function checkAndReserveQuotaBatch(
     expiresAt: now + RESERVATION_EXPIRY_MS,
     status: "reserved",
   }));
-  try {
-    await db.batch([
-      db
-        .prepare(`UPDATE public_write_attempt_reservations SET status = 'recovered'
+  const batchStatements = [
+    db
+      .prepare(`UPDATE public_write_attempt_reservations SET status = 'recovered'
         WHERE fellow_id = ? AND status = 'reserved' AND expires_at <= ?`)
-        .bind(params.fellowId, now),
-      ...reservations.map((reservation) =>
-        db
-          .prepare(
-            `INSERT INTO public_write_attempt_reservations (
+      .bind(params.fellowId, now),
+    ...reservations.map((reservation) =>
+      db
+        .prepare(
+          `INSERT INTO public_write_attempt_reservations (
           reservation_id, fellow_id, problem_id, sponsor_id, session_id,
           route, idempotency_key, request_digest, reserved_at, expires_at, sponsor_limit, status
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'reserved')`,
+        )
+        .bind(
+          reservation.reservationId,
+          reservation.fellowId,
+          reservation.problemId,
+          reservation.sponsorId,
+          reservation.sessionId,
+          reservation.route,
+          reservation.idempotencyKey,
+          reservation.requestDigest,
+          now,
+          reservation.expiresAt,
+          sponsorLimit,
+        ),
+    ),
+  ];
+  const windowStart = now - PROMOTION_RATE_LIMIT_WINDOW_MS;
+  try {
+    try {
+      await db.batch([
+        ...batchStatements,
+        db
+          .prepare(
+            `SELECT CASE WHEN (
+               (SELECT COUNT(*) FROM public_write_attempt_reservations
+                 WHERE sponsor_id = ? AND reserved_at > ?) +
+               (SELECT COUNT(*) FROM sponsor_commentary_attempt_reservations
+                 WHERE sponsor_id = ? AND reserved_at > ?)
+             ) <= ? THEN 1 ELSE json_extract('[]', '$[SPONSOR_PROMOTION_RATE_LIMIT_EXCEEDED]') END`,
           )
-          .bind(
-            reservation.reservationId,
-            reservation.fellowId,
-            reservation.problemId,
-            reservation.sponsorId,
-            reservation.sessionId,
-            reservation.route,
-            reservation.idempotencyKey,
-            reservation.requestDigest,
-            now,
-            reservation.expiresAt,
-            sponsorLimit,
-          ),
-      ),
-    ]);
+          .bind(params.sponsorId, windowStart, params.sponsorId, windowStart, sponsorLimit),
+      ]);
+    } catch (innerError) {
+      if (!isMissingCommentaryAttemptsTable(innerError)) throw innerError;
+      await db.batch(batchStatements);
+    }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     if (message.includes("SPONSOR_PROMOTION_RATE_LIMIT_EXCEEDED")) {
@@ -654,16 +817,31 @@ export async function getRemainingBudget(
   let sponsorCount = 0;
   if (sponsorLimit !== null && params.sponsorId) {
     if (sponsorLimit > 0) {
-      const sponsorAttempts = await db
-        .prepare(
-          `SELECT COUNT(*) AS attempt_count
-             FROM public_write_attempt_reservations
-            WHERE sponsor_id = ?
-              AND reserved_at > ?`,
-        )
-        .bind(params.sponsorId, windowStart)
-        .first<{ attempt_count: number }>();
-      sponsorCount = sponsorAttempts?.attempt_count ?? 0;
+      try {
+        const sponsorAttempts = await db
+          .prepare(
+            `SELECT
+               (SELECT COUNT(*) FROM public_write_attempt_reservations
+                 WHERE sponsor_id = ? AND reserved_at > ?) +
+               (SELECT COUNT(*) FROM sponsor_commentary_attempt_reservations
+                 WHERE sponsor_id = ? AND reserved_at > ?) AS attempt_count`,
+          )
+          .bind(params.sponsorId, windowStart, params.sponsorId, windowStart)
+          .first<{ attempt_count: number }>();
+        sponsorCount = sponsorAttempts?.attempt_count ?? 0;
+      } catch (error) {
+        if (!isMissingCommentaryAttemptsTable(error)) throw error;
+        const sponsorAttempts = await db
+          .prepare(
+            `SELECT COUNT(*) AS attempt_count
+               FROM public_write_attempt_reservations
+              WHERE sponsor_id = ?
+                AND reserved_at > ?`,
+          )
+          .bind(params.sponsorId, windowStart)
+          .first<{ attempt_count: number }>();
+        sponsorCount = sponsorAttempts?.attempt_count ?? 0;
+      }
     }
   }
 

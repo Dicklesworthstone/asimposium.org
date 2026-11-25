@@ -87,9 +87,12 @@ import {
   cancelUnconsumedRequestBody,
   parseExactJsonBytes,
   readBoundedRequestBody,
+  SERVICE_ENVELOPE_HEADER,
   parseAuthenticatedJsonBytes as verifiedJson,
 } from "../auth/http.ts";
+import { wrongPrincipalProblem } from "../auth/refusal.ts";
 import { readActiveDirectivePage } from "../directives/active-page.ts";
+import { enqueueSponsorNotificationIfConfigured } from "../email/transactional-email.ts";
 import type { Env } from "../env.ts";
 import { validatedProblem } from "../http/envelope.ts";
 import {
@@ -121,6 +124,7 @@ import { operatorReportDetail } from "../moderation/report-detail.ts";
 import { fileReportRequest } from "../moderation/router.ts";
 import { problemSlowModeHttp } from "../moderation/slow-mode-http.ts";
 import { sponsorSuspensionHttp } from "../moderation/sponsor-suspension-http.ts";
+import { getScreeningCase } from "../moderation/store.ts";
 import { getProblemCreationBudget } from "../problems/creation-quota.ts";
 import { fellowMayReadAssignedBriefs } from "../problems/fellow-briefs.ts";
 import { rebuildSearchIndex, searchIndexHealth } from "../search/index-health";
@@ -1762,7 +1766,7 @@ export function createEnrollmentRouter(options: EnrollmentRouterOptions): Hono<{
           body = undefined;
         }
       }
-      return sponsorSuspensionHttp({
+      const suspensionRes = await sponsorSuspensionHttp({
         db: options.db,
         sponsorId,
         operatorId: authenticated.principal.operatorId,
@@ -1770,6 +1774,32 @@ export function createEnrollmentRouter(options: EnrollmentRouterOptions): Hono<{
         body,
         idempotencyKey,
       });
+      if (method === "POST" && suspensionRes.status === 200) {
+        try {
+          const receipt = (await suspensionRes.clone().json()) as {
+            event_id?: string;
+            applied_at?: string;
+          };
+          if (typeof receipt.event_id === "string" && receipt.event_id.length > 0) {
+            await enqueueSponsorNotificationIfConfigured(c.env, {
+              db: options.db,
+              idempotencyKey: `ops7:security_alert:suspension:${receipt.event_id}`,
+              causalEventId: receipt.event_id,
+              sponsorId,
+              emailClass: "security_alert",
+              actionPath: "/console/account",
+              summaryLabel: "Sponsor account suspension notice",
+              referenceId: receipt.event_id,
+              ...(typeof receipt.applied_at === "string"
+                ? { occurredAtIso: receipt.applied_at }
+                : {}),
+            });
+          }
+        } catch {
+          // Non-blocking: console remains canonical if email enqueueing fails.
+        }
+      }
+      return suspensionRes;
     });
   }
 
@@ -2032,10 +2062,41 @@ export function createEnrollmentRouter(options: EnrollmentRouterOptions): Hono<{
         cancelUnconsumedRequestBody(c.req.raw);
         return idempotency;
       }
-      const claim = await options.service.claim(await jsonBody(c.req.raw), idempotency);
+      const claimBody = await jsonBody(c.req.raw);
+      const claim = await options.service.claim(claimBody, idempotency);
       const result = EnrollmentClaimResponseSchema.parse({
         flow_handle: claim.flowHandle,
       });
+      const enrollmentId =
+        typeof claimBody === "object" &&
+        claimBody !== null &&
+        "enrollment_id" in claimBody &&
+        typeof claimBody.enrollment_id === "string"
+          ? claimBody.enrollment_id
+          : undefined;
+      const db = options.db ?? c.env?.DB;
+      if (enrollmentId !== undefined && db !== undefined) {
+        try {
+          const rec = await db
+            .prepare(`SELECT sponsor_id FROM enrollment_records WHERE enrollment_id = ?`)
+            .bind(enrollmentId)
+            .first<{ sponsor_id: string }>();
+          if (rec?.sponsor_id) {
+            await enqueueSponsorNotificationIfConfigured(c.env, {
+              db,
+              idempotencyKey: `ops7:enrollment_approval:${enrollmentId}`,
+              causalEventId: enrollmentId,
+              sponsorId: rec.sponsor_id,
+              emailClass: "enrollment_approval",
+              actionPath: "/console",
+              summaryLabel: `Pending Fellow enrollment approval (${enrollmentId})`,
+              referenceId: enrollmentId,
+            });
+          }
+        } catch {
+          // Non-blocking: sponsor console remains canonical for pending proposals.
+        }
+      }
       return c.json(result, 202, { "cache-control": "private, no-store" });
     } catch (error) {
       const ingress = enrollmentRequestIngressFailure(error);
@@ -2279,6 +2340,10 @@ export function createEnrollmentRouter(options: EnrollmentRouterOptions): Hono<{
     }
     const startedAt = Date.now();
     try {
+      if (c.req.raw.headers.get(SERVICE_ENVELOPE_HEADER) !== null) {
+        cancelUnconsumedRequestBody(c.req.raw);
+        return wrongPrincipalProblem();
+      }
       const token = bearerToken(c.req.raw);
       const binding =
         token === undefined ? undefined : await options.service.credentialBinding(token);
@@ -2329,6 +2394,10 @@ export function createEnrollmentRouter(options: EnrollmentRouterOptions): Hono<{
 
   app.post("/v1/protocol/ack", async (c) => {
     try {
+      if (c.req.raw.headers.get(SERVICE_ENVELOPE_HEADER) !== null) {
+        cancelUnconsumedRequestBody(c.req.raw);
+        return wrongPrincipalProblem();
+      }
       const token = bearerToken(c.req.raw);
       const binding =
         token === undefined ? undefined : await options.service.credentialBinding(token);
@@ -2967,12 +3036,42 @@ function mountSponsorRoutes(app: Hono<{ Bindings: Env }>, options: EnrollmentRou
       if (options.db === undefined) return operatorControlUnavailableResponse();
       const replay = idempotencyOptions(c.req.raw);
       if (replay instanceof Response) return replay;
-      return await operatorQuarantineDecision(
+      const quarantineRes = await operatorQuarantineDecision(
         options.db,
         authenticated.principal.operatorId,
         parsed.data,
         replay.idempotencyKey,
       );
+      if (quarantineRes.status === 200) {
+        try {
+          const receipt = (await quarantineRes.clone().json()) as {
+            audit_event_id?: string;
+            decided_at?: string;
+          };
+          const caseRow = await getScreeningCase(options.db, parsed.data.case_id);
+          if (caseRow?.sponsor_id) {
+            await enqueueSponsorNotificationIfConfigured(c.env, {
+              db: options.db,
+              idempotencyKey: `ops7:moderation_notice:quarantine:${parsed.data.case_id}:${parsed.data.decision}`,
+              causalEventId:
+                typeof receipt.audit_event_id === "string"
+                  ? receipt.audit_event_id
+                  : parsed.data.case_id,
+              sponsorId: caseRow.sponsor_id,
+              emailClass: "moderation_notice",
+              actionPath: "/console/appeals",
+              summaryLabel: `Held submission ${parsed.data.decision === "release" ? "released" : "not released"} (${parsed.data.case_id})`,
+              referenceId: parsed.data.case_id,
+              ...(typeof receipt.decided_at === "string"
+                ? { occurredAtIso: receipt.decided_at }
+                : {}),
+            });
+          }
+        } catch {
+          // Non-blocking: console appeals surface remains canonical.
+        }
+      }
+      return quarantineRes;
     } catch (err) {
       if (
         err instanceof Error &&
@@ -3797,7 +3896,21 @@ function mountSponsorRoutes(app: Hono<{ Bindings: Env }>, options: EnrollmentRou
         parsed.data,
         idempotency,
       );
-      return c.json(SponsorPanicResponseSchema.parse(response), 200, {
+      const parsedResponse = SponsorPanicResponseSchema.parse(response);
+      if (authenticated.principal.type === "sponsor") {
+        await enqueueSponsorNotificationIfConfigured(c.env, {
+          db: options.db ?? c.env?.DB,
+          idempotencyKey: `ops7:security_alert:panic:${parsedResponse.event_id}`,
+          causalEventId: parsedResponse.event_id,
+          sponsorId: authenticated.principal.sponsorId,
+          emailClass: "security_alert",
+          actionPath: "/console",
+          summaryLabel: "Emergency panic revocation completed",
+          referenceId: parsedResponse.event_id,
+          occurredAtIso: new Date(parsedResponse.effective_at * 1000).toISOString(),
+        });
+      }
+      return c.json(parsedResponse, 200, {
         "cache-control": "private, no-store",
       });
     } catch (error) {

@@ -28,6 +28,7 @@ import { createScientificWithdrawalRouter } from "./scientific-withdrawal-router
 import { createSponsorLeasesRouter } from "./sponsor-leases.ts";
 import { createSponsorWorkshopCursorRouter } from "./sponsor-workshop-cursor.ts";
 import { createSponsorWorkshopIndexRouter } from "./sponsor-workshop-index.ts";
+import { createSponsorWorkshopRoomTicketRouter } from "./sponsor-workshop-room-ticket.ts";
 
 // Keep every existing session helper/type available to callers and tests. The
 // ledger implementation is moved byte-for-byte, not rewritten to add a route.
@@ -161,6 +162,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     }
   });
   app.route("/", createSponsorWorkshopCursorRouter(options));
+  app.route("/", createSponsorWorkshopRoomTicketRouter(options));
   app.route("/", createSponsorWorkshopIndexRouter(options));
   app.route("/", createSponsorLeasesRouter(options));
   app.route("/", createProtocolConflictRouter(options));

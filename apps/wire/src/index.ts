@@ -1,9 +1,11 @@
 import type { ExecutionContext, ScheduledController } from "@cloudflare/workers-types";
 import { createApp } from "./app";
+import { reconcileTransactionalEmailOutbox } from "./email/transactional-email";
 import type { Env } from "./env";
 import { deliverHeraldRooms } from "./herald/outbox";
 import { publicCursorCache } from "./herald/public-cursor-cache";
 import { HeraldRoom } from "./herald/room";
+import { heraldSseFetch } from "./herald/room-sse";
 import { type HeraldRuntimeEnv, heraldRoomFetch, scheduleHeraldDelivery } from "./herald/runtime";
 import { publicWatchFetch } from "./http/public-watch-cors";
 import { deliverDispositionChanges } from "./inbox/disposition-change";
@@ -38,14 +40,16 @@ export default {
     try {
       const response = await heraldRoomFetch(request, env, () =>
         publicWatchFetch(request, () =>
-          publicCursorCache.fetch(request, env, (readRequest) =>
-            artifactPublicationFetch(readRequest, env, () =>
-              artifactFetch(
-                readRequest,
-                env,
-                () => app.fetch(readRequest, env, ctx),
-                Date.now,
-                (task) => ctx.waitUntil(task),
+          heraldSseFetch(request, env, () =>
+            publicCursorCache.fetch(request, env, (readRequest) =>
+              artifactPublicationFetch(readRequest, env, () =>
+                artifactFetch(
+                  readRequest,
+                  env,
+                  () => app.fetch(readRequest, env, ctx),
+                  Date.now,
+                  (task) => ctx.waitUntil(task),
+                ),
               ),
             ),
           ),
@@ -86,6 +90,7 @@ export default {
       dormancy,
       artifactStaging,
       databaseBackup,
+      transactionalEmail,
     ] = await Promise.allSettled([
       Promise.resolve().then(() => expireIdleSessions(env.DB)),
       Promise.resolve().then(() => requestKraterOutbox(env, "/nudge")),
@@ -119,6 +124,10 @@ export default {
         ),
       ),
       Promise.resolve().then(() => runDatabaseBackup(env)),
+      // OPS.7 minimal four-class transactional email outbox drain (no-op unless
+      // RESEND_API_KEY + EMAIL_FROM_ADDRESS + AGORA_ORIGIN are configured; outage
+      // never blocks ledger, enrollment, or backup crons).
+      Promise.resolve().then(() => reconcileTransactionalEmailOutbox(env)),
     ]);
     if (inbox.status === "fulfilled") {
       console.info(JSON.stringify({ stage: "inbox-event-delivery", ...inbox.value }));
@@ -145,6 +154,14 @@ export default {
     }
     if (dormancy.status === "fulfilled") {
       console.info(JSON.stringify({ stage: "problem-dormancy-sweep", ...dormancy.value }));
+    }
+    if (transactionalEmail.status === "fulfilled" && transactionalEmail.value.enabled) {
+      console.info(
+        JSON.stringify({ stage: "transactional-email-outbox", ...transactionalEmail.value }),
+      );
+    } else if (transactionalEmail.status === "rejected") {
+      // OPS.7 degradation contract: provider outage never fails the scheduled worker.
+      console.error(JSON.stringify({ stage: "transactional-email-outbox", status: "degraded" }));
     }
     if (backups.status === "fulfilled") {
       console.info(JSON.stringify({ stage: "nightly-ledger-backup", ...backups.value }));

@@ -49,7 +49,7 @@ const CANDIDATES_SQL = `WITH scope AS MATERIALIZED (
   JOIN history anchor ON anchor.object_id = head.object_id AND anchor.anchoring_rank = 1
   CROSS JOIN scope p
   WHERE original.type = 'claim.created' AND original.object_version = 1
-    AND original.actor_fellow_id = ? AND anchor.seq < p.formulation_seq
+    AND (? IS NULL OR original.actor_fellow_id = ?) AND anchor.seq < p.formulation_seq
   ORDER BY head.object_id, head.seq LIMIT ${REANCHOR_CANDIDATE_LIMIT + 1}
 )
 SELECT original.id AS original_event_id,
@@ -149,7 +149,7 @@ export interface ReanchorMoveResult {
 export async function selectReanchorMove(
   db: D1Database,
   problemId: string,
-  fellowId: string,
+  fellowId: string | null,
   cursor: number,
 ): Promise<ReanchorMoveResult> {
   try {
@@ -168,6 +168,7 @@ export async function selectReanchorMove(
           context.head.status,
           context.head.unlisted,
           context.head.admission_mode,
+          fellowId,
           fellowId,
         )
         .all<Candidate>();
@@ -188,8 +189,9 @@ export async function selectReanchorMove(
         row.withdrawn !== 0 ||
         !ClaimReanchorRequestSchema.safeParse({ claim_id: row.claim_id, base_version: row.version })
           .success ||
-        row.original_author !== fellowId ||
-        row.recorded_author !== fellowId ||
+        (fellowId !== null
+          ? row.original_author !== fellowId || row.recorded_author !== fellowId
+          : !row.original_author || row.recorded_author !== row.original_author) ||
         row.projected_head_version !== row.version ||
         row.projected_source_seq !== row.claim_seq ||
         row.projected_sha256 !== row.claim_sha256 ||
@@ -237,7 +239,8 @@ export async function selectReanchorMove(
             payload_json: row.payload_json,
           });
           if (
-            row.anchor_author !== fellowId ||
+            (fellowId !== null && row.anchor_author !== fellowId) ||
+            (fellowId === null && row.anchor_author !== row.original_author) ||
             anchor.claim_id !== row.claim_id ||
             anchor.base_version !== row.version ||
             anchor.statement_version !== anchoredVersion
@@ -278,7 +281,7 @@ export async function selectReanchorMove(
     return {
       move: {
         move: "re-anchor",
-        why: `Your current claim ${claimTarget} is anchored to S@${anchoredStatementVersion}, before published formulation ${currentStatement}. Inspect both exact records before deciding whether the claim still addresses the revised statement.`,
+        why: `${fellowId === null ? "Current claim" : "Your current claim"} ${claimTarget} is anchored to S@${anchoredStatementVersion}, before published formulation ${currentStatement}. Inspect both exact records before deciding whether the claim still addresses the revised statement.`,
         refs: [problemId, claimTarget, currentStatement],
         contract: {
           ...template,

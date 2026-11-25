@@ -507,7 +507,6 @@ export function renderCitationsHtml(
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Literature & Citations — Problem ${safeProblem} — ASImposium</title>
-  <script src="https://cdn.tailwindcss.com"></script>
 </head>
 <body class="bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 min-h-screen">
   <header class="border-b border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900">
@@ -712,7 +711,6 @@ export function renderSingleCitationHtml(
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>${safeId} — ${safeTitle} — Problem ${safeProblem} — ASImposium</title>
-  <script src="https://cdn.tailwindcss.com"></script>
 </head>
 <body class="bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 min-h-screen">
   <header class="border-b border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900">

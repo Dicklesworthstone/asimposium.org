@@ -3174,7 +3174,7 @@ describe("session protocol routes", () => {
       expect(Math.ceil(new TextEncoder().encode(text).length / 4)).toBeLessThanOrEqual(
         pack.tokens_estimate,
       );
-      expect(pack.omitted).toContainEqual({
+      expect(pack.omitted).not.toContainEqual({
         reason: "profile_section_not_composed",
         detail: "author-isolation-proof",
       });
@@ -5356,6 +5356,7 @@ describe("session protocol routes", () => {
           code: "POLICY_DENIED",
           coarse_category: "operational-harm",
           appeal: "SPONSOR_APPEAL_AVAILABLE",
+          // Direct automated rejection persists an appealable QC case (qot3).
           case_id: expect.stringMatching(/^QC-[0-9A-HJKMNP-TV-Z]{26}$/),
         },
       },
@@ -14306,7 +14307,7 @@ describe("committed promotion outbox nudge", () => {
   test("a transport that ignores the abort signal is still bounded by the deadline", async () => {
     const stub = ignoringStubEnv();
     const startedAt = Date.now();
-    const failure = await requestKraterOutbox(stub.env, "/nudge", { faultMode: "none" }, 25).then(
+    const failure = await requestKraterOutbox(stub.env, "/nudge", 25).then(
       () => undefined,
       (error: unknown) => error,
     );
@@ -14324,7 +14325,7 @@ describe("committed promotion outbox nudge", () => {
     // the call does not settle, so the bound there came from the deadline and
     // not from anything the fixture does.
     const stub = ignoringStubEnv();
-    const pending = requestKraterOutbox(stub.env, "/nudge", { faultMode: "none" });
+    const pending = requestKraterOutbox(stub.env, "/nudge");
     const sentinel = Symbol("still-pending");
     const raced = await Promise.race([
       pending.then(
@@ -14352,7 +14353,7 @@ describe("committed promotion outbox nudge", () => {
         }),
       },
     } as unknown as SessionEnv;
-    const settled = await requestKraterOutbox(env, "/nudge", { faultMode: "none" }, 20);
+    const settled = await requestKraterOutbox(env, "/nudge", 20);
     expect(settled.status).toBe(202);
     await sleep(90);
     // An uncleared 20ms timer would have aborted this signal well before now.
@@ -14374,12 +14375,7 @@ describe("committed promotion outbox nudge", () => {
       2_147_483_648,
     ];
     for (const value of invalid) {
-      const failure = await requestKraterOutbox(
-        stub.env,
-        "/nudge",
-        { faultMode: "none" },
-        value,
-      ).then(
+      const failure = await requestKraterOutbox(stub.env, "/nudge", value).then(
         () => undefined,
         (error: unknown) => error,
       );
@@ -14392,12 +14388,7 @@ describe("committed promotion outbox nudge", () => {
 
     // Non-vacuity: the largest value on the valid side does reach the transport.
     const settling = ignoringStubEnv();
-    const accepted = requestKraterOutbox(
-      settling.env,
-      "/nudge",
-      { faultMode: "none" },
-      2_147_483_647,
-    );
+    const accepted = requestKraterOutbox(settling.env, "/nudge", 2_147_483_647);
     settling.settle(new Response(null, { status: 202 }));
     expect((await accepted).status).toBe(202);
     expect(settling.reached()).toBe(1);
@@ -14431,7 +14422,6 @@ describe("committed promotion outbox nudge", () => {
       const accepted = await requestKraterOutbox(
         wakeEnv,
         "/nudge",
-        { faultMode: "none" },
         KRATER_OUTBOX_NUDGE_DEADLINE_MS,
       );
       expect(accepted.status, `attempt ${attempt}`).toBe(202);

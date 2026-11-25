@@ -1,7 +1,10 @@
-import { roomName } from "../../../../packages/contracts/src/herald-room-model.ts";
+import {
+  roomName,
+  workshopRoomName,
+} from "../../../../packages/contracts/src/herald-room-model.ts";
 import type { Env } from "../env.ts";
 import { deliverHeraldRooms, type HeraldNamespace } from "./outbox.ts";
-import { publicRoomRoute } from "./room-controller.ts";
+import { publicRoomRoute, workshopRoomRoute } from "./room-controller.ts";
 import { roomRefusal } from "./room-http.ts";
 
 /** Optional at the application boundary: legacy environments keep HTTP reads
@@ -45,7 +48,29 @@ export async function heraldRoomFetch(
   env: HeraldRuntimeEnv,
   next: () => Response | Promise<Response>,
 ): Promise<Response> {
-  const problem = publicRoomRoute(new URL(request.url).pathname);
+  const url = new URL(request.url);
+  if (url.pathname === "/v1/workshop-room") {
+    if (request.method !== "GET") return roomRefusal("upgrade", request.method);
+    if (
+      request.headers.has("cookie") ||
+      request.headers.has("authorization") ||
+      request.headers.has("x-fellow-id") ||
+      request.headers.has("x-sponsor-id")
+    ) {
+      return roomRefusal("auth", request.method);
+    }
+    const workshop = workshopRoomRoute(url);
+    if (workshop === undefined) return roomRefusal("query", request.method);
+    try {
+      if (!env.HERALD_ROOMS) return roomRefusal("unavailable", request.method);
+      return await env.HERALD_ROOMS.get(
+        env.HERALD_ROOMS.idFromName(workshopRoomName(workshop.fellowId, workshop.problemId)),
+      ).fetch(request);
+    } catch {
+      return roomRefusal("unavailable", request.method);
+    }
+  }
+  const problem = publicRoomRoute(url.pathname);
   if (problem === undefined) return next();
   if (request.method !== "GET") return roomRefusal("upgrade", request.method);
   try {

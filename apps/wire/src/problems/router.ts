@@ -14,7 +14,13 @@ import {
 } from "@asimposium/contracts";
 import type { D1PreparedStatement } from "@cloudflare/workers-types";
 import { type Handler, Hono } from "hono";
-import { parseExactJsonBytes, readBoundedRequestBody } from "../auth/http";
+import {
+  cancelUnconsumedRequestBody,
+  parseExactJsonBytes,
+  readBoundedRequestBody,
+  SERVICE_ENVELOPE_HEADER,
+} from "../auth/http";
+import { wrongPrincipalProblem } from "../auth/refusal";
 import { createCommentaryRouter } from "../commentary/router.ts";
 import { createDirectiveDisclosureRouter } from "../directives/disclosure-router.ts";
 import { createDirectiveRouter } from "../directives/router.ts";
@@ -26,6 +32,7 @@ import { hardDeletePrivateDraft, RetentionError } from "../krater/retention";
 import { readPublishedProblemFormulation } from "../ledger/problem-formulation-read.ts";
 import { readPublishedProblemResolution } from "../ledger/problem-resolution-read.ts";
 import { sponsorProblemHideHttp } from "../moderation/problem-hide.ts";
+import { sponsorCaseActorId } from "../moderation/store";
 import { type PublicCandidateScreener, screenPublicCandidate } from "../screening/public-candidate";
 import { screenPromotionWithWorkersAI, type WorkersAiBinding } from "../screening/workers-ai";
 import { parseSponsorLimit } from "../sessions/quota";
@@ -139,7 +146,13 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
         ),
     }),
   );
-  app.route("/", createCommentaryRouter({ verifiedSponsor: options.verifiedSponsor }));
+  app.route(
+    "/",
+    createCommentaryRouter({
+      verifiedSponsor: options.verifiedSponsor,
+      screenPromotion,
+    }),
+  );
   // This router is fetched as a nested app; its own error boundary runs
   // before the outer Worker's handler. Never return raw D1 exception text.
   app.onError((err) => {
@@ -161,6 +174,10 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
     | { readonly ok: true; readonly binding: FellowCredentialBinding }
     | { readonly ok: false; readonly response: Response }
   > {
+    if (request.headers.get(SERVICE_ENVELOPE_HEADER) !== null) {
+      cancelUnconsumedRequestBody(request);
+      return { ok: false, response: wrongPrincipalProblem() };
+    }
     const token = bearerToken(request);
     if (!token) {
       return {
@@ -1039,6 +1056,7 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
           rule: "A5",
           extensions: {
             schema: "https://a.asimposium.org/schemas/problems.v1.json",
+            suggested_action: "refetch_and_reapply",
             example: { action: "set-writer-cap", writer_cap: 4 },
           },
         });
@@ -1085,7 +1103,7 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
                   c.env,
                   {
                     problemId,
-                    fellowId: problem.created_by_fellow_id ?? sponsor.sponsorId,
+                    fellowId: problem.created_by_fellow_id ?? sponsorCaseActorId(sponsor.sponsorId),
                     kind: "problem-lifecycle",
                     // Include every nested field and mapping key; screen exactly
                     // the immutable parsed action the governance writer will use.
@@ -1116,16 +1134,18 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
                 if (!publication) return problemGovernanceRefused();
                 candidate = publication.problem;
               }
+              const resolvedFellowId =
+                revision?.author.fellow_id ??
+                publication?.author.fellow_id ??
+                problem.created_by_fellow_id ??
+                sponsorCaseActorId(sponsor.sponsorId);
+              const isSponsorScopedActor = resolvedFellowId.startsWith("sponsor:");
               const screened = await screenPublicCandidate(
                 screenPromotion,
                 c.env,
                 {
                   problemId,
-                  fellowId:
-                    revision?.author.fellow_id ??
-                    publication?.author.fellow_id ??
-                    problem.created_by_fellow_id ??
-                    sponsor.sponsorId,
+                  fellowId: resolvedFellowId,
                   kind:
                     action.action === "publish" ? "problem-proposal" : "problem-statement-revision",
                   // The famous-problem guardrail and named other-* areas are
@@ -1146,10 +1166,15 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
                   falsifier: candidate.falsifier,
                 },
                 // The stored formulation belongs to the submitting Fellow;
-                // the sponsor only accepts those exact reviewed bytes.
+                // the sponsor only accepts those exact reviewed bytes. When no
+                // Fellow creator exists, bind holds/appeals to sponsor_screening_cases.
                 action.action === "publish"
-                  ? problem.created_by_fellow_id == null
-                    ? undefined
+                  ? isSponsorScopedActor
+                    ? {
+                        sponsorId: sponsor.sponsorId,
+                        route: `problem-${action.action}`,
+                        authorKind: "sponsor",
+                      }
                     : {
                         sponsorId: publication?.scientific_author?.sponsor_id ?? sponsor.sponsorId,
                         route: `problem-${action.action}`,
@@ -1157,6 +1182,7 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
                   : {
                       sponsorId: revision?.author.sponsor_id ?? sponsor.sponsorId,
                       route: `problem-${action.action}`,
+                      ...(isSponsorScopedActor ? { authorKind: "sponsor" as const } : {}),
                     },
               );
               return screened;

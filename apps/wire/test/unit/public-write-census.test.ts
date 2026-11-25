@@ -30,6 +30,7 @@ import {
   RetractRequestSchema,
   ReviewRequestSchema,
   ReviseRequestSchema,
+  SponsorCommentaryPostRequestSchema,
   SponsorLeaseReleaseRequestSchema,
   SponsorWorkshopMutationRequestSchema,
   SynthesizeRequestSchema,
@@ -119,6 +120,7 @@ const PATH_MATCHED_WRITES = [
   "POST /v1/sessions/:id/evidence/:eid/retract",
   "POST /v1/sessions/:id/reviews/:rid/retract",
   "POST /v1/sponsors/disclosures/:problemId/:claimId/:version",
+  "POST /v1/sponsors/workshop/room-ticket",
 ] as const;
 
 const CENSUS: Readonly<Record<string, Class>> = {
@@ -404,10 +406,16 @@ const CENSUS: Readonly<Record<string, Class>> = {
     why: "private coordination",
   },
 
-  "POST /v1/problems/:id/commentary": {
-    kind: "human-lane",
-    why: "human commentary lane with its own screen (commentary/service.ts)",
-  },
+  "POST /v1/problems/:id/commentary": screened(
+    "test/integration/commentary-real-bindings.mjs",
+    SponsorCommentaryPostRequestSchema,
+    ["body", "relates_to[].id", "relates_to[].label"],
+    ["problem_commentaries"],
+    {
+      problem_id: "must match the route public problem identifier",
+      supersedes_commentary_id: "must match an existing owned public commentary entry",
+    },
+  ),
   "POST /v1/sponsors/disclosures/:problemId/:claimId/:version": {
     kind: "human-lane",
     why: "attributed sponsor declarations; deliberately published summaries use screenPublicCandidate in problems/router.ts, while private instruction bodies never become public automatically",
@@ -416,7 +424,24 @@ const CENSUS: Readonly<Record<string, Class>> = {
     kind: "human-lane",
     why: "removes commentary",
   },
+  "POST /v1/sponsors/problems/:id/syntheses/:synthId/publish": {
+    kind: "screened-adapter",
+    delegate: "POST /v1/sessions/:id/synthesize",
+    why: "publishes stored draft fields screened on Fellow submission. The sponsor supplies the draft reference.",
+  },
 
+  "POST /v1/email/unsubscribe": {
+    kind: "private",
+    why: "verifies a signed unsubscribe token and updates private delivery preferences",
+  },
+  "POST /v1/sponsors/email-preferences": {
+    kind: "private",
+    why: "updates the authenticated sponsor's private notification address and digest preference",
+  },
+  "POST /v1/sponsors/workshop/room-ticket": {
+    kind: "private",
+    why: "mints a short-lived ticket only after checking sponsor workshop access",
+  },
   "POST /v1/device-code": { kind: "identity-admin", why: "enrollment device flow" },
   "POST /v1/device-lookup": { kind: "identity-admin", why: "enrollment device flow" },
   "POST /v1/device-token": { kind: "identity-admin", why: "enrollment device flow" },
@@ -436,6 +461,10 @@ const CENSUS: Readonly<Record<string, Class>> = {
   "POST /v1/operators/areas/rename": { kind: "identity-admin", why: "operator" },
   "POST /v1/operators/content-control": { kind: "identity-admin", why: "operator" },
   "POST /v1/operators/fellow-cap": { kind: "identity-admin", why: "operator" },
+  "POST /v1/operators/problems/:id/external-expert-reviews": {
+    kind: "identity-admin",
+    why: "records a private operator-verified attestation and audit entry. Resolution uses its exact reference.",
+  },
   "POST /v1/operators/problems/:problemId/projections/repair": {
     kind: "identity-admin",
     why: "operator",
@@ -652,6 +681,8 @@ describe("P7 public-write census (kqz5)", () => {
     // path matchers. A new matcher file fails here until its routes are
     // classified above.
     const KNOWN: Record<string, string> = {
+      "src/herald/room-controller.ts":
+        "the /v1/workshop-room upgrade is read-only. POST is confined to internal Durable Object nudges.",
       "src/krater/artifact-http.ts":
         "private declare/complete/renew/resumable/resume POSTs and digest-pinned part PUT",
       "src/krater/artifact-publication-http.ts": "POST /v1/artifacts/:id/publish",

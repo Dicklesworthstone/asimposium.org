@@ -173,7 +173,21 @@ export async function selectCollapseDuplicateMove(
       group.push(row);
       groups.set(key, group);
     }
-    const pairs: { sources: [ClaimSource, ClaimSource]; forward: string; reverse: string }[] = [];
+    const byPin = new Map<string, ClaimSource>();
+    for (const group of groups.values()) {
+      for (const item of group) byPin.set(pin(item), item);
+    }
+    const seenPairs = new Set<string>();
+    const pairs: {
+      sources: [ClaimSource, ClaimSource];
+      forward: string;
+      reverse: string;
+      semantic?: {
+        readonly similarity: number;
+        readonly model_id: string;
+        readonly model_version: string;
+      };
+    }[] = [];
     pairSelection: for (const group of groups.values()) {
       for (const [index, source] of group.entries())
         for (const target of group.slice(index + 1)) {
@@ -181,6 +195,8 @@ export async function selectCollapseDuplicateMove(
             degraded = true;
             break pairSelection;
           }
+          const pairKey = `${pin(source)}::${pin(target)}`;
+          seenPairs.add(pairKey);
           pairs.push({
             sources: [source, target],
             forward: relationObjectId({
@@ -198,10 +214,82 @@ export async function selectCollapseDuplicateMove(
           });
         }
     }
+
+    // Fable §6.3 P11 / §9.2 async semantic near-duplicate advisories produced by
+    // KraterOutboxDrainer's public-only `embedding.compute` consumer. Advisory
+    // rows are discovery hints only: both endpoints still pass DUPLICATE_PAIRS_SQL
+    // exact-source + visibility verification below before any move is emitted.
+    // Scan up to CLAIM_LIMIT advisories so stale/superseded/already-lexical pairs
+    // cannot starve live semantic pairs before filling PAIR_LIMIT.
+    if (pairs.length < PAIR_LIMIT && byPin.size >= 2) {
+      try {
+        const advisories = await db
+          .prepare(
+            `SELECT source_claim_id, source_version, matched_claim_id, matched_version,
+                    similarity, model_id, model_version
+             FROM public_duplicate_advisories
+             WHERE problem_id = ?
+             ORDER BY similarity DESC, source_claim_id ASC, matched_claim_id ASC
+             LIMIT ?`,
+          )
+          .bind(problemId, CLAIM_LIMIT)
+          .all<{
+            source_claim_id: string;
+            source_version: number;
+            matched_claim_id: string;
+            matched_version: number;
+            similarity: number;
+            model_id: string;
+            model_version: string;
+          }>();
+        for (const adv of advisories.results) {
+          if (pairs.length >= PAIR_LIMIT) {
+            degraded = true;
+            break;
+          }
+          const left = byPin.get(`${adv.source_claim_id}@${adv.source_version}`);
+          const right = byPin.get(`${adv.matched_claim_id}@${adv.matched_version}`);
+          if (!left || !right || left.claim_id === right.claim_id) continue;
+          const pairKey = `${pin(left)}::${pin(right)}`;
+          const revKey = `${pin(right)}::${pin(left)}`;
+          if (seenPairs.has(pairKey) || seenPairs.has(revKey)) continue;
+          seenPairs.add(pairKey);
+          pairs.push({
+            sources: [left, right],
+            forward: relationObjectId({
+              sourceClaimId: left.claim_id,
+              sourceVersion: left.version,
+              kind: "equivalent-to",
+              targetRef: pin(right),
+            }),
+            reverse: relationObjectId({
+              sourceClaimId: right.claim_id,
+              sourceVersion: right.version,
+              kind: "equivalent-to",
+              targetRef: pin(left),
+            }),
+            semantic: {
+              similarity: adv.similarity,
+              model_id: adv.model_id,
+              model_version: adv.model_version,
+            },
+          });
+        }
+      } catch {
+        // Older minimal unit schemas without migration 0149 fall back cleanly to P11 lexical pairs.
+      }
+    }
+
     if (pairs.length === 0) return { move: null, degraded };
     const selected = await db
       .prepare(DUPLICATE_PAIRS_SQL)
-      .bind(JSON.stringify({ problem: problemId, cursor, pairs }))
+      .bind(
+        JSON.stringify({
+          problem: problemId,
+          cursor,
+          pairs: pairs.map(({ sources, forward, reverse }) => ({ sources, forward, reverse })),
+        }),
+      )
       .first<{ ordinal: number | null; scope_available: number; unavailable: number }>();
     if (!selected || selected.scope_available !== 1) return { move: null, degraded: true };
     degraded ||= selected.unavailable !== 0;
@@ -217,11 +305,14 @@ export async function selectCollapseDuplicateMove(
 
     const sourceTarget = pin(source);
     const targetRef = pin(target);
+    const why = pair.semantic
+      ? `${sourceTarget} and ${targetRef} were flagged as semantic near-duplicates (cosine ${pair.semantic.similarity.toFixed(2)}, ${pair.semantic.model_id} ${pair.semantic.model_version}). This is an advisory discovery hint, not proof of equivalence: inspect their assumptions, definitions and scope before recording a reviewable relation.`
+      : `${sourceTarget} and ${targetRef} share P11-normalized statement text. This is not proof of equivalence: inspect their assumptions, definitions and scope before recording a reviewable relation.`;
 
     return {
       move: {
         move: "collapse-duplicate",
-        why: `${sourceTarget} and ${targetRef} share P11-normalized statement text. This is not proof of equivalence: inspect their assumptions, definitions and scope before recording a reviewable relation.`,
+        why,
         refs: [problemId, sourceTarget, targetRef],
         contract: {
           ...template,

@@ -7,6 +7,7 @@ import {
 import { bodyLooksSecretShaped, scanBodyForSecrets } from "../../src/krater/cas";
 
 import {
+  CREDENTIAL_SCAN_POLICY_VERSION,
   scanFieldForCredentials,
   scanFieldsForCredentials,
   scanTextForCredentials,
@@ -436,5 +437,37 @@ test("JSON artifacts share decoded credential detection and source-token locatio
   ]) {
     expect(bodyLooksSecretShaped(body)).toBe(false);
     expect(scanBodyForSecrets(body)).toEqual([]);
+  }
+});
+
+test("Auth.js session cookies and ASImposium service envelopes are detected without echoing bytes", async () => {
+  expect(CREDENTIAL_SCAN_POLICY_VERSION).toBe("p7-credential-scan-v2");
+  const cookie = `__Host-authjs.session-token=${"S".repeat(32)}`;
+  const nextAuthCookie = `__Secure-next-auth.session-token=${"N".repeat(28)}`;
+  const serviceEnvelopeJson = `asimp-service-envelope: {"claims":{"v":1,"sub":"usr_canary"},"signature":"${"e".repeat(32)}"}`;
+  const serviceEnvelopeOpaque = `asimp-service-envelope: envelope_payload_${"E".repeat(32)}`;
+  for (const [value, kind] of [
+    [cookie, "access-token"],
+    [nextAuthCookie, "access-token"],
+    [serviceEnvelopeJson, "access-token"],
+    [serviceEnvelopeOpaque, "access-token"],
+  ] as const) {
+    const findings = scanTextForCredentials("body_md", `leaked header ${value}`);
+    expect(findings.map((finding) => finding.kind)).toEqual([kind]);
+    expect(scanBodyForSecrets(value).some((finding) => finding.kind === kind)).toBe(true);
+    expect(bodyLooksSecretShaped(value)).toBe(true);
+    const refusal = await secretShapedContentProblem(findings).text();
+    expect(ProblemDocumentSchema.safeParse(JSON.parse(refusal)).success).toBe(true);
+    expect(refusal).not.toContain(value);
+    expect(refusal).not.toContain("S".repeat(20));
+    expect(refusal).not.toContain("E".repeat(20));
+    expect(refusal).not.toContain("e".repeat(20));
+  }
+  for (const benign of [
+    "Cookies use the __Host-authjs.session-token name on asimposium.org.",
+    "The header is named asimp-service-envelope (no value attached).",
+  ]) {
+    expect(scanTextForCredentials("body_md", benign)).toEqual([]);
+    expect(bodyLooksSecretShaped(benign)).toBe(false);
   }
 });

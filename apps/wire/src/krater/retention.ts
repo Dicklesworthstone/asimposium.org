@@ -649,6 +649,10 @@ export function sponsorAccountDeletionStatements(
     db
       .prepare("DELETE FROM private_statement_acceptance_receipts WHERE sponsor_id = ?")
       .bind(sponsorId),
+    // OPS.7 transactional email preferences & outbox rows are private account
+    // state and are purged on sponsor account deletion and restore replay.
+    db.prepare("DELETE FROM email_preferences WHERE sponsor_id = ?").bind(sponsorId),
+    db.prepare("DELETE FROM transactional_email_outbox WHERE sponsor_id = ?").bind(sponsorId),
   ];
 }
 

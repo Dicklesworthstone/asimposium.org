@@ -1,9 +1,17 @@
 import type {
+  Ai,
   D1Database,
   D1PreparedStatement,
   DurableObjectState,
 } from "@cloudflare/workers-types";
+import type { HeraldNamespace } from "../herald/outbox.ts";
 import { sha256Hex } from "./krater";
+import {
+  dispatchExtendedOutboxConsumer,
+  type EmbedTextFn,
+  OUTBOX_LAUNCH_KIND_SET,
+  OutboxConsumerSourceError,
+} from "./outbox-consumers.ts";
 
 export const KRATER_OUTBOX_DO_NAME = "krater-outbox-v0";
 export const OUTBOX_DRAIN_BATCH_SIZE = 8;
@@ -56,8 +64,8 @@ class SearchIndexSourceError extends Error {
   }
 }
 const OUTBOX_EVENT_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
-const OUTBOX_SCAN_AFTER_ID_KEY = "scan_after_id";
-const OUTBOX_SCAN_WRAP_THROUGH_ID_KEY = "scan_wrap_through_id";
+export const OUTBOX_SCAN_AFTER_ID_KEY = "scan_after_id";
+export const OUTBOX_SCAN_WRAP_THROUGH_ID_KEY = "scan_wrap_through_id";
 const OUTBOX_ATTEMPT_PREFIX = "attempt:";
 const OUTBOX_ATTEMPT_RECLAIM_AFTER_KEY = "attempt_reclaim_after";
 const OUTBOX_ATTEMPT_RECLAIM_COUNTERS_KEY = "attempt_reclaim_counters";
@@ -72,16 +80,7 @@ const OUTBOX_QUARANTINE_RECLAIM_COUNTERS_KEY = "quarantine_reclaim_counters";
  * page forever.
  */
 const OUTBOX_ROW_ID = /^[1-9][0-9]{0,18}$/;
-const OUTBOX_PHASES = new Set<DurableCounters["last_phase"]>([
-  "idle",
-  "dequeued",
-  "held-before-ack",
-  "delivered",
-  "quarantined",
-  "retry",
-]);
-
-export type OutboxFaultMode = "none" | "fail-once" | "hold-before-ack";
+const OUTBOX_PHASES = new Set<string>(["idle", "dequeued", "delivered", "quarantined", "retry"]);
 
 export interface KraterOutboxStub {
   fetch(request: Request): Promise<Response>;
@@ -95,6 +94,9 @@ export interface KraterOutboxNamespace {
 export interface KraterOutboxEnv {
   DB: D1Database;
   KRATER_OUTBOX?: KraterOutboxNamespace;
+  AI?: Ai;
+  HERALD_ROOMS?: HeraldNamespace;
+  embedText?: EmbedTextFn;
 }
 
 interface PendingOutboxRow {
@@ -184,7 +186,7 @@ export type OldestPendingAgeAlert =
   | "at-or-above-threshold"
   | "degraded";
 
-interface DurableCounters {
+export interface DurableCounters {
   owner_acquisitions: number;
   max_active: number;
   recovered_ownerships: number;
@@ -194,7 +196,7 @@ interface DurableCounters {
   failures: number;
   last_backoff_ms: number | null;
   last_quarantine_code: string | null;
-  last_phase: "idle" | "dequeued" | "held-before-ack" | "delivered" | "quarantined" | "retry";
+  last_phase: string;
 }
 
 interface OutboxStatus extends DurableCounters {
@@ -210,15 +212,6 @@ interface OutboxStatus extends DurableCounters {
   quarantine_reclamation: ReclaimCounters;
 }
 
-interface OutboxCommand {
-  faultMode: OutboxFaultMode;
-}
-
-interface StaleWrapFixtureCommand {
-  scanAfterId: number;
-  scanWrapThroughId: number;
-}
-
 export class KraterOutboxBindingError extends Error {
   readonly code = "KRATER_OUTBOX_BINDING_UNAVAILABLE";
 }
@@ -231,7 +224,7 @@ function attemptKey(eventId: string): string {
   return `${OUTBOX_ATTEMPT_PREFIX}${eventId}`;
 }
 
-function response(body: unknown, status = 200): Response {
+export function outboxJsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,
     headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" },
@@ -244,32 +237,20 @@ function asRecord(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
-function parseFaultMode(value: unknown): OutboxFaultMode {
-  if (value === undefined || value === "none") return "none";
-  if (value === "fail-once" || value === "hold-before-ack") return value;
-  throw new Error("KRATER_OUTBOX_COMMAND_INVALID");
-}
-
-async function requestCommand(request: Request): Promise<OutboxCommand> {
-  if (request.method !== "POST") return { faultMode: "none" };
-  const body = asRecord(await request.json());
-  if (body === null) throw new Error("KRATER_OUTBOX_COMMAND_INVALID");
-  return { faultMode: parseFaultMode(body.fault_mode) };
-}
-
-function parseStaleWrapFixtureCommand(value: unknown): StaleWrapFixtureCommand {
-  const body = asRecord(value);
-  const scanAfterId = body?.scan_after_id;
-  const scanWrapThroughId = body?.scan_wrap_through_id;
-  if (
-    !isNonNegativeInteger(scanAfterId) ||
-    !isNonNegativeInteger(scanWrapThroughId) ||
-    scanWrapThroughId === 0 ||
-    scanAfterId >= scanWrapThroughId
-  ) {
-    throw new Error("KRATER_OUTBOX_STALE_WRAP_FIXTURE_INVALID");
+async function assertEmptyControlCommand(request: Request): Promise<void> {
+  if (request.method !== "POST") return;
+  const raw = await request.text();
+  if (raw.trim() === "") return;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error("KRATER_OUTBOX_COMMAND_INVALID");
   }
-  return { scanAfterId, scanWrapThroughId };
+  const body = asRecord(parsed);
+  if (body === null || Object.keys(body).length > 0) {
+    throw new Error("KRATER_OUTBOX_COMMAND_INVALID");
+  }
 }
 
 function emptyCounters(): DurableCounters {
@@ -341,7 +322,10 @@ export function oldestPendingAge(
   return { ageMs: nowMs - oldestMs, status: "measured" };
 }
 
-function isDurableCounters(value: unknown): value is DurableCounters {
+function isDurableCounters(
+  value: unknown,
+  isValidPhase: (phase: string) => boolean,
+): value is DurableCounters {
   const record = asRecord(value);
   if (record === null) return false;
   return (
@@ -355,7 +339,7 @@ function isDurableCounters(value: unknown): value is DurableCounters {
     (record.last_backoff_ms === null || isNonNegativeInteger(record.last_backoff_ms)) &&
     (record.last_quarantine_code === null || typeof record.last_quarantine_code === "string") &&
     typeof record.last_phase === "string" &&
-    OUTBOX_PHASES.has(record.last_phase as DurableCounters["last_phase"])
+    isValidPhase(record.last_phase)
   );
 }
 
@@ -386,8 +370,8 @@ export function validateOutboxRow(
   | "OUTBOX_DEDUPE_INVALID"
   | "OUTBOX_PAYLOAD_INVALID" {
   if (!OUTBOX_EVENT_ID.test(row.event_id)) return "OUTBOX_EVENT_INVALID";
-  if (row.kind !== "search.index") return "OUTBOX_KIND_INVALID";
-  if (row.dedupe_key !== `search.index:${row.event_id}`) return "OUTBOX_DEDUPE_INVALID";
+  if (!OUTBOX_LAUNCH_KIND_SET.has(row.kind)) return "OUTBOX_KIND_INVALID";
+  if (row.dedupe_key !== `${row.kind}:${row.event_id}`) return "OUTBOX_DEDUPE_INVALID";
   if (!SHA256_HEX.test(row.payload_sha256)) return "OUTBOX_PAYLOAD_INVALID";
   return null;
 }
@@ -450,14 +434,13 @@ export class KraterOutboxDeadlineError extends Error {
 export async function requestKraterOutbox(
   env: KraterOutboxEnv,
   pathname: "/nudge" | "/drain-now" | "/status",
-  command: OutboxCommand = { faultMode: "none" },
   deadlineMs?: number,
 ): Promise<Response> {
   const buildRequest = (signal?: AbortSignal): Request =>
     new Request(`https://krater-outbox.internal${pathname}`, {
       method: pathname === "/status" ? "GET" : "POST",
       headers: pathname === "/status" ? undefined : { "content-type": "application/json" },
-      body: pathname === "/status" ? undefined : JSON.stringify({ fault_mode: command.faultMode }),
+      body: pathname === "/status" ? undefined : "{}",
       ...(signal === undefined ? {} : { signal }),
     });
 
@@ -488,31 +471,15 @@ export async function requestKraterOutbox(
   }
 }
 
-/** Local S-2 harness seam: production routing never exposes this request. */
-export async function plantKraterOutboxStaleWrapForHarness(
-  env: KraterOutboxEnv,
-  scanAfterId: number,
-  scanWrapThroughId: number,
-): Promise<Response> {
-  return kraterOutboxStub(env).fetch(
-    new Request("https://krater-outbox.internal/__s2/plant-stale-wrap", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        scan_after_id: scanAfterId,
-        scan_wrap_through_id: scanWrapThroughId,
-      }),
-    }),
-  );
-}
-
 /**
  * Durable retry owner exported by the shared Worker and mounted through the
- * environment-specific Wrangler configuration.
+ * environment-specific Wrangler configuration. Exposes only production control
+ * paths (`/status`, `/nudge`, `/drain-now`) with zero test fault-injection
+ * routes or parameters.
  */
 export class KraterOutboxDrainer {
-  private readonly state: DurableObjectState;
-  private readonly env: KraterOutboxEnv;
+  protected readonly state: DurableObjectState;
+  protected readonly env: KraterOutboxEnv;
 
   constructor(state: DurableObjectState, env: KraterOutboxEnv) {
     this.state = state;
@@ -522,32 +489,21 @@ export class KraterOutboxDrainer {
   async fetch(request: Request): Promise<Response> {
     const pathname = new URL(request.url).pathname;
     try {
-      if (pathname === "/status" && request.method === "GET") return response(await this.status());
+      if (pathname === "/status" && request.method === "GET") {
+        return outboxJsonResponse(await this.status());
+      }
       if (pathname === "/nudge") {
-        const command = await requestCommand(request);
-        await this.state.storage.put("fault_mode", command.faultMode);
+        await assertEmptyControlCommand(request);
         await this.setAlarm(OUTBOX_ALARM_BASE_MS);
-        return response({ accepted: true, fault_mode: command.faultMode }, 202);
+        return outboxJsonResponse({ accepted: true }, 202);
       }
       if (pathname === "/drain-now") {
-        const command = await requestCommand(request);
-        return response(await this.drain("fetch", command.faultMode));
+        await assertEmptyControlCommand(request);
+        return outboxJsonResponse(await this.drain("fetch"));
       }
-      if (pathname === "/__s2/plant-stale-wrap" && request.method === "POST") {
-        const fixture = parseStaleWrapFixtureCommand(await request.json());
-        await this.state.storage.put({
-          [OUTBOX_SCAN_AFTER_ID_KEY]: fixture.scanAfterId,
-          [OUTBOX_SCAN_WRAP_THROUGH_ID_KEY]: fixture.scanWrapThroughId,
-          // If the first recovery alarm wins the race with the harness's
-          // observation, hold the restored row before ACK and keep it armed.
-          fault_mode: "hold-before-ack",
-        });
-        await this.state.storage.deleteAlarm();
-        return response({ planted: true }, 201);
-      }
-      return response({ code: "KRATER_OUTBOX_ROUTE_NOT_FOUND" }, 404);
+      return outboxJsonResponse({ code: "KRATER_OUTBOX_ROUTE_NOT_FOUND" }, 404);
     } catch (error) {
-      return response(
+      return outboxJsonResponse(
         { code: error instanceof Error ? error.message : "KRATER_OUTBOX_FAILED" },
         400,
       );
@@ -555,20 +511,40 @@ export class KraterOutboxDrainer {
   }
 
   async alarm(): Promise<void> {
-    const faultMode = (await this.state.storage.get<OutboxFaultMode>("fault_mode")) ?? "none";
-    await this.drain("alarm", faultMode);
+    await this.drain("alarm");
+  }
+
+  protected isValidPhase(phase: string): boolean {
+    return OUTBOX_PHASES.has(phase);
+  }
+
+  protected async beforeAcknowledgeRow(
+    _source: "alarm" | "fetch",
+    _delivered: number,
+    _quarantined: number,
+    _scanAfterId: number,
+  ): Promise<Record<string, unknown> | undefined> {
+    return undefined;
+  }
+
+  protected formatCompletedDrain(
+    source: "alarm" | "fetch",
+    delivered: number,
+    quarantined: number,
+  ): Record<string, unknown> {
+    return { source, delivered, quarantined };
   }
 
   private async counters(): Promise<DurableCounters> {
     const stored = await this.state.storage.get<unknown>("counters");
     if (stored === undefined) return emptyCounters();
-    if (isDurableCounters(stored)) return stored;
+    if (isDurableCounters(stored, (phase) => this.isValidPhase(phase))) return stored;
     const recovered = emptyCounters();
     await this.state.storage.put("counters", recovered);
     return recovered;
   }
 
-  private async updateCounters(
+  protected async updateCounters(
     update: (counters: DurableCounters) => DurableCounters,
   ): Promise<DurableCounters> {
     const next = update(await this.counters());
@@ -594,7 +570,7 @@ export class KraterOutboxDrainer {
     return next;
   }
 
-  private async setAlarm(delayMs: number): Promise<void> {
+  protected async setAlarm(delayMs: number): Promise<void> {
     const bounded = Math.min(Math.max(delayMs, OUTBOX_ALARM_BASE_MS), OUTBOX_ALARM_MAX_MS);
     await this.state.storage.setAlarm(Date.now() + bounded);
   }
@@ -1052,7 +1028,7 @@ export class KraterOutboxDrainer {
     }));
   }
 
-  private async retryAfterFailure(): Promise<number> {
+  protected async retryAfterFailure(): Promise<number> {
     const counters = await this.updateCounters((current) => {
       const failures = saturatingCounterAdd(current.failures);
       return {
@@ -1067,10 +1043,7 @@ export class KraterOutboxDrainer {
     return backoff;
   }
 
-  private async drain(
-    source: "alarm" | "fetch",
-    requestedFault: OutboxFaultMode,
-  ): Promise<Record<string, unknown>> {
+  protected async drain(source: "alarm" | "fetch"): Promise<Record<string, unknown>> {
     return this.state.blockConcurrencyWhile(async () => {
       const active = (await this.state.storage.get<number>("active")) ?? 0;
       const recovered = active > 0;
@@ -1144,7 +1117,6 @@ export class KraterOutboxDrainer {
         }
         let delivered = 0;
         let quarantined = 0;
-        let faultMode = requestedFault;
         for (const row of rows) {
           const malformed = validateOutboxRow(row);
           if (malformed !== null) {
@@ -1154,29 +1126,45 @@ export class KraterOutboxDrainer {
           }
 
           await this.recordAttempt(row);
+          const jobStartedAt = Date.now();
           try {
-            await this.applySearchIndexEffect(row);
+            if (row.kind === "search.index") {
+              await this.applySearchIndexEffect(row);
+            } else {
+              await dispatchExtendedOutboxConsumer(row, this.env);
+            }
           } catch (error) {
-            if (!(error instanceof SearchIndexSourceError)) throw error;
-            // The handoff cannot produce a valid public claim document. Keep
-            // the failed job visible for repair without starving later work.
-            if (await this.quarantine(row, "OUTBOX_PAYLOAD_INVALID")) quarantined += 1;
-            scanAfterId = row.id;
-            continue;
+            if (
+              error instanceof SearchIndexSourceError ||
+              error instanceof OutboxConsumerSourceError
+            ) {
+              const detailCode =
+                error instanceof OutboxConsumerSourceError ? error.code : "OUTBOX_PAYLOAD_INVALID";
+              console.warn(
+                JSON.stringify({
+                  stage: "krater-outbox",
+                  job_type: row.kind,
+                  job_id: row.id,
+                  duration_ms: Math.max(0, Date.now() - jobStartedAt),
+                  status: "quarantined",
+                  code: detailCode,
+                }),
+              );
+              // The handoff cannot produce a valid public projection. Keep
+              // the failed job visible for repair without starving later work.
+              if (await this.quarantine(row, "OUTBOX_PAYLOAD_INVALID")) quarantined += 1;
+              scanAfterId = row.id;
+              continue;
+            }
+            throw error;
           }
-          if (faultMode === "hold-before-ack") {
-            await this.state.storage.put(OUTBOX_SCAN_AFTER_ID_KEY, scanAfterId);
-            await this.state.storage.put("fault_mode", "none");
-            await this.updateCounters((current) => ({ ...current, last_phase: "held-before-ack" }));
-            await this.setAlarm(OUTBOX_ALARM_MAX_MS);
-            return { source, delivered, quarantined, held_before_ack: true };
-          }
-          if (faultMode === "fail-once") {
-            await this.state.storage.put(OUTBOX_SCAN_AFTER_ID_KEY, scanAfterId);
-            await this.state.storage.put("fault_mode", "none");
-            const backoff = await this.retryAfterFailure();
-            return { source, delivered, quarantined, retry_scheduled_ms: backoff };
-          }
+          const intercepted = await this.beforeAcknowledgeRow(
+            source,
+            delivered,
+            quarantined,
+            scanAfterId,
+          );
+          if (intercepted !== undefined) return intercepted;
 
           if (await this.acknowledge(row)) {
             delivered += 1;
@@ -1197,7 +1185,6 @@ export class KraterOutboxDrainer {
             return { source, delivered, quarantined, retry_scheduled_ms: backoff };
           }
           scanAfterId = row.id;
-          faultMode = "none";
         }
 
         await this.state.storage.put(OUTBOX_SCAN_AFTER_ID_KEY, scanAfterId);
@@ -1230,7 +1217,7 @@ export class KraterOutboxDrainer {
           if (reclaimNeedsAlarm) await this.setAlarm(OUTBOX_ALARM_BASE_MS);
           else await this.setIdleReconcileAlarm();
         }
-        return { source, delivered, quarantined, held_before_ack: false };
+        return this.formatCompletedDrain(source, delivered, quarantined);
       } catch (error) {
         // Re-arm explicitly so fetch- and alarm-driven drains use the same
         // bounded retry policy. Once an alarm is durably re-armed, returning
@@ -1264,7 +1251,7 @@ export class KraterOutboxDrainer {
     await this.state.storage.setAlarm(Date.now() + OUTBOX_IDLE_RECONCILE_MS);
   }
 
-  private async status(): Promise<OutboxStatus> {
+  protected async status(): Promise<OutboxStatus> {
     const observedAtMs = Date.now();
     const snapshot = await this.pendingSnapshot(new Date(observedAtMs).toISOString());
     const oldestPending = oldestPendingAge(snapshot, observedAtMs);

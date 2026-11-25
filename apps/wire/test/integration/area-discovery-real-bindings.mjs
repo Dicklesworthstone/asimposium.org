@@ -353,7 +353,13 @@ async function areaDiscoveryJourney({
       assert.equal(item.body, body);
       assert.equal(item.untrusted, true);
     }
-    assert.ok(digest.next_actions.some((action) => action.url === `/v1/problems/${problemId}`));
+    assert.ok(
+      digest.next_actions.some(
+        (action) =>
+          action.url ===
+          `/p/${encodeURIComponent(problemId)}/statements/${version}.json?through=${digest.cursor}`,
+      ),
+    );
     return digest;
   }
   await assertFormulation(1, proposal.statement);

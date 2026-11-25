@@ -1,10 +1,19 @@
 import { describe, expect, test } from "bun:test";
 import { resolve } from "node:path";
 import type { D1Database } from "@cloudflare/workers-types";
-import { KraterOutboxDrainer as enrollmentHarnessDrainer } from "../../src/enrollment/local-d1-worker";
-import { REQUIRED_BINDINGS } from "../../src/env";
-import worker, { KraterOutboxDrainer as productionDrainer } from "../../src/index";
-import { KraterOutboxDrainer as renderHarnessDrainer } from "../../src/render-face/worker";
+import {
+  KraterOutboxDrainer as enrollmentHarnessDrainer,
+  HeraldRoom as enrollmentHarnessRoom,
+} from "../../src/enrollment/local-d1-worker";
+import { CONFIGURED_BASE_BINDINGS, REQUIRED_BINDINGS } from "../../src/env";
+import worker, {
+  KraterOutboxDrainer as productionDrainer,
+  HeraldRoom as productionRoom,
+} from "../../src/index";
+import {
+  KraterOutboxDrainer as renderHarnessDrainer,
+  HeraldRoom as renderHarnessRoom,
+} from "../../src/render-face/worker";
 import { boundEnv, executionContext } from "../support/bindings";
 
 /**
@@ -135,11 +144,13 @@ describe("binding names agree with the Worker configuration", () => {
 
   test("alternate Wrangler entrypoints export every configured Durable Object class", () => {
     // The S-1 and S-5 harnesses override `main` while retaining
-    // infra/wrangler.toml. Wrangler validates the configured class export on
+    // infra/wrangler.toml. Wrangler validates every configured class export on
     // the selected entrypoint before workerd starts, even though these
-    // harnesses never call KRATER_OUTBOX.
+    // harnesses never call KRATER_OUTBOX or HERALD_ROOMS.
     expect(enrollmentHarnessDrainer).toBe(productionDrainer);
     expect(renderHarnessDrainer).toBe(productionDrainer);
+    expect(enrollmentHarnessRoom).toBe(productionRoom);
+    expect(renderHarnessRoom).toBe(productionRoom);
   });
 
   test("the configuration provides no binding this Worker silently ignores", async () => {
@@ -148,17 +159,17 @@ describe("binding names agree with the Worker configuration", () => {
     // Not a style rule: an unread binding is either a missing feature or a
     // stale config entry, and both should be a decision, not an accident.
     for (const name of provided) {
-      expect(REQUIRED_BINDINGS as readonly string[]).toContain(name);
+      expect(CONFIGURED_BASE_BINDINGS as readonly string[]).toContain(name);
     }
   });
 
-  test("the base config and required roster are the same exact binding set", async () => {
+  test("the base config and configured roster are the same exact binding set", async () => {
     const { names: provided } = await configuredBindings();
 
-    // This includes the absence of HERALD_ROOMS: topology defers it uniformly
-    // until an exported W7 Durable Object class exists.
-    expect([...provided].sort()).toEqual([...REQUIRED_BINDINGS].sort());
-    expect(provided).not.toContain("HERALD_ROOMS");
+    // HeraldRoom is exported and no longer deferred in infra/environments.toml,
+    // so infra/wrangler.toml binds HERALD_ROOMS alongside REQUIRED_BINDINGS.
+    expect([...provided].sort()).toEqual([...CONFIGURED_BASE_BINDINGS].sort());
+    expect(provided).toContain("HERALD_ROOMS");
   });
 
   test("the base config keeps private CAS and public artifact delivery separate", async () => {

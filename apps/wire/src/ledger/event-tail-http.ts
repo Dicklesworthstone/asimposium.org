@@ -1,147 +1,20 @@
 import {
-  type BatchEventCause,
-  BatchEventCauseSchema,
-  MAX_CAUSED_BY_PER_MEMBER,
-  type ScreeningPublicationNotice,
-  ScreeningPublicationNoticeSchema,
-} from "@asimposium/contracts";
-import { safeInlineProse, screeningNoticeText } from "@asimposium/render";
+  parseEventTailToon,
+  renderEventTailToon,
+  safeInlineProse,
+  screeningNoticeText,
+  TOON_MEDIA_TYPE,
+  ToonUnavailableError,
+} from "@asimposium/render";
 import {
   EVENT_TAIL_MAX_BYTES,
   type EventTailPage,
   renderEventTail,
 } from "../../../../packages/contracts/src/event-tail-model.ts";
+import { validatedProblem as problemDocument } from "../http/envelope.ts";
 import type { EventWaitOutcome } from "./event-tail-wait.ts";
 
-export interface ParsedToonEvent {
-  id: string;
-  seq: number;
-  type: string;
-  object_id: string;
-  created_at: string;
-  caused_by: BatchEventCause[] | null;
-  causality_omitted: "not_recorded" | "unavailable" | null;
-  screening_notice?: ScreeningPublicationNotice;
-}
-
-const TOON_HEADER = "id|seq|type|object_id|created_at|caused_by|causality_omitted";
-
-export function parseEventTailToon(toon: string): {
-  events: ParsedToonEvent[];
-  control: { control: "page_end"; next_cursor: number; has_more: boolean };
-} {
-  const lines = toon.trimEnd().split("\n");
-  if (lines.length < 2) throw new Error("TOON missing header or footer");
-  const firstLine = lines[0];
-  const hasNotices = firstLine?.trim() === `${TOON_HEADER}|screening_notice`;
-  if (firstLine?.trim() !== TOON_HEADER && !hasNotices) {
-    throw new Error("Invalid TOON header");
-  }
-  const lastLine = lines[lines.length - 1];
-  if (!lastLine) throw new Error("TOON missing footer");
-  const footer = lastLine.trim();
-  const footerMatch = /^\[control:page_end\|next_cursor:(\d+)\|has_more:(true|false)\]$/.exec(
-    footer,
-  );
-  if (!footerMatch?.[1] || !footerMatch[2]) throw new Error("Invalid TOON footer");
-  const next_cursor = parseInt(footerMatch[1], 10);
-  const has_more = footerMatch[2] === "true";
-
-  const events: ParsedToonEvent[] = [];
-  for (let i = 1; i < lines.length - 1; i++) {
-    const rawLine = lines[i];
-    if (!rawLine) continue;
-    const line = rawLine.trim();
-    if (!line) continue;
-    const parts = line.split("|");
-    if (parts.length !== (hasNotices ? 8 : 7)) throw new Error(`Invalid TOON line at ${i}`);
-    const [id, seqStr, type, object_id, created_at, causedBy, omitted] = parts;
-    if (!id || !seqStr || !type || !object_id || !created_at || !causedBy || !omitted) {
-      throw new Error(`Invalid TOON line at ${i}`);
-    }
-    const seq = parseInt(seqStr, 10);
-    if (!Number.isSafeInteger(seq)) throw new Error(`Invalid TOON seq at ${i}`);
-    const caused_by = BatchEventCauseSchema.array()
-      .max(MAX_CAUSED_BY_PER_MEMBER)
-      .nullable()
-      .parse(JSON.parse(causedBy));
-    if (
-      !["none", "not_recorded", "unavailable"].includes(omitted) ||
-      (caused_by === null) !== (omitted !== "none")
-    )
-      throw new Error(`Invalid TOON causality at ${i}`);
-    const causality_omitted =
-      omitted === "none" ? null : (omitted as "not_recorded" | "unavailable");
-    const screeningNotice =
-      hasNotices && parts[7] !== "null"
-        ? ScreeningPublicationNoticeSchema.parse(JSON.parse(parts[7]!))
-        : undefined;
-    if (screeningNotice !== undefined && type === "undisclosed")
-      throw new Error("An undisclosed TOON event cannot carry screening metadata");
-    events.push({
-      id,
-      seq,
-      type,
-      object_id,
-      created_at,
-      caused_by,
-      causality_omitted,
-      ...(screeningNotice === undefined ? {} : { screening_notice: screeningNotice }),
-    });
-  }
-
-  return { events, control: { control: "page_end", next_cursor, has_more } };
-}
-
-export function renderEventTailToon(page: EventTailPage): string {
-  const hasNotices = page.events.some((envelope) => envelope.event?.screening_notice !== undefined);
-  const header = TOON_HEADER + (hasNotices ? "|screening_notice" : "");
-  const rows = page.events.map((envelope) => {
-    if (envelope.event !== null) {
-      return `${envelope.event.id}|${envelope.seq}|${envelope.event.type}|${envelope.event.object_id}|${envelope.event.created_at}|${JSON.stringify(envelope.event.caused_by)}|${envelope.event.causality_omitted ?? "none"}${hasNotices ? `|${JSON.stringify(envelope.event.screening_notice ?? null)}` : ""}`;
-    }
-    return `none|${envelope.seq}|undisclosed|none|none|null|unavailable${hasNotices ? "|null" : ""}`;
-  });
-  const footer = `[control:page_end|next_cursor:${page.page_end.next_cursor}|has_more:${page.page_end.has_more}]`;
-  const toon = [header, ...rows, footer].join("\n") + "\n";
-
-  // Lossless round-trip check
-  const roundTrip = parseEventTailToon(toon);
-  if (roundTrip.events.length !== page.events.length) {
-    throw new Error("TOON round-trip failed: event count mismatch");
-  }
-  for (let i = 0; i < page.events.length; i++) {
-    const orig = page.events[i];
-    const dec = roundTrip.events[i];
-    if (!orig || !dec) {
-      throw new Error(`TOON round-trip failed: missing event at ${i}`);
-    }
-    if (dec.seq !== orig.seq) {
-      throw new Error(`TOON round-trip failed: event ${i} seq mismatch`);
-    }
-    if (orig.event !== null) {
-      if (
-        dec.id !== orig.event.id ||
-        dec.type !== orig.event.type ||
-        dec.object_id !== orig.event.object_id ||
-        dec.created_at !== orig.event.created_at ||
-        JSON.stringify(dec.caused_by) !== JSON.stringify(orig.event.caused_by) ||
-        dec.causality_omitted !== orig.event.causality_omitted ||
-        JSON.stringify(dec.screening_notice) !== JSON.stringify(orig.event.screening_notice)
-      ) {
-        throw new Error(`TOON round-trip failed: event ${i} field mismatch`);
-      }
-    }
-  }
-  if (
-    roundTrip.control.next_cursor !== page.page_end.next_cursor ||
-    roundTrip.control.has_more !== page.page_end.has_more
-  ) {
-    throw new Error("TOON round-trip failed: control record mismatch");
-  }
-
-  return toon;
-}
+export { parseEventTailToon, renderEventTailToon };
 
 /** The complete bounded page is validated before response construction. A
  * connection cut before page_end is incomplete, never an empty successful page.
@@ -266,14 +139,35 @@ export async function eventTailResponse(
   waitOutcome?: EventWaitOutcome,
 ): Promise<Response> {
   const startedAt = Date.now();
-  const body =
-    format === "toon"
-      ? renderEventTailToon(page)
-      : format === "md"
-        ? renderEventTailMarkdown(page)
-        : format === "sse"
-          ? renderEventTailSse(page)
-          : renderEventTail(page, format);
+  let body: string;
+  try {
+    body =
+      format === "toon"
+        ? renderEventTailToon(page)
+        : format === "md"
+          ? renderEventTailMarkdown(page)
+          : format === "sse"
+            ? renderEventTailSse(page)
+            : renderEventTail(page, format);
+  } catch (error) {
+    if (!(error instanceof ToonUnavailableError)) throw error;
+    const recoveryPath = `/p/${encodeURIComponent(page.page_end.problem_id)}/events.json?since=${page.page_end.since}&through=${page.page_end.through}`;
+    const response = problemDocument({
+      status: 500,
+      code: "FORMAT_UNAVAILABLE",
+      title: "Lossless TOON representation unavailable",
+      detail: "This page cannot be represented losslessly as TOON. No altered data was returned.",
+      fixHint: `Read ${recoveryPath} for the same canonical data.`,
+      rule: "A1",
+      headers: { "cache-control": "no-store" },
+      extensions: {
+        example: { method: "GET", path: recoveryPath },
+      },
+    });
+    return request.method === "HEAD"
+      ? new Response(null, { status: response.status, headers: response.headers })
+      : response;
+  }
   const bytes = new TextEncoder().encode(body);
   if (bytes.byteLength > EVENT_TAIL_MAX_BYTES) throw new Error("EVENT_TAIL_RESPONSE_TOO_LARGE");
   const digest = await crypto.subtle.digest("SHA-256", bytes);
@@ -290,7 +184,7 @@ export async function eventTailResponse(
           ? "text/markdown; charset=utf-8"
           : format === "sse"
             ? "text/event-stream; charset=utf-8"
-            : "text/plain; charset=utf-8";
+            : TOON_MEDIA_TYPE;
   const headers = new Headers({
     "content-type": contentType,
     "cache-control": unlisted ? "private, no-store" : "public, max-age=0, must-revalidate",

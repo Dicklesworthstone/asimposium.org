@@ -703,5 +703,6 @@ export default {
 
 // This alternate Wrangler entrypoint shares infra/wrangler.toml with the
 // production Worker. Wrangler validates every configured Durable Object export
-// even though the S-1 harness never calls the outbox binding.
+// even though the S-1 harness never calls those bindings.
+export { HeraldRoom } from "../herald/room";
 export { KraterOutboxDrainer } from "../krater/outbox-do";

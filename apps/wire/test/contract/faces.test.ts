@@ -1520,15 +1520,21 @@ describe("face wire format", () => {
     expect([...entryKeys].sort()).toEqual([...descriptorKeys].sort());
 
     expect(queries).toHaveLength(2);
-    const sqlSuffix = ` FROM problems WHERE status != 'private-draft' AND unlisted = 0
-  AND NOT ${offScopeProblemSql("problems.id", "problems.public_seq")}
-  AND NOT ${hiddenByContentControlSql("problems.id", "'problem'")} ORDER BY id ASC LIMIT 201`;
+    const tailSuffix = "\nORDER BY open_move_weight DESC, id ASC LIMIT 201";
+    const tailPrefix = "SELECT ";
     for (const query of queries) {
-      expect(query.startsWith("SELECT ")).toBe(true);
-      expect(query.endsWith(sqlSuffix)).toBe(true);
-      const selectedColumns = query.slice("SELECT ".length, -sqlSuffix.length).split(", ");
-      expect(selectedColumns).toEqual(descriptorKeys);
-      expect([...selectedColumns].sort()).toEqual([...schemaKeys].sort());
+      expect(query).toContain("WITH open_needs AS (");
+      expect(query).toContain("WHERE status != 'private-draft' AND unlisted = 0");
+      expect(query).toContain(offScopeProblemSql("problems.id", "problems.public_seq"));
+      expect(query).toContain(hiddenByContentControlSql("problems.id", "'problem'"));
+      expect(query.endsWith(tailSuffix)).toBe(true);
+      const outerSelectIdx = query.lastIndexOf(`\n${tailPrefix}`);
+      expect(outerSelectIdx).toBeGreaterThan(0);
+      const outerCols = query
+        .slice(outerSelectIdx + 1 + tailPrefix.length, query.lastIndexOf(" FROM open_needs"))
+        .split(", ");
+      expect(outerCols).toEqual(descriptorKeys);
+      expect([...outerCols].sort()).toEqual([...schemaKeys].sort());
     }
 
     const fixtureValues = descriptorKeys.map((key) => String(entry[key]));
@@ -1620,9 +1626,9 @@ describe("face wire format", () => {
       ...trustedStoaEnv(),
       DB: {
         prepare(query: string) {
-          expect(query).toContain(
-            "SELECT id, public_seq, created_at, updated_at, title, status FROM problems",
-          );
+          expect(query).toContain("SELECT id, public_seq, created_at, updated_at, title, status");
+          expect(query).toContain("FROM problems");
+          expect(query).toContain("ORDER BY open_move_weight DESC, id ASC");
           return { all: async () => ({ results: [current] }) };
         },
       } as unknown as Env["DB"],
@@ -1739,13 +1745,14 @@ describe("face wire format", () => {
       expect(jsonResponse.status).toBe(200);
       expect(markdownResponse.status).toBe(200);
 
-      // Bind the production SQL to the exact total order; without this a stub that
-      // returned pre-sorted rows would false-green.
-      expect(capturedSql).toBe(
-        `SELECT id, public_seq, created_at, updated_at, title, status FROM problems WHERE status != 'private-draft' AND unlisted = 0
-  AND NOT ${offScopeProblemSql("problems.id", "problems.public_seq")}
-  AND NOT ${hiddenByContentControlSql("problems.id", "'problem'")} ORDER BY id ASC LIMIT 201`,
-      );
+      // Bind the production SQL to the open-move-weight + id-ASC total order;
+      // without this a stub that returned pre-sorted rows would false-green.
+      expect(capturedSql).toContain("ORDER BY open_move_weight DESC, id ASC LIMIT 201");
+      expect(capturedSql).toContain("WHERE status != 'private-draft' AND unlisted = 0");
+      expect(capturedSql).toContain(offScopeProblemSql("problems.id", "problems.public_seq"));
+      expect(capturedSql).toContain(hiddenByContentControlSql("problems.id", "'problem'"));
+      expect(capturedSql).not.toContain("public_seq DESC");
+      expect(capturedSql).not.toContain("updated_at DESC");
 
       // Exact first-200 membership and order, by id ASC — never a rival sort's head.
       const expectedIds = Array.from({ length: 200 }, (_, i) => `P-${String(i).padStart(3, "0")}`);
@@ -1756,7 +1763,7 @@ describe("face wire format", () => {
       // updated_at (which the rival sorts would have kept as their first row).
       expect(index.problems.some((entry) => entry.id === "P-200")).toBe(false);
       expect(index.omitted).toContain(
-        "results beyond this page of 200 in canonical problem-id order",
+        "results beyond this page of 200 in open-move weight and canonical problem-id order",
       );
       expect(index.next_after).toBe("P-199");
 
@@ -1766,7 +1773,9 @@ describe("face wire format", () => {
       expect(markdown).toContain("`P-199`");
       expect(markdown).not.toContain("`P-200`");
       expect(markdown.indexOf("`P-000`")).toBeLessThan(markdown.indexOf("`P-199`"));
-      expect(markdown).toContain("results beyond this page of 200 in canonical problem-id order");
+      expect(markdown).toContain(
+        "results beyond this page of 200 in open-move weight and canonical problem-id order",
+      );
       expect(markdown).toContain("[Next page](/problems.md?after=P-199)");
 
       // Deterministic, stable face ETags across repeated reads, still useful for 304.
@@ -1790,6 +1799,103 @@ describe("face wire format", () => {
         );
         expect(await conditional.text()).toBe("");
       }
+    } finally {
+      db.close();
+    }
+  });
+
+  test("problems index ranks open object-level scientific needs ahead of process-only chatter with deterministic tie-breaks and keyset pagination (5ujc)", async () => {
+    const db = new Database(":memory:");
+    try {
+      db.run(
+        "CREATE TABLE problems (id TEXT PRIMARY KEY, public_seq INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, title TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'active', unlisted INTEGER NOT NULL DEFAULT 0)",
+      );
+      db.run(
+        "CREATE TABLE content_controls (control_id TEXT PRIMARY KEY, problem_id TEXT NOT NULL, target_kind TEXT NOT NULL, target_ref TEXT NOT NULL, visibility TEXT NOT NULL, source TEXT NOT NULL, reason_category TEXT NOT NULL, actor TEXT NOT NULL, reason TEXT NOT NULL, version INTEGER NOT NULL, created_at TEXT NOT NULL)",
+      );
+      db.run(
+        "CREATE TABLE screening_publications (event_id TEXT PRIMARY KEY, provenance_json TEXT NOT NULL)",
+      );
+      db.run(
+        "CREATE TABLE events (id TEXT PRIMARY KEY, problem_id TEXT, object_id TEXT, object_kind TEXT, type TEXT, seq INTEGER)",
+      );
+      const insertProblem = db.prepare(
+        "INSERT INTO problems (id, public_seq, created_at, updated_at, title, status) VALUES (?, ?, '2026-08-19T00:00:00.000Z', '2026-08-20T00:00:00.000Z', ?, ?)",
+      );
+      const insertEvent = db.prepare(
+        "INSERT INTO events (id, problem_id, object_id, object_kind, type, seq) VALUES (?, ?, ?, ?, ?, ?)",
+      );
+
+      // P-ALPHA has 30 process-only events (syntheses, directives, retractions) -> open_move_weight = 0.
+      insertProblem.run("P-ALPHA", 30, "Process-chatter problem", "active");
+      for (let i = 1; i <= 30; i += 1) {
+        insertEvent.run(
+          `E-A-${i}`,
+          "P-ALPHA",
+          `SYN-${i}`,
+          "synthesis",
+          i % 2 === 0 ? "synthesis.created" : "directive.sent",
+          i,
+        );
+      }
+
+      // P-BETA has 2 open object-level needs (1 claim = 3, 1 open proof gap = 2) -> open_move_weight = 5.
+      insertProblem.run("P-BETA", 2, "Scientific-needs problem", "active");
+      insertEvent.run("E-B-1", "P-BETA", "C-1", "claim", "claim.created", 1);
+      insertEvent.run("E-B-2", "P-BETA", "G-1", "gap", "gap.filed", 2);
+
+      // P-GAMMA has 1 open claim (= 3) -> open_move_weight = 3.
+      insertProblem.run("P-GAMMA", 1, "Single-claim problem", "active");
+      insertEvent.run("E-G-1", "P-GAMMA", "C-1", "claim", "claim.created", 1);
+
+      // P-DELTA ties P-ALPHA at open_move_weight = 0 (closed gap contributes 0) -> tie-break id ASC after P-ALPHA.
+      insertProblem.run("P-DELTA", 2, "Closed-gap problem", "active");
+      insertEvent.run("E-D-1", "P-DELTA", "G-1", "gap", "gap.filed", 1);
+      insertEvent.run("E-D-2", "P-DELTA", "G-1", "gap", "gap.closed-by", 2);
+
+      const env = {
+        DB: {
+          prepare(query: string) {
+            return {
+              all: async () => ({ results: db.query(query).all() }),
+              bind(...values: unknown[]) {
+                return {
+                  all: async () => ({ results: db.query(query).all(...(values as never[])) }),
+                };
+              },
+            };
+          },
+        } as unknown as Env["DB"],
+      } as Env;
+
+      const routes = createLedgerFaceRoutes();
+      const first = ProblemsIndexResponseSchema.parse(
+        await (
+          await routes.fetch(new Request("https://a.asimposium.org/problems.json"), env)
+        ).json(),
+      );
+      expect(first.problems.map((p) => p.id)).toEqual(["P-BETA", "P-GAMMA", "P-ALPHA", "P-DELTA"]);
+
+      // Keyset pagination continues cleanly across weight tiers without skipping or duplicating rows.
+      const afterBeta = ProblemsIndexResponseSchema.parse(
+        await (
+          await routes.fetch(
+            new Request("https://a.asimposium.org/problems.json?after=P-BETA"),
+            env,
+          )
+        ).json(),
+      );
+      expect(afterBeta.problems.map((p) => p.id)).toEqual(["P-GAMMA", "P-ALPHA", "P-DELTA"]);
+
+      const afterAlpha = ProblemsIndexResponseSchema.parse(
+        await (
+          await routes.fetch(
+            new Request("https://a.asimposium.org/problems.json?after=P-ALPHA"),
+            env,
+          )
+        ).json(),
+      );
+      expect(afterAlpha.problems.map((p) => p.id)).toEqual(["P-DELTA"]);
     } finally {
       db.close();
     }
@@ -2695,25 +2801,31 @@ describe("W6.1 public faces: TOON, full pack, orders/moves, and claims", () => {
     return { db, env };
   }
 
-  test("GET /problems.toon renders valid pipe-delimited TOON with control footer and supports ETag/304", async () => {
+  test("GET /problems.toon renders canonical @toon-format/toon and supports ETag/304", async () => {
     const { db, env } = makeFaceDb();
     try {
       const routes = createLedgerFaceRoutes();
+      const jsonRes = await routes.fetch(
+        new Request("https://a.asimposium.org/problems.json"),
+        env,
+      );
+      expect(jsonRes.status).toBe(200);
+      const canonical = await jsonRes.json();
+
       const res = await routes.fetch(new Request("https://a.asimposium.org/problems.toon"), env);
       expect(res.status).toBe(200);
-      expect(res.headers.get("content-type")).toBe("text/plain; charset=utf-8");
+      expect(res.headers.get("content-type")).toBe("text/toon; charset=utf-8");
       const etag = res.headers.get("etag");
       expect(etag).toMatch(/^"[0-9a-f]{64}"$/);
 
       const body = await res.text();
-      expect(body).toContain("id|public_seq|status|created_at|updated_at|title");
-      expect(body).toContain(
-        "P-TEST|10|active|2026-08-14T00:00:00.000Z|2026-08-14T00:00:00.000Z|Test Problem Title",
-      );
-      expect(body).toContain("[control:page_end|next_after:none|omitted:");
+      // Must not emit the retired hand-rolled pipe-delimited format.
+      expect(body).not.toContain("id|public_seq|status|created_at|updated_at|title");
+      expect(body).not.toContain("[control:page_end|");
 
-      // Round-trip parse validation
+      // Lossless @toon-format/toon round-trip parity with canonical JSON face.
       const parsed = parseProblemsIndexToon(body);
+      expect<unknown>(parsed).toEqual(canonical);
       expect(parsed.problems).toHaveLength(1);
       expect(parsed.problems[0]?.id).toBe("P-TEST");
       expect(parsed.problems[0]?.title).toBe("Test Problem Title");
@@ -2747,17 +2859,17 @@ describe("W6.1 public faces: TOON, full pack, orders/moves, and claims", () => {
     try {
       const routes = createLedgerFaceRoutes();
 
-      // TOON via Accept header
+      // TOON via canonical Accept: text/toon header
       const toonRes = await routes.fetch(
         new Request("https://a.asimposium.org/problems", {
-          headers: { accept: "text/vnd.toon" },
+          headers: { accept: "text/toon" },
         }),
         env,
       );
       expect(toonRes.status).toBe(200);
-      expect(toonRes.headers.get("content-type")).toBe("text/plain; charset=utf-8");
+      expect(toonRes.headers.get("content-type")).toBe("text/toon; charset=utf-8");
       expect(toonRes.headers.get("vary")).toBe("Accept, Accept-Encoding");
-      expect(await toonRes.text()).toContain("id|public_seq|status|created_at|updated_at|title");
+      expect(parseProblemsIndexToon(await toonRes.text()).problems[0]?.id).toBe("P-TEST");
 
       // TOON via query parameter ?format=toon
       const toonQueryRes = await routes.fetch(
@@ -2765,7 +2877,17 @@ describe("W6.1 public faces: TOON, full pack, orders/moves, and claims", () => {
         env,
       );
       expect(toonQueryRes.status).toBe(200);
-      expect(toonQueryRes.headers.get("content-type")).toBe("text/plain; charset=utf-8");
+      expect(toonQueryRes.headers.get("content-type")).toBe("text/toon; charset=utf-8");
+
+      // Legacy text/vnd.toon is no longer treated as TOON
+      const legacyAccept = await routes.fetch(
+        new Request("https://a.asimposium.org/problems", {
+          headers: { accept: "text/vnd.toon" },
+        }),
+        env,
+      );
+      expect(legacyAccept.status).toBe(200);
+      expect(legacyAccept.headers.get("content-type")).toBe("text/markdown; charset=utf-8");
 
       // JSON via Accept header
       const jsonRes = await routes.fetch(

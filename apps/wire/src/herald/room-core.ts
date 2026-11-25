@@ -5,6 +5,7 @@ import {
   roomId,
   roomNotice,
   roomProblem,
+  workshopRoomNotice,
 } from "../../../../packages/contracts/src/herald-room-model.ts";
 
 /** Provider-neutral hibernation port. This is a socket unit-test seam, not a D1 mock. */
@@ -45,6 +46,42 @@ export interface RoomAttachment {
   sentAt: number;
   lastMessageAt: number;
 }
+
+/** Unauthenticated read-only human viewer on a public problem room (Fable §11).
+ * Carries only an opaque per-IP bucket hash for rate capping; zero private data. */
+export interface PublicRoomAttachment {
+  v: 2;
+  mode: "public";
+  problemId: string;
+  ipHash: string;
+  acknowledged: number;
+  announced: number;
+  pending: boolean;
+  dirty: boolean;
+  connectedAt: number;
+  expiresAt: number;
+  sentAt: number;
+  lastMessageAt: number;
+}
+
+/** Private sponsor workshop room socket authenticated via first-frame Ed25519 ticket.
+ * Stores zero workshop text, titles, CAS keys, or ticket bytes. */
+export interface WorkshopRoomAttachment {
+  v: 3;
+  mode: "workshop";
+  problemId: string;
+  fellowId: string;
+  sponsorId: string | null;
+  authenticated: boolean;
+  cursor: number;
+  connectedAt: number;
+  authDeadlineAt: number;
+  expiresAt: number;
+  lastMessageAt: number;
+}
+
+export type AnyPublicRoomAttachment = RoomAttachment | PublicRoomAttachment;
+
 const KEYS = [
   "v",
   "problemId",
@@ -60,6 +97,104 @@ const KEYS = [
   "sentAt",
   "lastMessageAt",
 ];
+
+const PUBLIC_KEYS = [
+  "v",
+  "mode",
+  "problemId",
+  "ipHash",
+  "acknowledged",
+  "announced",
+  "pending",
+  "dirty",
+  "connectedAt",
+  "expiresAt",
+  "sentAt",
+  "lastMessageAt",
+];
+
+const WORKSHOP_KEYS = [
+  "v",
+  "mode",
+  "problemId",
+  "fellowId",
+  "sponsorId",
+  "authenticated",
+  "cursor",
+  "connectedAt",
+  "authDeadlineAt",
+  "expiresAt",
+  "lastMessageAt",
+];
+
+export function publicRoomAttachment(socket: RoomSocket): PublicRoomAttachment | undefined {
+  let raw: unknown;
+  try {
+    raw = socket.deserializeAttachment();
+  } catch {
+    return undefined;
+  }
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const a = raw as PublicRoomAttachment;
+  if (
+    Object.keys(raw).length !== PUBLIC_KEYS.length ||
+    Object.keys(raw).some((key) => !PUBLIC_KEYS.includes(key)) ||
+    a.v !== 2 ||
+    a.mode !== "public" ||
+    !roomProblem(a.problemId) ||
+    typeof a.ipHash !== "string" ||
+    !/^[a-f0-9]{64}$/.test(a.ipHash) ||
+    !roomCursor(a.acknowledged) ||
+    !roomCursor(a.announced) ||
+    a.acknowledged > a.announced ||
+    typeof a.pending !== "boolean" ||
+    typeof a.dirty !== "boolean" ||
+    !roomCursor(a.connectedAt) ||
+    !roomCursor(a.expiresAt) ||
+    !roomCursor(a.sentAt) ||
+    !roomCursor(a.lastMessageAt) ||
+    a.expiresAt !== a.connectedAt + LIMITS.lifetimeMs ||
+    a.sentAt < a.connectedAt ||
+    a.sentAt >= a.expiresAt ||
+    (!a.pending && a.acknowledged !== a.announced)
+  )
+    return undefined;
+  return { ...a };
+}
+
+export function workshopRoomAttachment(socket: RoomSocket): WorkshopRoomAttachment | undefined {
+  let raw: unknown;
+  try {
+    raw = socket.deserializeAttachment();
+  } catch {
+    return undefined;
+  }
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const a = raw as WorkshopRoomAttachment;
+  if (
+    Object.keys(raw).length !== WORKSHOP_KEYS.length ||
+    Object.keys(raw).some((key) => !WORKSHOP_KEYS.includes(key)) ||
+    a.v !== 3 ||
+    a.mode !== "workshop" ||
+    !roomProblem(a.problemId) ||
+    !roomId(a.fellowId) ||
+    typeof a.authenticated !== "boolean" ||
+    (a.authenticated ? !roomId(a.sponsorId) : a.sponsorId !== null) ||
+    !roomCursor(a.cursor) ||
+    !roomCursor(a.connectedAt) ||
+    !roomCursor(a.authDeadlineAt) ||
+    !roomCursor(a.expiresAt) ||
+    !roomCursor(a.lastMessageAt) ||
+    a.authDeadlineAt !== a.connectedAt + LIMITS.authDeadlineMs ||
+    a.expiresAt !== a.connectedAt + LIMITS.lifetimeMs
+  )
+    return undefined;
+  return { ...a };
+}
+
+export function anyPublicRoomAttachment(socket: RoomSocket): AnyPublicRoomAttachment | undefined {
+  return roomAttachment(socket) ?? publicRoomAttachment(socket);
+}
 
 export function roomAttachment(socket: RoomSocket): RoomAttachment | undefined {
   let raw: unknown;
@@ -179,6 +314,55 @@ export class HeraldRoomFanout {
     return "accepted";
   }
 
+  /** Unauthenticated read-only human viewer on a public problem room (Fable §11).
+   * Bounded by total room connections and per-IP hash cap; announces public_seq only. */
+  connectPublic(
+    socket: RoomSocket,
+    input: {
+      problemId: string;
+      since: number;
+      ipHash: string;
+    },
+    head: RoomHead,
+    now: number,
+  ): "accepted" | "capacity" | "invalid" {
+    const { problemId, since, ipHash } = input;
+    if (
+      !roomProblem(problemId) ||
+      !roomCursor(since) ||
+      !roomCursor(head.seq) ||
+      since > head.seq ||
+      !roomCursor(now) ||
+      !roomCursor(now + LIMITS.lifetimeMs) ||
+      !/^[a-f0-9]{64}$/.test(ipHash)
+    )
+      return "invalid";
+    const sockets = this.port.sockets();
+    const publicAttachments = sockets.map(publicRoomAttachment).filter((a) => a !== undefined);
+    if (
+      sockets.length >= LIMITS.connections ||
+      publicAttachments.filter((a) => a.ipHash === ipHash).length >= LIMITS.perPublicIp
+    )
+      return "capacity";
+    const a: PublicRoomAttachment = {
+      v: 2,
+      mode: "public",
+      problemId,
+      ipHash,
+      acknowledged: since,
+      announced: since,
+      pending: false,
+      dirty: false,
+      connectedAt: now,
+      expiresAt: now + LIMITS.lifetimeMs,
+      sentAt: now,
+      lastMessageAt: 0,
+    };
+    this.port.accept(socket, ["public"]);
+    this.send(socket, a, head.seq, now);
+    return "accepted";
+  }
+
   /** Reserve an ACK's read budget before the runtime starts any D1 work. */
   beginAck(socket: RoomSocket, message: string | ArrayBuffer, now: number): number | undefined {
     const ack = parseRoomAck(message);
@@ -248,9 +432,9 @@ export class HeraldRoomFanout {
       closeRoomSocket(socket, 1001, "Room heartbeat expired");
   }
 
-  private live(socket: RoomSocket, now: number): RoomAttachment | undefined {
+  private live(socket: RoomSocket, now: number): AnyPublicRoomAttachment | undefined {
     if (socket.readyState !== 1) return undefined;
-    const a = roomAttachment(socket);
+    const a = anyPublicRoomAttachment(socket);
     if (!a || !roomCursor(now) || now < a.connectedAt || now >= a.expiresAt) {
       closeRoomSocket(socket, 1008, "Room authorization expired");
       return undefined;
@@ -266,10 +450,15 @@ export class HeraldRoomFanout {
     identity: RoomIdentity | undefined,
     head: RoomHead | null,
     now: number,
-  ): RoomAttachment | undefined {
+  ): AnyPublicRoomAttachment | undefined {
     const a = this.live(socket, now);
     if (!a) return undefined;
-    if (!roomIdentityMatches(a, identity) || head === null) {
+    if (a.v === 1) {
+      if (!roomIdentityMatches(a, identity) || head === null) {
+        closeRoomSocket(socket, 1008, "Room access ended");
+        return undefined;
+      }
+    } else if (head === null) {
       closeRoomSocket(socket, 1008, "Room access ended");
       return undefined;
     }
@@ -279,7 +468,7 @@ export class HeraldRoomFanout {
     }
     return a;
   }
-  private send(socket: RoomSocket, a: RoomAttachment, through: number, now: number): void {
+  private send(socket: RoomSocket, a: AnyPublicRoomAttachment, through: number, now: number): void {
     try {
       const frame = roomNotice(a.problemId, a.acknowledged, through);
       a.announced = through;
@@ -293,5 +482,20 @@ export class HeraldRoomFanout {
     } catch {
       closeRoomSocket(socket, 1011, "Room unavailable; use event-tail recovery");
     }
+  }
+}
+
+export function sendWorkshopNotice(
+  socket: RoomSocket,
+  attachment: WorkshopRoomAttachment,
+  cursor: number,
+): void {
+  try {
+    const frame = workshopRoomNotice(attachment.problemId, attachment.fellowId, cursor);
+    attachment.cursor = cursor;
+    socket.serializeAttachment(attachment);
+    socket.send(frame);
+  } catch {
+    closeRoomSocket(socket, 1011, "Workshop room unavailable; use cursor polling");
   }
 }

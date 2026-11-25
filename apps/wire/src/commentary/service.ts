@@ -7,6 +7,7 @@ import {
   CommentaryListResponseSchema,
   type ProblemCode,
   SCREENING_APPEAL_CODE,
+  ScreeningCoarseCategorySchema,
   ScreeningPromotionDeniedResponseSchema,
   type SponsorCommentaryPostRequest,
   type SponsorCommentaryTombstoneRequest,
@@ -19,22 +20,45 @@ import {
   writeLedgerEvent,
 } from "../krater/krater.ts";
 import { hiddenByContentControlSql } from "../krater/public-content.ts";
+import { getScreeningCase, screeningCaseFor, sponsorCaseActorId } from "../moderation/store.ts";
 import {
   scanFieldsForCredentials,
   secretShapedContentProblem,
 } from "../screening/credential-scan.ts";
+import {
+  isScreeningDecisionChangedError,
+  screeningDecisionGuardStatement,
+  supersedeHeldCaseStatement,
+} from "../screening/ingress.ts";
 import { screenWithProvider } from "../screening/provider.ts";
 import {
+  type PublicCandidateScreener,
+  screeningHoldResponse,
+  screenPublicCandidate,
+} from "../screening/public-candidate.ts";
+import {
+  isScreeningContextStaleError,
+  screeningContextGuardStatement,
+  screeningContextStaleProblem,
+} from "../screening/publication-context.ts";
+import { publicationScreeningNotice } from "../screening/publication-notice.ts";
+import { POLICY_CATEGORIES, type PolicyCategory } from "../screening/types.ts";
+import {
+  type PublicationScreeningObservation,
+  promotionScreeningBinding,
+  screenPromotionWithWorkersAI,
   WORKERS_AI_MODEL_VERSION,
   WORKERS_AI_POLICY_VERSION,
   WorkersAIScreeningProvider,
   type WorkersAiBinding,
   workersAIConfigurationDigest,
 } from "../screening/workers-ai.ts";
+import { PROMOTION_RATE_LIMIT_WINDOW_MS, parseSponsorLimit } from "../sessions/quota.ts";
 
 export const COMMENTARY_MAX_BODY_CHARS = 2000;
 export const COMMENTARY_RATE_LIMIT_PER_MINUTE = 20;
 const IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1_000;
+const COMMENTARY_RESERVATION_EXPIRY_MS = 60_000;
 
 const PUBLIC_PROBLEM_SQL = `p.status <> 'private-draft'
   AND NOT ${hiddenByContentControlSql("p.id", "'problem'")}`;
@@ -46,6 +70,7 @@ const COMMENTARY_SOURCE_SQL = `FROM problem_commentaries pc
     AND e.actor_sponsor_id = pc.sponsor_id AND e.seq = pc.seq AND e.seq <= p.public_seq
   JOIN event_content ec ON ec.event_id = e.id AND ec.payload_sha256 = e.payload_sha256
     AND ec.redacted_at IS NULL
+  LEFT JOIN screening_publications sp ON sp.event_id = pc.event_id
   WHERE ${PUBLIC_PROBLEM_SQL}
     AND NOT ${hiddenByContentControlSql("pc.problem_id", "pc.id")}`;
 // Public bytes come from their available, digest-bound source event. A retained
@@ -54,7 +79,8 @@ const COMMENTARY_COLUMNS = `pc.id, pc.problem_id, pc.seq, pc.sponsor_id,
   CASE WHEN pc.tombstoned = 1 THEN NULL ELSE json_extract(ec.payload_json, '$.body') END AS body,
   json_extract(ec.payload_json, '$.relates_to') AS relates_to_json,
   pc.supersedes_commentary_id, pc.superseded_by_commentary_id, pc.tombstoned,
-  pc.tombstone_reason, pc.created_at, pc.updated_at, pc.event_id`;
+  pc.tombstone_reason, pc.created_at, pc.updated_at, pc.event_id,
+  CASE WHEN pc.tombstoned = 1 THEN NULL ELSE sp.provenance_json END AS screening_provenance_json`;
 
 export function commentaryContractProblem(
   input: Omit<ProblemInput, "code"> & {
@@ -109,6 +135,19 @@ function idempotencyConflict(): Response {
   });
 }
 
+function idempotencyInFlight(): Response {
+  const response = commentaryContractProblem({
+    status: 409,
+    code: "IDEMPOTENCY_CONFLICT",
+    title: "This commentary submission is already in progress",
+    detail: "Another identical request currently owns screening for this Idempotency-Key.",
+    fixHint: "Wait briefly and retry the exact unchanged request with the same Idempotency-Key.",
+    example: { headers: { "Retry-After": "1" } },
+  });
+  response.headers.set("retry-after", "1");
+  return response;
+}
+
 function ownershipMismatch(): Response {
   return validatedProblem({
     status: 403,
@@ -129,32 +168,37 @@ function sponsorUnavailable(): Response {
   });
 }
 
-function screeningUnavailable(): Response {
+function sponsorSuspended(): Response {
   return validatedProblem({
-    status: 503,
-    code: "INTERNAL_ERROR",
-    title: "Commentary screening is unavailable",
-    detail: "The complete commentary could not be cleared for publication. Nothing was posted.",
-    fixHint: "Keep the draft and retry later, or contact the operator for help.",
+    status: 403,
+    code: "WRITE_REFUSED",
+    title: "Sponsor account suspended",
+    detail: "This sponsor account is suspended and cannot perform commentary actions.",
+    fixHint: "Contact the operator regarding the sponsor suspension before writing.",
   });
 }
 
-function rateLimited(): Response {
+function rateLimited(retryAfterSeconds = 60, detail?: string): Response {
+  const retryAfter = Math.max(1, Math.ceil(retryAfterSeconds));
   const response = commentaryContractProblem({
     status: 429,
     code: "RATE_LIMITED",
     title: "Commentary rate limit reached",
-    detail: `A sponsor may publish ${COMMENTARY_RATE_LIMIT_PER_MINUTE} comments or revisions per rolling minute.`,
-    fixHint: "Wait 60 seconds before submitting further commentary.",
-    example: { headers: { "Retry-After": "60" } },
+    detail:
+      detail ??
+      `A sponsor may attempt at most ${COMMENTARY_RATE_LIMIT_PER_MINUTE} comments or revisions per rolling minute.`,
+    fixHint: `Wait ${retryAfter} seconds before submitting further commentary.`,
+    example: { headers: { "Retry-After": String(retryAfter) } },
   });
-  response.headers.set("retry-after", "60");
+  response.headers.set("retry-after", String(retryAfter));
   return response;
 }
 
 export interface CommentaryServiceOptions {
   readonly db: Env["DB"];
   readonly ai?: unknown;
+  readonly sponsorLimit?: string | number | null;
+  readonly screenPromotion?: PublicCandidateScreener;
 }
 
 export type CommentaryRow = {
@@ -171,6 +215,23 @@ export type CommentaryRow = {
   created_at: string;
   updated_at: string;
   event_id: string;
+  screening_provenance_json?: string | null;
+};
+
+type CommentaryAttemptRow = {
+  reservation_id: string;
+  request_digest: string;
+  reserved_at: number;
+  expires_at: number;
+  status:
+    | "reserved"
+    | "settled_published"
+    | "settled_held"
+    | "settled_rejected"
+    | "settled_failed"
+    | "recovered";
+  case_id: string | null;
+  event_id: string | null;
 };
 
 export async function sha256Hex(value: string | Uint8Array): Promise<string> {
@@ -186,6 +247,9 @@ export function rowToCommentaryItem(row: CommentaryRow): CommentaryItem {
   } catch {
     relatesTo = [];
   }
+  const screeningNotice = row.tombstoned
+    ? undefined
+    : publicationScreeningNotice(row.screening_provenance_json);
   return CommentaryItemSchema.parse({
     schema: COMMENTARY_SCHEMA_ID,
     commentary_id: row.id,
@@ -198,6 +262,7 @@ export function rowToCommentaryItem(row: CommentaryRow): CommentaryItem {
     superseded_by_commentary_id: row.superseded_by_commentary_id,
     tombstoned: row.tombstoned === 1,
     tombstone_reason: row.tombstone_reason,
+    ...(screeningNotice === undefined ? {} : { screening_notice: screeningNotice }),
     created_at: row.created_at,
     updated_at: row.updated_at,
   });
@@ -252,11 +317,17 @@ export function screenCommentaryL0(body: string): ScreeningCheckResult {
   return { ok: true, category: "benign-context" };
 }
 
+export interface CommentaryScreeningContext {
+  readonly problemTitle?: string | null;
+  readonly priorCommentary?: readonly string[];
+}
+
 export async function screenCommentaryText(
   body: string,
   problemId: string,
   sponsorId: string,
   aiBinding?: unknown,
+  context?: CommentaryScreeningContext,
 ): Promise<ScreeningCheckResult> {
   const l0 = screenCommentaryL0(body);
   if (!l0.ok) {
@@ -266,12 +337,27 @@ export async function screenCommentaryText(
   if (!aiBinding || typeof (aiBinding as { run?: unknown }).run !== "function")
     return { ok: false, category: "provider-unavailable", unavailable: true };
   try {
+    const prior = (context?.priorCommentary ?? []).slice(0, 8);
+    const contextualEnvelope =
+      prior.length > 0 || context?.problemTitle
+        ? JSON.stringify({
+            problem_id: problemId,
+            problem_title: context?.problemTitle ?? null,
+            prior_sponsor_commentary: prior,
+            current_commentary: body,
+          })
+        : body;
     const bodyDigest = `sha256:${await sha256Hex(body)}`;
     const contextDigest = `sha256:${await sha256Hex(
-      JSON.stringify({ problem_id: problemId, sponsor_id: sponsorId }),
+      JSON.stringify({
+        problem_id: problemId,
+        sponsor_id: sponsorId,
+        problem_title: context?.problemTitle ?? null,
+        prior_sponsor_commentary: prior,
+      }),
     )}`;
     const identity = {
-      corpus_revision: "commentary-direct-v1",
+      corpus_revision: "commentary-contextual-v2",
       corpus_digest: bodyDigest,
       model_version: WORKERS_AI_MODEL_VERSION,
       policy_version: WORKERS_AI_POLICY_VERSION,
@@ -280,7 +366,7 @@ export async function screenCommentaryText(
 
     const provider = new WorkersAIScreeningProvider(aiBinding as WorkersAiBinding, {
       maxBodyBytes: 32_768,
-      resolveBody: () => body,
+      resolveBody: () => contextualEnvelope,
     });
 
     const observation = await screenWithProvider(
@@ -298,13 +384,10 @@ export async function screenCommentaryText(
       return {
         ok: false,
         category: observation.coarse_category,
-        // Commentary has no durable quarantine case. An unresolved screen
-        // must not claim a successful hold or masquerade as a hard denial.
         unavailable: observation.provider_status !== "ok" || observation.decision !== "reject",
       };
     }
   } catch {
-    // Fail-closed on provider unexpected error
     return {
       ok: false,
       category: "provider-unavailable",
@@ -315,23 +398,81 @@ export async function screenCommentaryText(
   return { ok: true, category: "benign-context" };
 }
 
+function createCommentaryScreener(delegate?: PublicCandidateScreener): PublicCandidateScreener {
+  return async (input, env): Promise<PublicationScreeningObservation> => {
+    const l0 = screenCommentaryL0(input.statement);
+    if (!l0.ok) {
+      const binding = await promotionScreeningBinding(input);
+      const category: PolicyCategory =
+        l0.category === "injection" ? "injection" : "operational-harm";
+      return {
+        example_id: "commentary-l0",
+        status_code: "SCREENED",
+        decision: "reject",
+        coarse_category: category,
+        category_score_bands: Object.fromEntries(
+          POLICY_CATEGORIES.map((name) => [name, undefined]),
+        ) as Readonly<Record<PolicyCategory, undefined>>,
+        decision_path: "provider",
+        provider_status: "ok",
+        evaluated_body_digest: binding.bodyDigest,
+        evaluated_context_digest: binding.contextDigest,
+        model_version: "commentary-l0:deterministic-v1",
+        policy_version: WORKERS_AI_POLICY_VERSION,
+        configuration_digest: await workersAIConfigurationDigest(),
+        latency_ms: 0,
+        retry_count: 0,
+      };
+    }
+    if (delegate !== undefined) return delegate(input, env);
+    const ai = env.AI as unknown as WorkersAiBinding | undefined;
+    const validAi =
+      ai !== undefined && ai !== null && typeof (ai as { run?: unknown }).run === "function"
+        ? ai
+        : undefined;
+    return screenPromotionWithWorkersAI(validAi, input);
+  };
+}
+
+async function extractCaseId(response: Response): Promise<string | null> {
+  if (response.status !== 202 && response.status !== 403) return null;
+  try {
+    const parsed = (await response.clone().json()) as { case_id?: unknown };
+    return typeof parsed.case_id === "string" ? parsed.case_id : null;
+  } catch {
+    return null;
+  }
+}
+
 export class CommentaryService {
   constructor(private readonly options: CommentaryServiceOptions) {}
 
-  private async activeSponsor(sponsorId: string): Promise<boolean> {
+  private async sponsorStatus(sponsorId: string): Promise<"active" | "deleted" | "suspended"> {
     const row = await this.options.db
-      .prepare("SELECT 1 AS active FROM sponsors WHERE sponsor_id = ? AND tombstoned_at IS NULL")
+      .prepare(
+        `SELECT s.tombstoned_at,
+                EXISTS (SELECT 1 FROM sponsor_suspension_events se WHERE se.sponsor_id = s.sponsor_id) AS suspended
+           FROM sponsors s
+          WHERE s.sponsor_id = ?`,
+      )
       .bind(sponsorId)
-      .first<{ active: number }>();
-    return row !== null && row !== undefined;
+      .first<{ tombstoned_at: number | null; suspended: number }>();
+    if (!row || row.tombstoned_at !== null) return "deleted";
+    if (row.suspended === 1) return "suspended";
+    return "active";
+  }
+
+  private async publicProblemScope(problemId: string): Promise<{ unlisted: boolean } | null> {
+    const row = await this.options.db
+      .prepare(`SELECT p.id, p.unlisted FROM problems p WHERE p.id = ? AND ${PUBLIC_PROBLEM_SQL}`)
+      .bind(problemId)
+      .first<{ id: string; unlisted: number }>();
+    if (row === null || row === undefined) return null;
+    return { unlisted: row.unlisted === 1 };
   }
 
   private async publicProblem(problemId: string): Promise<boolean> {
-    const row = await this.options.db
-      .prepare(`SELECT p.id FROM problems p WHERE p.id = ? AND ${PUBLIC_PROBLEM_SQL}`)
-      .bind(problemId)
-      .first<{ id: string }>();
-    return row !== null && row !== undefined;
+    return (await this.publicProblemScope(problemId)) !== null;
   }
 
   private async visibleCommentary(problemId: string, commentaryId: string) {
@@ -398,6 +539,258 @@ export class CommentaryService {
     return { ...item, superseded_by_commentary_id: null, updated_at: item.created_at };
   }
 
+  /**
+   * Sealed replay for non-committed screening outcomes bound to the same
+   * (sponsor, problem, idempotency_key) within 24h. Never re-calls Workers AI
+   * while a case stays pending or rejected; permits clean operator-release retry
+   * once a reviewer or appeal releases the exact case.
+   */
+  private async replayNonCommittedAttempt(input: {
+    sponsorId: string;
+    problemId: string;
+    key: string;
+    digest: string;
+    now: number;
+  }): Promise<Response | "in_flight" | undefined> {
+    const row = await this.options.db
+      .prepare(
+        `SELECT reservation_id, request_digest, reserved_at, expires_at, status, case_id, event_id
+           FROM sponsor_commentary_attempt_reservations
+          WHERE sponsor_id = ? AND problem_id = ? AND idempotency_key = ?
+            AND reserved_at > ?
+          ORDER BY reserved_at DESC, reservation_id DESC
+          LIMIT 1`,
+      )
+      .bind(input.sponsorId, input.problemId, input.key, input.now - IDEMPOTENCY_TTL_MS)
+      .first<CommentaryAttemptRow>();
+    if (!row) return undefined;
+    if (row.request_digest !== input.digest) return idempotencyConflict();
+    if (row.status === "reserved" && row.expires_at > input.now) return "in_flight";
+    if (
+      (row.status === "settled_held" || row.status === "settled_rejected") &&
+      row.case_id !== null
+    ) {
+      const stored = await getScreeningCase(this.options.db, row.case_id);
+      if (!stored || stored.sponsor_id !== input.sponsorId || stored.problem_id !== input.problemId)
+        return undefined;
+      // Re-resolve via screeningCaseFor so appellate releases take effect immediately.
+      const resolved =
+        (await screeningCaseFor(
+          this.options.db,
+          sponsorCaseActorId(input.sponsorId),
+          input.problemId,
+          stored.input_digest,
+        )) ?? stored;
+      if (resolved.state === "released") return undefined;
+      const category = ScreeningCoarseCategorySchema.safeParse(resolved.coarse_category);
+      const safeCategory = category.success ? category.data : "provider-unavailable";
+      if (resolved.state === "pending") {
+        return screeningHoldResponse(safeCategory, resolved.case_id);
+      }
+      if (resolved.state === "rejected") {
+        const denied = ScreeningPromotionDeniedResponseSchema.safeParse({
+          code: "POLICY_DENIED",
+          coarse_category: safeCategory,
+          appeal: SCREENING_APPEAL_CODE,
+          case_id: resolved.case_id,
+        });
+        if (denied.success) {
+          return new Response(JSON.stringify(denied.data), {
+            status: 403,
+            headers: {
+              "content-type": "application/json; charset=utf-8",
+              "cache-control": "private, no-store",
+            },
+          });
+        }
+        return screeningHoldResponse("provider-unavailable", resolved.case_id);
+      }
+    }
+    return undefined;
+  }
+
+  private async reserveAttempt(input: {
+    sponsorId: string;
+    problemId: string;
+    key: string;
+    digest: string;
+    now: number;
+    sponsorLimit: number;
+  }): Promise<
+    | { readonly ok: true; readonly reservationId: string }
+    | { readonly ok: false; readonly reason: "rate_limited"; readonly response: Response }
+    | { readonly ok: false; readonly reason: "in_flight" }
+    | { readonly ok: false; readonly reason: "conflict" }
+  > {
+    const db = this.options.db;
+    const now = input.now;
+    // 1. Recover expired in-flight commentary reservations for this sponsor.
+    await db
+      .prepare(
+        `UPDATE sponsor_commentary_attempt_reservations
+            SET status = 'recovered', settled_at = ?
+          WHERE sponsor_id = ? AND status = 'reserved' AND expires_at <= ?`,
+      )
+      .bind(now, input.sponsorId, now)
+      .run();
+
+    // 2. Check rolling-minute commentary attempt cap AND shared sponsor hourly cap.
+    const [minuteAttempts, minuteCommitted, hourPromotionAttempts, hourCommentaryAttempts] =
+      await Promise.all([
+        db
+          .prepare(
+            `SELECT COUNT(*) AS cnt FROM sponsor_commentary_attempt_reservations
+              WHERE sponsor_id = ? AND reserved_at > ?`,
+          )
+          .bind(input.sponsorId, now - 60_000)
+          .first<{ cnt: number }>(),
+        db
+          .prepare(
+            `SELECT COUNT(*) AS cnt FROM problem_commentaries
+              WHERE sponsor_id = ? AND created_at > ?`,
+          )
+          .bind(input.sponsorId, new Date(now - 60_000).toISOString())
+          .first<{ cnt: number }>(),
+        db
+          .prepare(
+            `SELECT COUNT(*) AS cnt FROM public_write_attempt_reservations
+              WHERE sponsor_id = ? AND reserved_at > ?`,
+          )
+          .bind(input.sponsorId, now - PROMOTION_RATE_LIMIT_WINDOW_MS)
+          .first<{ cnt: number }>(),
+        db
+          .prepare(
+            `SELECT COUNT(*) AS cnt FROM sponsor_commentary_attempt_reservations
+              WHERE sponsor_id = ? AND reserved_at > ?`,
+          )
+          .bind(input.sponsorId, now - PROMOTION_RATE_LIMIT_WINDOW_MS)
+          .first<{ cnt: number }>(),
+      ]);
+
+    const perMinuteCount = Math.max(minuteAttempts?.cnt ?? 0, minuteCommitted?.cnt ?? 0);
+    if (perMinuteCount >= COMMENTARY_RATE_LIMIT_PER_MINUTE) {
+      return { ok: false, reason: "rate_limited", response: rateLimited(60) };
+    }
+    const perHourSponsorCount =
+      (hourPromotionAttempts?.cnt ?? 0) + (hourCommentaryAttempts?.cnt ?? 0);
+    if (perHourSponsorCount >= input.sponsorLimit) {
+      return {
+        ok: false,
+        reason: "rate_limited",
+        response: rateLimited(
+          3600,
+          `This sponsor has reached its rolling-hour public-write screening budget (${input.sponsorLimit}/hour).`,
+        ),
+      };
+    }
+
+    // 3. Atomic pre-provider reservation insert: enforces single-flight per key,
+    // the 20/min commentary trigger, AND the shared sponsor hourly cap atomically
+    // inside SQL (closing concurrent TOCTOU bursts at sponsorLimit - 1).
+    const reservationId = `CQ-${crypto.randomUUID()}`;
+    const hourWindowStart = now - PROMOTION_RATE_LIMIT_WINDOW_MS;
+    try {
+      const inserted = await db
+        .prepare(
+          `INSERT INTO sponsor_commentary_attempt_reservations (
+             reservation_id, sponsor_id, problem_id, idempotency_key,
+             request_digest, reserved_at, expires_at, status
+           ) SELECT ?, ?, ?, ?, ?, ?, ?, 'reserved'
+              WHERE (
+                (SELECT COUNT(*) FROM public_write_attempt_reservations
+                  WHERE sponsor_id = ? AND reserved_at > ?) +
+                (SELECT COUNT(*) FROM sponsor_commentary_attempt_reservations
+                  WHERE sponsor_id = ? AND reserved_at > ?)
+              ) < ?`,
+        )
+        .bind(
+          reservationId,
+          input.sponsorId,
+          input.problemId,
+          input.key,
+          input.digest,
+          now,
+          now + COMMENTARY_RESERVATION_EXPIRY_MS,
+          input.sponsorId,
+          hourWindowStart,
+          input.sponsorId,
+          hourWindowStart,
+          input.sponsorLimit,
+        )
+        .run();
+      if ((inserted.meta?.changes ?? 0) === 0) {
+        // Distinguish a concurrent same-key in-flight retry on the final hourly slot
+        // from a genuinely new request exceeding the shared sponsor budget.
+        const inflight = await db
+          .prepare(
+            `SELECT request_digest FROM sponsor_commentary_attempt_reservations
+              WHERE sponsor_id = ? AND problem_id = ? AND idempotency_key = ?
+                AND status = 'reserved' AND expires_at > ?
+              LIMIT 1`,
+          )
+          .bind(input.sponsorId, input.problemId, input.key, now)
+          .first<{ request_digest: string }>();
+        if (inflight) {
+          return inflight.request_digest !== input.digest
+            ? { ok: false, reason: "conflict" }
+            : { ok: false, reason: "in_flight" };
+        }
+        return {
+          ok: false,
+          reason: "rate_limited",
+          response: rateLimited(
+            3600,
+            `This sponsor has reached its rolling-hour public-write screening budget (${input.sponsorLimit}/hour).`,
+          ),
+        };
+      }
+      return { ok: true, reservationId };
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      if (msg.includes("COMMENTARY_RATE_LIMIT_EXCEEDED")) {
+        return { ok: false, reason: "rate_limited", response: rateLimited(60) };
+      }
+      if (
+        msg.includes("UNIQUE constraint failed") ||
+        msg.includes("sponsor_commentary_reservations_inflight_idx")
+      ) {
+        const inflight = await db
+          .prepare(
+            `SELECT request_digest FROM sponsor_commentary_attempt_reservations
+              WHERE sponsor_id = ? AND problem_id = ? AND idempotency_key = ?
+                AND status = 'reserved' AND expires_at > ?
+              LIMIT 1`,
+          )
+          .bind(input.sponsorId, input.problemId, input.key, now)
+          .first<{ request_digest: string }>();
+        if (inflight && inflight.request_digest !== input.digest) {
+          return { ok: false, reason: "conflict" };
+        }
+        return { ok: false, reason: "in_flight" };
+      }
+      throw error;
+    }
+  }
+
+  private async settleAttempt(
+    reservationId: string,
+    status: "settled_held" | "settled_rejected" | "settled_failed",
+    caseId?: string | null,
+  ): Promise<void> {
+    try {
+      await this.options.db
+        .prepare(
+          `UPDATE sponsor_commentary_attempt_reservations
+              SET status = ?, settled_at = ?, case_id = COALESCE(?, case_id)
+            WHERE reservation_id = ? AND status = 'reserved'`,
+        )
+        .bind(status, Date.now(), caseId ?? null, reservationId)
+        .run();
+    } catch {
+      // Best-effort settlement; refusal or error stands.
+    }
+  }
+
   private async priorRefusal(sponsorId: string, problemId: string, commentaryId: string) {
     const prior = await this.visibleCommentary(problemId, commentaryId);
     if (!prior) return commentaryNotFound();
@@ -422,20 +815,32 @@ export class CommentaryService {
   }
 
   private async rateExceeded(sponsorId: string): Promise<boolean> {
-    const recent = await this.options.db
-      .prepare(`SELECT COUNT(*) AS cnt FROM problem_commentaries
-        WHERE sponsor_id = ? AND created_at > ?`)
-      .bind(sponsorId, new Date(Date.now() - 60_000).toISOString())
-      .first<{ cnt: number }>();
-    return (recent?.cnt ?? 0) >= COMMENTARY_RATE_LIMIT_PER_MINUTE;
+    const now = Date.now();
+    const [recentCommitted, recentAttempts] = await Promise.all([
+      this.options.db
+        .prepare(`SELECT COUNT(*) AS cnt FROM problem_commentaries
+          WHERE sponsor_id = ? AND created_at > ?`)
+        .bind(sponsorId, new Date(now - 60_000).toISOString())
+        .first<{ cnt: number }>(),
+      this.options.db
+        .prepare(`SELECT COUNT(*) AS cnt FROM sponsor_commentary_attempt_reservations
+          WHERE sponsor_id = ? AND reserved_at > ?`)
+        .bind(sponsorId, now - 60_000)
+        .first<{ cnt: number }>(),
+    ]);
+    return (
+      Math.max(recentCommitted?.cnt ?? 0, recentAttempts?.cnt ?? 0) >=
+      COMMENTARY_RATE_LIMIT_PER_MINUTE
+    );
   }
 
-  async listCommentaries(
+  async listCommentariesWithScope(
     problemId: string,
     query: CommentaryListQuery,
-  ): Promise<CommentaryListResponse | null> {
+  ): Promise<{ readonly list: CommentaryListResponse; readonly unlisted: boolean } | null> {
     const db = this.options.db;
-    if (!(await this.publicProblem(problemId))) return null;
+    const scopeBefore = await this.publicProblemScope(problemId);
+    if (!scopeBefore) return null;
 
     const cursor = query.cursor ?? 0;
     const limit = Math.min(Math.max(query.limit ?? 50, 1), 100);
@@ -451,13 +856,14 @@ export class CommentaryService {
       .all<CommentaryRow>();
 
     const items = rows.results ?? [];
-    if (!(await this.publicProblem(problemId))) return null;
+    const scopeAfter = await this.publicProblemScope(problemId);
+    if (!scopeAfter) return null;
     const hasMore = items.length > limit;
     const paged = hasMore ? items.slice(0, limit) : items;
     const lastItem = paged.at(-1);
     const maxSeq = lastItem?.seq ?? cursor;
 
-    return CommentaryListResponseSchema.parse({
+    const list = CommentaryListResponseSchema.parse({
       schema: COMMENTARY_SCHEMA_ID,
       problem_id: problemId,
       cursor: maxSeq,
@@ -467,6 +873,15 @@ export class CommentaryService {
         "Sponsor commentary is human discussion; it is excluded from scientific claims, proof trees, and disposition calculation (Rule A2)",
       ],
     });
+    return { list, unlisted: scopeBefore.unlisted || scopeAfter.unlisted };
+  }
+
+  async listCommentaries(
+    problemId: string,
+    query: CommentaryListQuery,
+  ): Promise<CommentaryListResponse | null> {
+    const result = await this.listCommentariesWithScope(problemId, query);
+    return result ? result.list : null;
   }
 
   async postCommentary(
@@ -502,9 +917,11 @@ export class CommentaryService {
     const existing = await this.replay(replayInput);
     if (existing instanceof Response) return { ok: false, response: existing };
     if (existing) return { ok: true, item: existing, isReplay: true };
-    if (!(await this.activeSponsor(sponsorId)))
-      return { ok: false, response: sponsorUnavailable() };
-    if (await this.rateExceeded(sponsorId)) return { ok: false, response: rateLimited() };
+
+    const status = await this.sponsorStatus(sponsorId);
+    if (status === "deleted") return { ok: false, response: sponsorUnavailable() };
+    if (status === "suspended") return { ok: false, response: sponsorSuspended() };
+
     if (input.supersedes_commentary_id) {
       const refused = await this.priorRefusal(
         sponsorId,
@@ -514,6 +931,9 @@ export class CommentaryService {
       if (refused) return { ok: false, response: refused };
     }
 
+    // Every human-authored public field is scanned deterministically for
+    // credential-shaped material before reaching quota reservation, Workers AI,
+    // or public storage (P7/§10.4).
     const credentialFields: Record<string, string | undefined> = { body: input.body };
     for (const [index, ref] of (input.relates_to ?? []).entries()) {
       credentialFields[`relates_to[${index}].id`] = ref.id;
@@ -531,40 +951,129 @@ export class CommentaryService {
       };
     }
 
-    // Every human-authored public field is screened, including link labels.
+    // Sealed replay for prior non-committed screening outcomes on the same key.
+    const nowMs = Date.now();
+    const waitForInFlight = async (): Promise<
+      | { readonly ok: true; readonly item: CommentaryItem; readonly isReplay: boolean }
+      | { readonly ok: false; readonly response: Response }
+    > => {
+      for (let attempt = 0; attempt < 12; attempt++) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        const committed = await this.replay(replayInput);
+        if (committed instanceof Response) return { ok: false, response: committed };
+        if (committed) return { ok: true, item: committed, isReplay: true };
+        const nonCommitted = await this.replayNonCommittedAttempt({
+          sponsorId,
+          problemId: input.problem_id,
+          key: idempotencyKey,
+          digest: requestDigest,
+          now: Date.now(),
+        });
+        if (nonCommitted instanceof Response) return { ok: false, response: nonCommitted };
+        if (nonCommitted === undefined) break;
+      }
+      return { ok: false, response: idempotencyInFlight() };
+    };
+
+    const sealed = await this.replayNonCommittedAttempt({
+      sponsorId,
+      problemId: input.problem_id,
+      key: idempotencyKey,
+      digest: requestDigest,
+      now: nowMs,
+    });
+    if (sealed instanceof Response) return { ok: false, response: sealed };
+    if (sealed === "in_flight") return waitForInFlight();
+
+    // Atomic pre-provider attempt reservation (per-minute + shared sponsor hourly cap).
+    let sponsorLimit: number;
+    try {
+      sponsorLimit = parseSponsorLimit(this.options.sponsorLimit);
+    } catch {
+      return { ok: false, response: screeningHoldResponse("provider-unavailable") };
+    }
+    const reserved = await this.reserveAttempt({
+      sponsorId,
+      problemId: input.problem_id,
+      key: idempotencyKey,
+      digest: requestDigest,
+      now: nowMs,
+      sponsorLimit,
+    });
+    if (!reserved.ok) {
+      const committed = await this.replay(replayInput);
+      if (committed instanceof Response) return { ok: false, response: committed };
+      if (committed) return { ok: true, item: committed, isReplay: true };
+      if (reserved.reason === "rate_limited") return { ok: false, response: reserved.response };
+      if (reserved.reason === "conflict") return { ok: false, response: idempotencyConflict() };
+      return waitForInFlight();
+    }
+    const reservationId = reserved.reservationId;
+
+    // Every human-authored public field is screened through the shared
+    // contextual public-candidate boundary, including link IDs and labels.
     // Each field stays on its own line so L0's line-start markers still apply.
     const publicText = [
       input.body,
       ...(input.relates_to ?? []).flatMap((ref) => [ref.id, ref.label ?? ""]),
     ].join("\n\n");
-    const screening = await screenCommentaryText(
-      publicText,
-      input.problem_id,
-      sponsorId,
-      this.options.ai,
-    );
 
-    if (!screening.ok) {
-      const denied = ScreeningPromotionDeniedResponseSchema.safeParse({
-        code: "POLICY_DENIED",
-        coarse_category: screening.category,
-        appeal: SCREENING_APPEAL_CODE,
-      });
-      if (screening.unavailable || !denied.success)
-        return { ok: false, response: screeningUnavailable() };
-      return {
-        ok: false,
-        response: new Response(JSON.stringify(denied.data), {
-          status: 403,
-          headers: {
-            "content-type": "application/json; charset=utf-8",
-            "cache-control": "no-store",
-          },
-        }),
-      };
+    let screened: Awaited<ReturnType<typeof screenPublicCandidate>>;
+    try {
+      screened = await screenPublicCandidate(
+        createCommentaryScreener(this.options.screenPromotion),
+        { DB: db, AI: this.options.ai } as Env,
+        {
+          problemId: input.problem_id,
+          fellowId: sponsorCaseActorId(sponsorId),
+          kind: "commentary",
+          statement: publicText,
+          falsifier: null,
+        },
+        {
+          sponsorId,
+          route: "post-commentary",
+          authorKind: "sponsor",
+        },
+      );
+
+      if (screened instanceof Response) {
+        const caseId = await extractCaseId(screened);
+        await this.settleAttempt(
+          reservationId,
+          screened.status === 202
+            ? "settled_held"
+            : screened.status === 403
+              ? "settled_rejected"
+              : "settled_failed",
+          caseId,
+        );
+        console.info(
+          JSON.stringify({
+            facility: "OPS.2a",
+            stage: "sponsor-commentary-post",
+            sponsor_id: sponsorId,
+            problem_id: input.problem_id,
+            request_digest: requestDigest,
+            case_id: caseId,
+            screening_result:
+              screened.status === 202
+                ? "held"
+                : screened.status === 403
+                  ? "rejected"
+                  : "unavailable",
+            status_code: screened.status,
+            duration_ms: Math.round(performance.now() - startTime),
+          }),
+        );
+        return { ok: false, response: screened };
+      }
+    } catch (error) {
+      await this.settleAttempt(reservationId, "settled_failed");
+      throw error;
     }
 
-    // 6. Write Krater ledger event
+    // Write Krater ledger event + projection + screening provenance + attempt settlement atomically.
     const now = new Date().toISOString();
     const commentaryId = `COMM-${crypto.randomUUID().replace(/-/g, "")}`;
     const eventId = `EV-COMM-${crypto.randomUUID()}`;
@@ -574,10 +1083,12 @@ export class CommentaryService {
       input.problem_id,
       sponsorId,
       sponsorId,
+      sponsorId,
       COMMENTARY_RATE_LIMIT_PER_MINUTE,
     ];
     let preconditionSql = ` AND EXISTS (SELECT 1 FROM problems p WHERE p.id = ? AND ${PUBLIC_PROBLEM_SQL})
       AND EXISTS (SELECT 1 FROM sponsors WHERE sponsor_id = ? AND tombstoned_at IS NULL)
+      AND NOT EXISTS (SELECT 1 FROM sponsor_suspension_events WHERE sponsor_id = ?)
       AND (SELECT COUNT(*) FROM problem_commentaries rate_commentary
         WHERE rate_commentary.sponsor_id = ?
           AND rate_commentary.created_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-60 seconds')) < ?`;
@@ -621,8 +1132,9 @@ export class CommentaryService {
           },
         },
         {
-          // D1 rechecks the public scope, rolling window, and exact prior head
-          // in the same transaction that allocates the event and links the chain.
+          // D1 rechecks the public scope, sponsor standing, rolling window,
+          // exact prior head, screening decision and publication context in the
+          // same transaction that allocates the event and links the chain.
           preconditionSql,
           preconditionBindings,
           statementsAfterEvent: (settlement) => {
@@ -678,21 +1190,65 @@ export class CommentaryService {
               );
             }
 
+            stmts.push(screeningDecisionGuardStatement(db, screened, eventId));
+            if (screened.contextGuard !== undefined) {
+              stmts.push(screeningContextGuardStatement(db, screened.contextGuard, eventId));
+            }
+            stmts.push(
+              db
+                .prepare(
+                  `INSERT INTO screening_publications (event_id, request_digest, provenance_json)
+                   SELECT id, ?, ? FROM events
+                    WHERE id = ? AND problem_id = ? AND actor_sponsor_id = ? AND actor_fellow_id IS NULL`,
+                )
+                .bind(
+                  requestDigest,
+                  JSON.stringify(screened.provenance),
+                  eventId,
+                  input.problem_id,
+                  sponsorId,
+                ),
+            );
+            if (screened.supersedeInputDigest !== undefined) {
+              stmts.push(supersedeHeldCaseStatement(db, screened, eventId));
+            }
+            stmts.push(
+              db
+                .prepare(
+                  `UPDATE sponsor_commentary_attempt_reservations
+                      SET status = 'settled_published', settled_at = ?, event_id = ?
+                    WHERE reservation_id = ? AND status = 'reserved'
+                      AND EXISTS (SELECT 1 FROM events WHERE id = ?)`,
+                )
+                .bind(Date.now(), eventId, reservationId, eventId),
+            );
+
             return stmts;
           },
         },
       );
     } catch (error) {
+      await this.settleAttempt(
+        reservationId,
+        isScreeningDecisionChangedError(error) ? "settled_held" : "settled_failed",
+      );
       const winner = await this.replay(replayInput);
       if (winner instanceof Response) return { ok: false, response: winner };
       if (winner) return { ok: true, item: winner, isReplay: true };
+      if (isScreeningDecisionChangedError(error)) {
+        return { ok: false, response: screeningHoldResponse("provider-unavailable") };
+      }
+      if (isScreeningContextStaleError(error)) {
+        return { ok: false, response: screeningContextStaleProblem() };
+      }
       if (error instanceof KraterIdempotencyConflictError)
         return { ok: false, response: idempotencyConflict() };
       if (error instanceof KraterLedgerPreconditionError) {
         if (!(await this.publicProblem(input.problem_id)))
           return { ok: false, response: problemNotFound() };
-        if (!(await this.activeSponsor(sponsorId)))
-          return { ok: false, response: sponsorUnavailable() };
+        const postStatus = await this.sponsorStatus(sponsorId);
+        if (postStatus === "deleted") return { ok: false, response: sponsorUnavailable() };
+        if (postStatus === "suspended") return { ok: false, response: sponsorSuspended() };
         if (input.supersedes_commentary_id) {
           const refused = await this.priorRefusal(
             sponsorId,
@@ -705,13 +1261,17 @@ export class CommentaryService {
       }
       throw error;
     }
+    // If an idempotent race won, settle our losing reservation cleanly.
+    if (writeResult.idempotent) {
+      await this.settleAttempt(reservationId, "settled_failed");
+    }
     // A same-key concurrent writer can win after the preflight. Its committed
     // event owns the receipt; a freshly minted losing ID must never escape.
     const item = await this.replay(replayInput);
     if (item instanceof Response) return { ok: false, response: item };
     if (!item) throw new Error("Commentary publication has no committed replay receipt");
 
-    // 7. OPS.2a structured logging (safe, no body/tokens)
+    // OPS.2a structured logging (safe, no body/tokens)
     const durationMs = Math.round(performance.now() - startTime);
     const publicBodyDigest = `sha256:${await sha256Hex(publicText)}`;
     console.info(
@@ -726,7 +1286,8 @@ export class CommentaryService {
         relates_to_count: (input.relates_to ?? []).length,
         request_digest: requestDigest,
         public_seq: writeResult.seq,
-        screening_result: "pass",
+        screening_result: screened.provenance.outcome,
+        screening_notice: screened.provenance.public_action.notice,
         status_code: writeResult.idempotent ? 200 : 201,
         duration_ms: durationMs,
       }),
@@ -767,8 +1328,10 @@ export class CommentaryService {
     const existing = await this.replay(replayInput);
     if (existing instanceof Response) return { ok: false, response: existing };
     if (existing) return { ok: true, item: existing };
-    if (!(await this.activeSponsor(sponsorId)))
-      return { ok: false, response: sponsorUnavailable() };
+
+    const status = await this.sponsorStatus(sponsorId);
+    if (status === "deleted") return { ok: false, response: sponsorUnavailable() };
+    if (status === "suspended") return { ok: false, response: sponsorSuspended() };
 
     const target = await this.visibleCommentary(input.problem_id, input.commentary_id);
     if (!target) return { ok: false, response: commentaryNotFound() };
@@ -779,7 +1342,7 @@ export class CommentaryService {
       return { ok: true, item: rowToCommentaryItem(target) };
     }
 
-    // 2. Write Krater tombstone event
+    // Write Krater tombstone event
     const eventId = `EV-COMM-TOMB-${crypto.randomUUID()}`;
     let committedEventId = eventId;
     try {
@@ -812,12 +1375,19 @@ export class CommentaryService {
           },
         },
         {
-          // A concurrent tombstone is a no-op; withdrawal of public scope or
-          // source content must not let this write leak a retained projection.
+          // A concurrent tombstone is a no-op; withdrawal of public scope,
+          // sponsor suspension, or source redaction must not leak a projection.
           preconditionSql: ` AND EXISTS (SELECT 1 FROM sponsors WHERE sponsor_id = ? AND tombstoned_at IS NULL)
+            AND NOT EXISTS (SELECT 1 FROM sponsor_suspension_events WHERE sponsor_id = ?)
             AND EXISTS (SELECT 1 ${COMMENTARY_SOURCE_SQL}
             AND pc.id = ? AND pc.problem_id = ? AND pc.sponsor_id = ? AND pc.tombstoned = 0)`,
-          preconditionBindings: [sponsorId, input.commentary_id, input.problem_id, sponsorId],
+          preconditionBindings: [
+            sponsorId,
+            sponsorId,
+            input.commentary_id,
+            input.problem_id,
+            sponsorId,
+          ],
           statementsAfterEvent: () => {
             return [
               db
@@ -844,11 +1414,11 @@ export class CommentaryService {
       if (winner instanceof Response) return { ok: false, response: winner };
       if (winner) return { ok: true, item: winner };
       if (error instanceof KraterLedgerPreconditionError) {
-        // Already tombstoned by a concurrent request: the idempotent outcome.
         if (!(await this.publicProblem(input.problem_id)))
           return { ok: false, response: problemNotFound() };
-        if (!(await this.activeSponsor(sponsorId)))
-          return { ok: false, response: sponsorUnavailable() };
+        const postStatus = await this.sponsorStatus(sponsorId);
+        if (postStatus === "deleted") return { ok: false, response: sponsorUnavailable() };
+        if (postStatus === "suspended") return { ok: false, response: sponsorSuspended() };
         const current = await this.visibleCommentary(input.problem_id, input.commentary_id);
         if (!current) return { ok: false, response: commentaryNotFound() };
         // Only a tombstone that actually landed is the idempotent outcome; an

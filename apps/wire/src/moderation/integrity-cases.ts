@@ -485,6 +485,7 @@ export class IntegrityCaseLedger {
     if (viewer.principal_class === "operator") {
       if (
         viewer.actor_id === existing.affected_sponsor_id ||
+        viewer.actor_id === existing.reporter_sponsor_id ||
         existing.conflicted_actors.includes(viewer.actor_id)
       ) {
         throw new Error("INVESTIGATOR_CONFLICT_OF_INTEREST");
@@ -615,7 +616,7 @@ export class IntegrityCaseLedger {
     const updated: IntegrityCaseRecord = {
       ...existing,
       investigator_id: operator.actor_id,
-      state: "awaiting-response",
+      state: existing.state === "under-review" ? "under-review" : "awaiting-response",
       updated_at: nowIso,
     };
     this.cases.set(caseId, updated);
@@ -694,6 +695,9 @@ export class IntegrityCaseLedger {
       !SAFE_EVENT_ID_RE.test(input.event_id)
     ) {
       throw new Error("INVALID_CORRECTION_LINK");
+    }
+    if (existing.state === "dismissed-unsubstantiated" || existing.state === "appeal-overturned") {
+      throw new Error("INTEGRITY_CASE_DISMISSED_NO_CORRECTION_LINK");
     }
     if (existing.correction_links.some((l) => l.event_id === input.event_id)) {
       throw new Error("DUPLICATE_CORRECTION_LINK_EVENT");
@@ -1069,6 +1073,69 @@ export class D1IntegrityCaseStore {
         )`,
       )
       .run();
+
+    await this.db
+      .prepare(
+        `CREATE TRIGGER IF NOT EXISTS scientific_integrity_cases_no_delete
+         BEFORE DELETE ON scientific_integrity_cases
+         BEGIN
+           SELECT RAISE(ABORT, 'scientific_integrity_cases rows cannot be deleted');
+         END`,
+      )
+      .run();
+
+    await this.db
+      .prepare(
+        `CREATE TRIGGER IF NOT EXISTS scientific_integrity_cases_immutable_guards
+         BEFORE UPDATE ON scientific_integrity_cases
+         WHEN OLD.case_id != NEW.case_id
+           OR OLD.problem_id != NEW.problem_id
+           OR OLD.target_ref != NEW.target_ref
+           OR OLD.affected_fellow_id != NEW.affected_fellow_id
+           OR OLD.affected_sponsor_id != NEW.affected_sponsor_id
+           OR OLD.intake_source != NEW.intake_source
+           OR COALESCE(OLD.reporter_sponsor_id, '') != COALESCE(NEW.reporter_sponsor_id, '')
+           OR OLD.allegation_class != NEW.allegation_class
+           OR OLD.evidence_anchor != NEW.evidence_anchor
+           OR OLD.evidence_digest != NEW.evidence_digest
+           OR OLD.created_at != NEW.created_at
+           OR (
+             OLD.state IN ('dismissed-unsubstantiated', 'appeal-upheld', 'appeal-overturned')
+             AND (
+               NEW.state != OLD.state
+               OR NEW.visibility_action != OLD.visibility_action
+               OR NEW.minimized != OLD.minimized
+               OR COALESCE(NEW.restricted_evidence_body, '') != COALESCE(OLD.restricted_evidence_body, '')
+               OR COALESCE(NEW.strike_handoff_json, '') != COALESCE(OLD.strike_handoff_json, '')
+               OR COALESCE(NEW.decided_by, '') != COALESCE(OLD.decided_by, '')
+               OR COALESCE(NEW.appeal_decided_by, '') != COALESCE(OLD.appeal_decided_by, '')
+             )
+           )
+         BEGIN
+           SELECT RAISE(ABORT, 'scientific_integrity_cases binding fields and terminal outcomes are immutable');
+         END`,
+      )
+      .run();
+
+    await this.db
+      .prepare(
+        `CREATE TRIGGER IF NOT EXISTS scientific_integrity_links_no_update
+         BEFORE UPDATE ON scientific_integrity_correction_links
+         BEGIN
+           SELECT RAISE(ABORT, 'scientific_integrity_correction_links rows are append-only');
+         END`,
+      )
+      .run();
+
+    await this.db
+      .prepare(
+        `CREATE TRIGGER IF NOT EXISTS scientific_integrity_links_no_delete
+         BEFORE DELETE ON scientific_integrity_correction_links
+         BEGIN
+           SELECT RAISE(ABORT, 'scientific_integrity_correction_links rows cannot be deleted');
+         END`,
+      )
+      .run();
   }
 
   private async hydrate(row: RawIntegrityCaseRow): Promise<IntegrityCaseRecord> {
@@ -1143,6 +1210,7 @@ export class D1IntegrityCaseStore {
     if (viewer.principal_class === "operator") {
       if (
         viewer.actor_id === existing.affected_sponsor_id ||
+        viewer.actor_id === existing.reporter_sponsor_id ||
         existing.conflicted_actors.includes(viewer.actor_id)
       ) {
         throw new Error("INVESTIGATOR_CONFLICT_OF_INTEREST");
@@ -1262,7 +1330,9 @@ export class D1IntegrityCaseStore {
     const res = await this.db
       .prepare(
         `UPDATE scientific_integrity_cases
-         SET investigator_id = ?, state = 'awaiting-response', updated_at = ?
+         SET investigator_id = ?,
+             state = CASE WHEN state = 'under-review' THEN 'under-review' ELSE 'awaiting-response' END,
+             updated_at = ?
          WHERE case_id = ? AND state IN ('intake', 'under-review', 'awaiting-response')`,
       )
       .bind(operator.actor_id, nowIso, caseId)
@@ -1353,6 +1423,9 @@ export class D1IntegrityCaseStore {
     ) {
       throw new Error("INVALID_CORRECTION_LINK");
     }
+    if (existing.state === "dismissed-unsubstantiated" || existing.state === "appeal-overturned") {
+      throw new Error("INTEGRITY_CASE_DISMISSED_NO_CORRECTION_LINK");
+    }
     if (existing.correction_links.some((l) => l.event_id === input.event_id)) {
       throw new Error("DUPLICATE_CORRECTION_LINK_EVENT");
     }
@@ -1374,8 +1447,12 @@ export class D1IntegrityCaseStore {
           nowIso,
         )
         .run();
-    } catch {
-      throw new Error("DUPLICATE_CORRECTION_LINK_EVENT");
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (/UNIQUE constraint failed/i.test(msg)) {
+        throw new Error("DUPLICATE_CORRECTION_LINK_EVENT");
+      }
+      throw err;
     }
     await this.db
       .prepare("UPDATE scientific_integrity_cases SET updated_at = ? WHERE case_id = ?")

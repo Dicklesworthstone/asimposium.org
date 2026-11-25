@@ -312,6 +312,11 @@ export async function readSynthesisPage(
       sponsor_id: row.sponsor_id,
       session_id: row.session_id,
       harness: row.harness,
+      ...(typeof p.published_by_principal_id === "string" &&
+      p.published_by_principal_id.length > 0 &&
+      p.published_by_principal_id.length <= 128
+        ? { published_by_principal_id: p.published_by_principal_id }
+        : {}),
       created_at: row.created_at,
       ...(screeningNotice === undefined ? {} : { screening_notice: screeningNotice }),
     });

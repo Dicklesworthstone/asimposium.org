@@ -15,6 +15,9 @@
 
 import { validatedProblem } from "../http/envelope";
 
+/** Shared deterministic P7 scanner policy version (kept in lockstep with cli/src/scrub.rs). */
+export const CREDENTIAL_SCAN_POLICY_VERSION = "p7-credential-scan-v2" as const;
+
 export type CredentialKind =
   | "fellow-token"
   | "prefixed-grant"
@@ -54,6 +57,18 @@ export const CREDENTIAL_PATTERNS: readonly CredentialPattern[] = Object.freeze([
   {
     kind: "access-token",
     pattern: /\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/,
+  },
+  // Auth.js / NextAuth session cookies (including __Host- / __Secure- prefixes).
+  {
+    kind: "access-token",
+    pattern:
+      /(?<![A-Za-z0-9_-])(?:__Secure-|__Host-)?(?:authjs|next-auth)\.session-token=[A-Za-z0-9._~-]{16,}/,
+  },
+  // ASImposium signed service-envelope header value (JSON wire shape or opaque token).
+  {
+    kind: "access-token",
+    pattern:
+      /(?<![A-Za-z0-9_-])asimp-service-envelope:[ \t]*(?:\{[^\n\r]{16,}|[A-Za-z0-9+/=._-]{24,})/i,
   },
 ]);
 

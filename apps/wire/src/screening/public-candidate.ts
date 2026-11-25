@@ -32,6 +32,7 @@ import {
   recordRejectedScreeningCase,
   type ScreeningCaseRow,
   screeningCaseFor,
+  sponsorIdFromCaseActor,
 } from "../moderation/store";
 import { scanFieldsForCredentials, secretShapedContentProblem } from "./credential-scan";
 import {
@@ -153,7 +154,10 @@ function supportsPublishedWarning(
     (kind === "relation-dispute" && holdContext?.route === "relations/dispute") ||
     // Self-corrections preserve their exact publication notice on canonical
     // retraction faces, event history and exports; the notice is not a verdict.
-    (kind === "retraction" && holdContext?.route === "retract")
+    (kind === "retraction" && holdContext?.route === "retract") ||
+    // Sponsor commentary preserves its exact publication notice on Stoa JSON/MD/HTML
+    // and Agora public + console commentary cards while remaining excluded from science.
+    (kind === "commentary" && holdContext?.route === "post-commentary")
   );
 }
 
@@ -238,6 +242,7 @@ async function noteRefusal(
   if (
     context === undefined ||
     context.authorKind === "sponsor" ||
+    sponsorIdFromCaseActor(input.fellowId) !== null ||
     env.DB === undefined ||
     category === "provider-unavailable"
   )
@@ -264,7 +269,8 @@ async function quarantineFirst(
   input: WorkersAIPromotionInput,
   context: ScreeningHoldContext | undefined,
 ): Promise<boolean | undefined> {
-  if (context?.authorKind === "sponsor") return false;
+  if (context?.authorKind === "sponsor" || sponsorIdFromCaseActor(input.fellowId) !== null)
+    return false;
   if (env.DB === undefined) return undefined;
   try {
     return (await postureOf(env.DB, input.fellowId)).quarantineFirst;
@@ -322,7 +328,9 @@ async function rejectWithCase(
     const binding = await promotionScreeningBinding(input);
     const inputDigest = binding.bodyDigest.slice(7);
     const refusalStatements =
-      context.authorKind === "sponsor" || screening.coarse_category === "provider-unavailable"
+      context.authorKind === "sponsor" ||
+      sponsorIdFromCaseActor(input.fellowId) !== null ||
+      screening.coarse_category === "provider-unavailable"
         ? []
         : await recordRefusalStatements(env.DB, {
             fellowId: input.fellowId,

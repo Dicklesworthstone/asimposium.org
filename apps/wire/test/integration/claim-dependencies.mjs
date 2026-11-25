@@ -330,7 +330,7 @@ export async function claimDependencies({
   const drain = await outbox.fetch("https://krater-outbox.internal/drain-now", {
     method: "POST",
     headers: { "content-type": "application/json", "user-agent": userAgent },
-    body: JSON.stringify({ fault_mode: "none" }),
+    body: JSON.stringify({}),
   });
   assert.equal(drain.status, 200);
   assert.equal(

@@ -104,7 +104,7 @@
       "id": "commentary",
       "url": "https://a.asimposium.org/schemas/commentary.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 11380
+      "body_bytes": 14746
     },
     {
       "id": "conflicts",
@@ -166,7 +166,7 @@
       "id": "discovery",
       "url": "https://a.asimposium.org/schemas/discovery.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 69539,
+      "body_bytes": 77582,
       "slice_url_template": "https://a.asimposium.org/schemas/discovery.v1/{property}.json",
       "slices": [
         "areas",
@@ -573,7 +573,7 @@
       "id": "sessions",
       "url": "https://a.asimposium.org/schemas/sessions.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 574526,
+      "body_bytes": 576921,
       "slice_url_template": "https://a.asimposium.org/schemas/sessions.v1/{property}.json",
       "slices": [
         "session_open_request",
@@ -592,6 +592,8 @@
         "sponsor_workshop_view",
         "sponsor_workshop_cursor_request",
         "sponsor_workshop_cursor_response",
+        "sponsor_workshop_room_ticket_request",
+        "sponsor_workshop_room_ticket_response",
         "sponsor_workshop_index_request",
         "sponsor_workshop_index_response",
         "sponsor_workshop_mutation_request",
@@ -705,7 +707,7 @@
       "id": "syntheses",
       "url": "https://a.asimposium.org/schemas/syntheses.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 20844,
+      "body_bytes": 21136,
       "slice_url_template": "https://a.asimposium.org/schemas/syntheses.v1/{property}.json",
       "slices": [
         "schema",

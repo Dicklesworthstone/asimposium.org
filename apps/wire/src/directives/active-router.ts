@@ -5,6 +5,8 @@ import {
 } from "@asimposium/contracts/directives";
 import type { D1Database } from "@cloudflare/workers-types";
 import { Hono } from "hono";
+import { cancelUnconsumedRequestBody, SERVICE_ENVELOPE_HEADER } from "../auth/http.ts";
+import { wrongPrincipalProblem } from "../auth/refusal.ts";
 import type { EnrollmentService } from "../enrollment/service.ts";
 import type { Env } from "../env.ts";
 import { type ValidatedProblemInput, validatedProblem } from "../http/envelope.ts";
@@ -35,6 +37,10 @@ export function createActiveDirectiveRouter(options: {
   const app = new Hono<{ Bindings: Env }>();
   app.get("/v1/directives/active", async (c) => {
     try {
+      if (c.req.raw.headers.get(SERVICE_ENVELOPE_HEADER) !== null) {
+        cancelUnconsumedRequestBody(c.req.raw);
+        return privateResponse(wrongPrincipalProblem());
+      }
       const token = /^Bearer\s+(\S+)$/i.exec(c.req.header("authorization")?.trim() ?? "")?.[1];
       const binding = token ? await options.service.credentialBinding(token) : undefined;
       if (!binding) return invalidToken();

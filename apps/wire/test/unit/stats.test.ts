@@ -496,6 +496,84 @@ describe("Measured /stats.{json,md} face (asimposiumorg-rc-stats-runbooks-cost-m
       sql.close();
     }
   });
+
+  test("REGRESSION (ADR-9 independence + exact-version retraction): T1 same-sponsor refute does not count as independent review and C-1@head retraction classifies as retracted", async () => {
+    const sql = new Database(":memory:");
+    try {
+      sql.exec(`
+        CREATE TABLE problems (
+          id TEXT PRIMARY KEY,
+          public_seq INTEGER NOT NULL DEFAULT 1,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'active',
+          unlisted INTEGER NOT NULL DEFAULT 0,
+          sponsor_id TEXT
+        );
+        CREATE TABLE claims (
+          problem_id TEXT NOT NULL,
+          id TEXT NOT NULL,
+          statement TEXT NOT NULL,
+          PRIMARY KEY (problem_id, id)
+        );
+        CREATE TABLE claim_versions (
+          problem_id TEXT NOT NULL,
+          claim_id TEXT NOT NULL,
+          version INTEGER NOT NULL,
+          PRIMARY KEY (problem_id, claim_id, version)
+        );
+        CREATE TABLE reviews (
+          problem_id TEXT NOT NULL,
+          review_id TEXT NOT NULL,
+          target_claim_id TEXT NOT NULL,
+          target_version INTEGER NOT NULL,
+          tier TEXT NOT NULL,
+          verdict TEXT NOT NULL,
+          capable_of_failure TEXT,
+          PRIMARY KEY (problem_id, review_id)
+        );
+        CREATE TABLE retractions (
+          retraction_id TEXT PRIMARY KEY,
+          problem_id TEXT NOT NULL,
+          target_object TEXT NOT NULL
+        );
+
+        INSERT INTO problems VALUES ('P-ADR9', 3, '2026-11-20T00:00:00.000Z', '2026-11-20T01:00:00.000Z', 'active', 0, 'usr_a');
+        INSERT INTO claims VALUES
+          ('P-ADR9', 'C-1', 'Claim with T1 same-sponsor refute only'),
+          ('P-ADR9', 'C-2', 'Claim whose head version @2 was retracted'),
+          ('P-ADR9', 'C-3', 'Claim whose superseded @1 was retracted but @2 is live');
+        INSERT INTO claim_versions VALUES
+          ('P-ADR9', 'C-1', 1),
+          ('P-ADR9', 'C-2', 1), ('P-ADR9', 'C-2', 2),
+          ('P-ADR9', 'C-3', 1), ('P-ADR9', 'C-3', 2);
+        -- Same-sponsor T1 refute moves disposition to refuted, but MUST NOT inflate independent (T2/T3) coverage.
+        INSERT INTO reviews VALUES
+          ('P-ADR9', 'R-T1-REF', 'C-1', 1, 'T1', 'refute', 'Same-sponsor counterexample');
+        -- Exact head-version retraction for C-2@2; older @1 retraction for C-3@1; non-claim E-1 retraction.
+        INSERT INTO retractions VALUES
+          ('RET-HEAD', 'P-ADR9', 'C-2@2'),
+          ('RET-OLD', 'P-ADR9', 'C-3@1'),
+          ('RET-EV', 'P-ADR9', 'E-1');
+      `);
+
+      const stats = await loadPlatformStats(sqliteAsD1(sql));
+      expect(stats.quality.claims_total).toBe(3);
+      expect(stats.quality.claims_by_disposition).toEqual({
+        refuted: 1,
+        retracted: 1,
+        open: 1,
+      });
+      // T1 refute is NOT sponsor-independent (T2/T3) -> independent coverage stays 0/3!
+      expect(stats.quality.consequential_claims_independent_review_coverage).toEqual({
+        numerator: 0,
+        denominator: 3,
+        rate: 0,
+      });
+    } finally {
+      sql.close();
+    }
+  });
 });
 
 describe("Fable §13.3 12 Named Operational Incident Runbooks (asimposiumorg-rc-stats-runbooks-cost-model-w4tz)", () => {

@@ -92,11 +92,19 @@ export interface CeremonyBreakerResult {
   } | null;
 }
 
-export interface CeremonyMoveContext {
-  readonly viewer: MoveViewer;
-  readonly permissions: MovePermissions;
-  readonly now: number;
-}
+export type CeremonyMoveContext =
+  | {
+      readonly mode?: "authenticated";
+      readonly viewer: MoveViewer;
+      readonly permissions: MovePermissions;
+      readonly now: number;
+    }
+  | {
+      readonly mode: "public";
+      readonly now: number;
+      readonly includeUnlisted: boolean;
+      readonly excludeOffScope: boolean;
+    };
 
 export interface CeremonyNeedReaders {
   readonly claims: (
@@ -105,6 +113,12 @@ export interface CeremonyNeedReaders {
     viewer: MoveViewer,
     permissions: MovePermissions,
     cursor: number,
+  ) => ReturnType<typeof loadLedgerMoves>;
+  readonly publicClaims?: (
+    db: D1Database,
+    problemId: string,
+    cursor: number,
+    options: { readonly includeUnlisted: boolean; readonly excludeOffScope: boolean },
   ) => ReturnType<typeof loadLedgerMoves>;
   readonly gap: typeof loadProofGapMove;
 }
@@ -210,7 +224,14 @@ export async function checkCeremonyBreaker(
   // Reuse the bounded scientific readers and their exact-version history,
   // content controls, withdrawal rules and authenticated reviewer exclusions.
   if (!context || !readers) return { ...result, degraded: true };
-  const queue = await readers.claims(db, problemId, context.viewer, context.permissions, cursor);
+  if (context.mode === "public" && !readers.publicClaims) return { ...result, degraded: true };
+  const queue =
+    context.mode === "public"
+      ? await readers.publicClaims!(db, problemId, cursor, {
+          includeUnlisted: context.includeUnlisted,
+          excludeOffScope: context.excludeOffScope,
+        })
+      : await readers.claims(db, problemId, context.viewer, context.permissions, cursor);
   const compare = (left: string, right: string) => (left < right ? -1 : left > right ? 1 : 0);
   const oldest = [...queue.items]
     .sort(
@@ -248,13 +269,19 @@ export async function checkCeremonyBreaker(
     };
   }
   if (
-    !context.permissions.session_open ||
-    !context.permissions.promote ||
+    (context.mode !== "public" &&
+      (!context.permissions.session_open || !context.permissions.promote)) ||
     !["active", "dormant", "under-result-review"].includes(problemStatus)
   )
     return { ...result, degraded: queue.degraded };
 
-  const gap = await readers.gap(db, problemId, cursor, context.now);
+  const gap = await readers.gap(
+    db,
+    problemId,
+    cursor,
+    context.now,
+    context.mode === "public" ? { excludeOffScope: context.excludeOffScope } : undefined,
+  );
   const target = gap.move?.refs[1];
   return {
     ...result,

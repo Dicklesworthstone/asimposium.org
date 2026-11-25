@@ -159,7 +159,7 @@ export function createEventTailRoutes(
         format = "sse";
       } else if (accept.includes("application/x-ndjson")) {
         format = "ndjson";
-      } else if (accept.includes("text/vnd.toon") || accept.includes("text/plain")) {
+      } else if (accept.includes("text/toon")) {
         format = "toon";
       }
     }

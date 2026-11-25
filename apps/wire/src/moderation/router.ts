@@ -20,7 +20,13 @@ import {
 } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
 import { type Context, Hono } from "hono";
-import { parseExactJsonBytes, readBoundedRequestBody } from "../auth/http.ts";
+import {
+  cancelUnconsumedRequestBody,
+  parseExactJsonBytes,
+  readBoundedRequestBody,
+  SERVICE_ENVELOPE_HEADER,
+} from "../auth/http.ts";
+import { wrongPrincipalProblem } from "../auth/refusal.ts";
 import type { EnrollmentService, FellowCredentialBinding } from "../enrollment/service.ts";
 import type { Env } from "../env.ts";
 import { validatedProblem as problem } from "../http/envelope.ts";
@@ -219,6 +225,10 @@ export function createModerationRouter(options: ModerationRouterOptions): Hono<{
   const app = new Hono<{ Bindings: Env }>();
 
   async function authenticateFellow(request: Request): Promise<FellowCredentialBinding | Response> {
+    if (request.headers.get(SERVICE_ENVELOPE_HEADER) !== null) {
+      cancelUnconsumedRequestBody(request);
+      return privateNoStore(wrongPrincipalProblem());
+    }
     const token = bearerToken(request);
     const binding =
       token === undefined ? undefined : await options.service.credentialBinding(token);

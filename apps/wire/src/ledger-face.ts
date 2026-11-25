@@ -41,13 +41,17 @@ import {
   neutralizeUntrustedBody,
   type PackCandidate,
   type Projection,
+  parseProblemsIndexToon,
   type RenderedFace,
   renderAllFaces,
   renderHypothesisEvidenceMarkdown,
+  renderProblemsIndexToon,
   renderProjection,
   renderPublicProblemMovesHtml,
   renderPublicProblemMovesMarkdown,
   safeCodeSpan,
+  TOON_MEDIA_TYPE,
+  ToonUnavailableError,
 } from "@asimposium/render";
 import {
   ClaimsListToonUnavailableError,
@@ -156,11 +160,95 @@ export const PROBLEM_INDEX_MARKDOWN_FIELD_DESCRIPTORS = [
   defineProblemIndexMarkdownField("status", (value) => `; status ${value}`),
 ] as const;
 
-const PROBLEM_INDEX_SELECT = `SELECT ${PROBLEM_INDEX_MARKDOWN_FIELD_DESCRIPTORS.map(
-  ({ key }) => key,
-).join(", ")} FROM problems WHERE status != 'private-draft' AND unlisted = 0
-  AND NOT ${offScopeProblemSql("problems.id", "problems.public_seq")}
-  AND NOT ${hiddenByContentControlSql("problems.id", "'problem'")}`;
+const OPEN_MOVE_WEIGHT_EXPR = `(
+  CASE WHEN problems.status = 'sharpening' THEN 2 ELSE 0 END
+  + COALESCE((
+      SELECT COUNT(DISTINCT e.object_id) * 3
+      FROM events e
+      WHERE e.problem_id = problems.id
+        AND e.seq <= problems.public_seq
+        AND e.object_kind = 'claim'
+        AND e.type IN ('claim.created', 'claim.revised')
+        AND NOT EXISTS (
+          SELECT 1 FROM events r
+          WHERE r.problem_id = problems.id
+            AND r.seq <= problems.public_seq
+            AND r.object_id = e.object_id
+            AND r.type = 'object.retracted'
+        )
+        AND NOT ${hiddenByContentControlSql("problems.id", "e.object_id")}
+        AND NOT ${hiddenByContentControlSql("problems.id", "'#' || e.seq")}
+    ), 0)
+  + COALESCE((
+      SELECT COUNT(DISTINCT e.object_id) * 2
+      FROM events e
+      WHERE e.problem_id = problems.id
+        AND e.seq <= problems.public_seq
+        AND e.type = 'gap.filed'
+        AND NOT EXISTS (
+          SELECT 1 FROM events c
+          WHERE c.problem_id = problems.id
+            AND c.seq <= problems.public_seq
+            AND c.object_id = e.object_id
+            AND c.type IN ('gap.closed-by', 'gap.withdrawn')
+        )
+        AND NOT ${hiddenByContentControlSql("problems.id", "e.object_id")}
+        AND NOT ${hiddenByContentControlSql("problems.id", "'#' || e.seq")}
+    ), 0)
+  + COALESCE((
+      SELECT COUNT(DISTINCT e.object_id) * 2
+      FROM events e
+      WHERE e.problem_id = problems.id
+        AND e.seq <= problems.public_seq
+        AND e.type = 'conflict.normalized'
+        AND NOT ${hiddenByContentControlSql("problems.id", "e.object_id")}
+        AND NOT ${hiddenByContentControlSql("problems.id", "'#' || e.seq")}
+    ), 0)
+  + COALESCE((
+      SELECT COUNT(DISTINCT e.object_id) * 2
+      FROM events e
+      WHERE e.problem_id = problems.id
+        AND e.seq <= problems.public_seq
+        AND e.type = 'hypothesis.created'
+        AND NOT EXISTS (
+          SELECT 1 FROM events k
+          WHERE k.problem_id = problems.id
+            AND k.seq <= problems.public_seq
+            AND k.object_id = e.object_id
+            AND k.type IN ('hypothesis.killed', 'hypothesis.superseded')
+        )
+        AND NOT ${hiddenByContentControlSql("problems.id", "e.object_id")}
+        AND NOT ${hiddenByContentControlSql("problems.id", "'#' || e.seq")}
+    ), 0)
+  + COALESCE((
+      SELECT COUNT(DISTINCT e.object_id)
+      FROM events e
+      WHERE e.problem_id = problems.id
+        AND e.seq <= problems.public_seq
+        AND e.type = 'question.asked'
+        AND NOT EXISTS (
+          SELECT 1 FROM events a
+          WHERE a.problem_id = problems.id
+            AND a.seq <= problems.public_seq
+            AND a.object_id = e.object_id
+            AND a.type = 'question.answered'
+        )
+        AND NOT ${hiddenByContentControlSql("problems.id", "e.object_id")}
+        AND NOT ${hiddenByContentControlSql("problems.id", "'#' || e.seq")}
+    ), 0)
+)`;
+
+const PROBLEM_INDEX_COLUMNS = PROBLEM_INDEX_MARKDOWN_FIELD_DESCRIPTORS.map(({ key }) => key).join(
+  ", ",
+);
+
+const PROBLEM_INDEX_CTE = `WITH open_needs AS (
+  SELECT ${PROBLEM_INDEX_COLUMNS}, ${OPEN_MOVE_WEIGHT_EXPR} AS open_move_weight
+  FROM problems
+  WHERE status != 'private-draft' AND unlisted = 0
+    AND NOT ${offScopeProblemSql("problems.id", "problems.public_seq")}
+    AND NOT ${hiddenByContentControlSql("problems.id", "'problem'")}
+)`;
 
 function renderProblemIndexMarkdownRow(problem: ProblemIndexEntry): string {
   return PROBLEM_INDEX_MARKDOWN_FIELD_DESCRIPTORS.map(({ renderEntry }) =>
@@ -174,6 +262,10 @@ const UNLISTED_NOTICE =
 
 function indexingHeaders(unlisted: boolean): Record<string, string> {
   return unlisted ? { "x-robots-tag": "noindex, nofollow" } : {};
+}
+
+function publicFaceCacheControl(unlisted: boolean, forcePrivate = false): string {
+  return unlisted || forcePrivate ? "private, no-store" : "public, max-age=0, must-revalidate";
 }
 const PROBLEM_DIGEST_CANDIDATE_LIMIT = 200;
 const PROBLEM_DIGEST_TOKEN_BUDGET = 4_000;
@@ -1094,7 +1186,7 @@ async function handleDeadEndsList(
   const etag = await strongEtag(format === "md" ? "markdown" : format, body);
   const headers = {
     "content-type": `${format === "json" ? "application/json" : format === "md" ? "text/markdown" : "text/html"}; charset=utf-8`,
-    "cache-control": "public, max-age=0, must-revalidate",
+    "cache-control": publicFaceCacheControl(Boolean(problem.unlisted)),
     ...indexingHeaders(Boolean(problem.unlisted)),
     etag,
   };
@@ -1285,92 +1377,7 @@ async function loadProblemFullFace(
   };
 }
 
-function escapeToonField(val: string): string {
-  return val.replace(/\\/g, "\\\\").replace(/\|/g, "\\|").replace(/\n/g, "\\n");
-}
-
-function unescapeToonField(val: string): string {
-  return val.replace(/\\n/g, "\n").replace(/\\\|/g, "|").replace(/\\\\/g, "\\");
-}
-
-export function renderProblemsIndexToon(data: ProblemsIndexResponse): string {
-  const header = "id|public_seq|status|created_at|updated_at|title";
-  const rows = data.problems.map((p) => {
-    const escapedTitle = p.title === null ? "none" : escapeToonField(p.title);
-    return `${p.id}|${p.public_seq}|${p.status}|${p.created_at}|${p.updated_at}|${escapedTitle}`;
-  });
-  const footer = `[control:page_end|next_after:${data.next_after ?? "none"}|omitted:${data.omitted.length}]`;
-  const toon = [header, ...rows, footer].join("\n") + "\n";
-
-  // Lossless round-trip check
-  const roundTrip = parseProblemsIndexToon(toon);
-  if (roundTrip.problems.length !== data.problems.length) {
-    throw new Error("TOON round-trip failed: count mismatch");
-  }
-  for (let i = 0; i < data.problems.length; i++) {
-    const orig = data.problems[i];
-    const parsed = roundTrip.problems[i];
-    if (!orig || !parsed) throw new Error(`TOON round-trip failed at ${i}`);
-    if (
-      orig.id !== parsed.id ||
-      orig.public_seq !== parsed.public_seq ||
-      orig.status !== parsed.status ||
-      orig.created_at !== parsed.created_at ||
-      orig.updated_at !== parsed.updated_at ||
-      orig.title !== parsed.title
-    ) {
-      throw new Error(`TOON round-trip failed: problem ${i} mismatch`);
-    }
-  }
-  if ((data.next_after ?? undefined) !== (roundTrip.next_after ?? undefined)) {
-    throw new Error("TOON round-trip failed: next_after mismatch");
-  }
-
-  return toon;
-}
-
-export function parseProblemsIndexToon(toon: string): {
-  problems: ProblemIndexEntry[];
-  next_after?: string;
-  control: { next_after: string; omitted_count: number };
-} {
-  const lines = toon.trimEnd().split("\n");
-  if (lines.length < 2) throw new Error("TOON missing header or footer");
-  if (lines[0]?.trim() !== "id|public_seq|status|created_at|updated_at|title") {
-    throw new Error("Invalid TOON header");
-  }
-  const lastLine = lines[lines.length - 1]?.trim() ?? "";
-  const footerMatch = /^\[control:page_end\|next_after:([^|]+)\|omitted:(\d+)\]$/.exec(lastLine);
-  if (!footerMatch?.[1] || !footerMatch[2]) throw new Error("Invalid TOON footer");
-  const next_after = footerMatch[1] === "none" ? undefined : footerMatch[1];
-  const omitted_count = parseInt(footerMatch[2], 10);
-
-  const problems: ProblemIndexEntry[] = [];
-  for (let i = 1; i < lines.length - 1; i++) {
-    const line = lines[i]?.trim();
-    if (!line) continue;
-    const parts = line.split(/(?<!\\)\|/);
-    if (parts.length !== 6)
-      throw new Error(`Invalid TOON row at ${i}: expected 6 parts, got ${parts.length}`);
-    const [id, seqStr, status, created_at, updated_at, titleRaw] = parts;
-    const public_seq = parseInt(seqStr ?? "", 10);
-    const title = titleRaw === "none" ? null : unescapeToonField(titleRaw ?? "");
-    problems.push({
-      id: id as ProblemIndexEntry["id"],
-      public_seq,
-      status: status as ProblemIndexEntry["status"],
-      created_at: created_at as ProblemIndexEntry["created_at"],
-      updated_at: updated_at as ProblemIndexEntry["updated_at"],
-      title,
-    });
-  }
-
-  return {
-    problems,
-    ...(next_after ? { next_after } : {}),
-    control: { next_after: footerMatch[1], omitted_count },
-  };
-}
+export { parseProblemsIndexToon, renderProblemsIndexToon };
 
 /** Public exact-version records reuse the session reader, with no session or
  * principal passed to it. Content controls still apply to historical reads. */
@@ -1728,24 +1735,33 @@ function canonicalizeIndexTimestamp(ts: string): string {
 }
 
 async function loadIndex(db: Env["DB"], after?: string): Promise<ProblemsIndexResponse> {
-  // Deterministic interim order: `id ASC`. It is neither of the two tempting
-  // recency proxies, because neither is honest here. `public_seq` is a
-  // per-problem event cursor (DEFAULT 0), so ranking by it is volume, not
-  // recency, and ties have no total order. `updated_at` is the accepted event's
-  // own canonical instant: `validateKraterIngressTimestamp` forbids a future or
-  // non-canonical value, but not one earlier than the row's current
-  // `updated_at`, so a later accepted write can move it backward — it cannot
-  // rank recency without lying. `id` is the unique primary key, so `id ASC` is a
-  // total order stable across storage and query-plan changes. W9.4 replaces this
-  // interim face with aggregated open-move weight.
+  // Fable §8.1 / §9.4 / §9.6: rank public problems by aggregated open-move
+  // weight from object-level scientific needs (claims, proof gaps, conflicts,
+  // active hypotheses, open questions, sharpening statements) with deterministic
+  // `id ASC` tie-breaker. Process-only events (syntheses, directives, roster
+  // chatter, retractions) never boost rank. Neither `public_seq` volume nor
+  // non-monotonic `updated_at` is used for ranking.
   //
   // One row over the face limit decides whether the index is complete; when it
   // is not, omitted[] says so rather than silently truncating.
-  const selection = db.prepare(
-    `${PROBLEM_INDEX_SELECT}${after === undefined ? "" : " AND id > ?"} ORDER BY id ASC LIMIT 201`,
-  );
-  const query = after === undefined ? selection : selection.bind(after);
-  const rows = await query.all<ProblemIndexEntry>();
+  const selection =
+    after === undefined
+      ? db.prepare(
+          `${PROBLEM_INDEX_CTE}
+SELECT ${PROBLEM_INDEX_COLUMNS} FROM open_needs
+ORDER BY open_move_weight DESC, id ASC LIMIT 201`,
+        )
+      : db
+          .prepare(
+            `${PROBLEM_INDEX_CTE}
+SELECT ${PROBLEM_INDEX_COLUMNS} FROM open_needs
+WHERE open_move_weight < COALESCE((SELECT open_move_weight FROM open_needs WHERE id = ?1), 0)
+   OR (open_move_weight = COALESCE((SELECT open_move_weight FROM open_needs WHERE id = ?1), 0)
+       AND id > ?1)
+ORDER BY open_move_weight DESC, id ASC LIMIT 201`,
+          )
+          .bind(after);
+  const rows = await selection.all<ProblemIndexEntry>();
   const truncated = rows.results.length > 200;
   const problems = rows.results.slice(0, 200).map((row) => ({
     ...row,
@@ -1755,7 +1771,9 @@ async function loadIndex(db: Env["DB"], after?: string): Promise<ProblemsIndexRe
   }));
   const omitted = [
     ...OMITTED,
-    ...(truncated ? ["results beyond this page of 200 in canonical problem-id order"] : []),
+    ...(truncated
+      ? ["results beyond this page of 200 in open-move weight and canonical problem-id order"]
+      : []),
     ...(after === undefined ? [] : ["problem ids at or before the requested after position"]),
     "pages reflect current visibility; restart from the first page to discover new problems before your position",
     ...(problems.some((problem) => problem.title === null)
@@ -1965,7 +1983,7 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
     const etag = await strongEtag(face.format === "md" ? "markdown" : "json", face.body);
     const headers = {
       "content-type": face.media_type,
-      "cache-control": "public, max-age=0, must-revalidate",
+      "cache-control": publicFaceCacheControl(head.unlisted === 1),
       etag,
       vary: "Accept, Accept-Encoding",
       ...indexingHeaders(head.unlisted === 1),
@@ -2039,7 +2057,7 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
       const etag = await strongEtag(face.format === "md" ? "markdown" : "json", face.body);
       const headers = {
         "content-type": face.media_type,
-        "cache-control": "public, max-age=0, must-revalidate",
+        "cache-control": publicFaceCacheControl(projection.unlisted),
         etag,
         vary: "Accept, Accept-Encoding",
         ...indexingHeaders(projection.unlisted),
@@ -2095,7 +2113,7 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
         const headers = {
           "content-type": citation.mediaType,
           "content-disposition": `attachment; filename="${citation.filename}"`,
-          "cache-control": "public, max-age=0, must-revalidate",
+          "cache-control": publicFaceCacheControl(citation.unlisted),
           "x-content-type-options": "nosniff",
           ...indexingHeaders(citation.unlisted),
           etag,
@@ -2142,7 +2160,7 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
     const etag = await strongEtag(face.format === "md" ? "markdown" : "json", face.body);
     const headers = {
       "content-type": face.media_type,
-      "cache-control": "public, max-age=0, must-revalidate",
+      "cache-control": publicFaceCacheControl(projection.unlisted),
       etag,
       vary: "Accept, Accept-Encoding",
       ...indexingHeaders(projection.unlisted),
@@ -2195,20 +2213,52 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
     return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
   });
 
-  app.on(["GET", "HEAD"], "/problems.toon", async (c) => {
-    const query = parseIndexQuery(c.req.raw);
-    if (query instanceof Response) return query;
-    const data = await loadIndex(c.env.DB, query.after);
-    const body = renderProblemsIndexToon(data);
+  const renderProblemsToonResponse = async (
+    c: Context<{ Bindings: Env }>,
+    data: ProblemsIndexResponse,
+    after?: string,
+  ): Promise<Response> => {
+    let body: string;
+    try {
+      body = renderProblemsIndexToon(data);
+    } catch (error) {
+      if (!(error instanceof ToonUnavailableError)) throw error;
+      const recoveryPath =
+        after === undefined
+          ? "/problems.json"
+          : `/problems.json?after=${encodeURIComponent(after)}`;
+      const response = problemDocument({
+        status: 500,
+        code: "FORMAT_UNAVAILABLE",
+        title: "Lossless TOON representation unavailable",
+        detail: "This page cannot be represented losslessly as TOON. No altered data was returned.",
+        fixHint: `Read ${recoveryPath} for the same canonical data.`,
+        rule: "A1",
+        headers: { "cache-control": "no-store" },
+        extensions: {
+          example: { method: "GET", path: recoveryPath },
+        },
+      });
+      return c.req.method === "HEAD"
+        ? new Response(null, { status: response.status, headers: response.headers })
+        : response;
+    }
     const etag = await strongEtag("toon", body);
     const headers = {
-      "content-type": "text/plain; charset=utf-8",
+      "content-type": TOON_MEDIA_TYPE,
       "cache-control": PUBLIC_CACHE_CONTROL,
       vary: "Accept, Accept-Encoding",
       etag,
     };
     if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
     return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
+  };
+
+  app.on(["GET", "HEAD"], "/problems.toon", async (c) => {
+    const query = parseIndexQuery(c.req.raw);
+    if (query instanceof Response) return query;
+    const data = await loadIndex(c.env.DB, query.after);
+    return renderProblemsToonResponse(c, data, query.after);
   });
 
   app.on(["GET", "HEAD"], "/problems", async (c) => {
@@ -2218,18 +2268,8 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
     const formatParam = new URL(c.req.url).searchParams.get("format");
     const data = await loadIndex(c.env.DB, query.after);
 
-    if (formatParam === "toon" || accept.includes("text/vnd.toon")) {
-      const body = renderProblemsIndexToon(data);
-      const etag = await strongEtag("toon", body);
-      const headers = {
-        "content-type": "text/plain; charset=utf-8",
-        "cache-control": PUBLIC_CACHE_CONTROL,
-        vary: "Accept, Accept-Encoding",
-        etag,
-      };
-      if (ifNoneMatchMatches(c.req.header("if-none-match"), etag))
-        return c.body(null, 304, headers);
-      return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
+    if (formatParam === "toon" || accept.includes("text/toon")) {
+      return renderProblemsToonResponse(c, data, query.after);
     }
 
     if (formatParam === "json" || accept.includes("application/json")) {
@@ -2334,7 +2374,7 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
     const etag = await strongEtag("json", body);
     const headers = {
       "content-type": "application/json; charset=utf-8",
-      "cache-control": "public, max-age=0, must-revalidate",
+      "cache-control": publicFaceCacheControl(Boolean(problem.unlisted)),
       ...indexingHeaders(Boolean(problem.unlisted)),
       etag,
     };
@@ -2350,7 +2390,7 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
     const etag = await strongEtag("markdown", body);
     const headers = {
       "content-type": "text/markdown; charset=utf-8",
-      "cache-control": "public, max-age=0, must-revalidate",
+      "cache-control": publicFaceCacheControl(Boolean(problem.unlisted)),
       ...indexingHeaders(Boolean(problem.unlisted)),
       etag,
     };
@@ -2366,7 +2406,7 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
     const etag = await strongEtag("html", body);
     const headers = {
       "content-type": "text/html; charset=utf-8",
-      "cache-control": "public, max-age=0, must-revalidate",
+      "cache-control": publicFaceCacheControl(Boolean(problem.unlisted)),
       ...indexingHeaders(Boolean(problem.unlisted)),
       etag,
     };
@@ -2444,7 +2484,7 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
     const etag = await strongEtag(etagKind, body);
     const headers = {
       "content-type": contentType,
-      "cache-control": "public, max-age=0, must-revalidate",
+      "cache-control": publicFaceCacheControl(Boolean(problem.unlisted)),
       ...indexingHeaders(Boolean(problem.unlisted)),
       etag,
     };
@@ -2649,7 +2689,7 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
       const etag = await strongEtag(wantsMarkdown ? "markdown" : "html", body);
       const headers = {
         "content-type": wantsMarkdown ? "text/markdown; charset=utf-8" : "text/html; charset=utf-8",
-        "cache-control": "public, max-age=0, must-revalidate",
+        "cache-control": publicFaceCacheControl(Boolean(problem.unlisted)),
         vary: "Accept, Accept-Encoding",
         ...indexingHeaders(Boolean(problem.unlisted)),
         etag,
@@ -2663,7 +2703,7 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
     const etag = await strongEtag("json", body);
     const headers = {
       "content-type": "application/json; charset=utf-8",
-      "cache-control": "public, max-age=0, must-revalidate",
+      "cache-control": publicFaceCacheControl(Boolean(problem.unlisted)),
       vary: "Accept, Accept-Encoding",
       ...indexingHeaders(Boolean(problem.unlisted)),
       etag,
@@ -2827,9 +2867,7 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
     const etag = await strongEtag("json", faces.json.body);
     const headers = {
       "content-type": "application/json; charset=utf-8",
-      "cache-control": faces.formulationUnavailable
-        ? "private, no-store"
-        : "public, max-age=0, must-revalidate",
+      "cache-control": publicFaceCacheControl(faces.unlisted, faces.formulationUnavailable),
       ...indexingHeaders(faces.unlisted),
       etag,
     };
@@ -2849,9 +2887,7 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
     const etag = await strongEtag("markdown", faces.markdown.body);
     const headers = {
       "content-type": "text/markdown; charset=utf-8",
-      "cache-control": faces.formulationUnavailable
-        ? "private, no-store"
-        : "public, max-age=0, must-revalidate",
+      "cache-control": publicFaceCacheControl(faces.unlisted, faces.formulationUnavailable),
       ...indexingHeaders(faces.unlisted),
       etag,
     };

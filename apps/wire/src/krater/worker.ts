@@ -45,13 +45,12 @@ import {
   searchPublicClaims,
   writeClaim,
 } from "./krater";
+import { KraterOutboxBindingError, type KraterOutboxEnv, requestKraterOutbox } from "./outbox-do";
 import {
-  KraterOutboxBindingError,
-  type KraterOutboxEnv,
   type OutboxFaultMode,
   plantKraterOutboxStaleWrapForHarness,
-  requestKraterOutbox,
-} from "./outbox-do";
+  requestTestableKraterOutbox,
+} from "./outbox-do-testable";
 
 interface KraterHarnessEnv extends KraterOutboxEnv {
   DB: D1Database;
@@ -695,7 +694,7 @@ async function forwardedOutboxResponse(
   pathname: "/nudge" | "/drain-now" | "/status",
   faultMode: OutboxFaultMode = "none",
 ): Promise<Response> {
-  const upstream = await requestKraterOutbox(env, pathname, { faultMode });
+  const upstream = await requestTestableKraterOutbox(env, pathname, { faultMode });
   return response(await upstream.json(), upstream.status);
 }
 
@@ -1384,5 +1383,5 @@ async function handleScheduledOutboxReconcile(
   if (!result.ok) throw new Error("KRATER_OUTBOX_SCHEDULED_RECONCILE_FAILED");
 }
 
-export { KraterOutboxDrainer } from "./outbox-do";
+export { TestableKraterOutboxDrainer as KraterOutboxDrainer } from "./outbox-do-testable";
 export default { fetch: handleHarnessRequest, scheduled: handleScheduledOutboxReconcile };

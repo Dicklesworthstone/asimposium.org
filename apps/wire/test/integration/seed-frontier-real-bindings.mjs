@@ -325,6 +325,20 @@ await runLocalWorkerJourney(
     assert.ok(!/\bPROVED\b/.test(sp4dFaceMd), "Rule A4: SP4D face must never display PROVED");
     assert.ok(!sp4dFaceMd.includes("resolved: affirmed"), "SP4D must not appear resolved");
 
+    // Verify real W9 moves and review-queue projections on SP4D (zero fixture providers).
+    const sp4dMoves = await call(`/p/${sp4dId}/moves.json`);
+    assert.equal(sp4dMoves.problem_id, sp4dId, "SP4D moves.json must identify the SP4D problem");
+    assert.equal(sp4dMoves.viewer?.role, "none", "Anonymous SP4D moves.json viewer must be none");
+    assert.ok(
+      Array.isArray(sp4dMoves.alternatives),
+      "SP4D moves.json must return alternatives array",
+    );
+    const sp4dQueue = await call(`/reviews.json?problem=${encodeURIComponent(sp4dId)}`);
+    assert.ok(
+      Array.isArray(sp4dQueue.candidates),
+      "SP4D /reviews.json must return candidates array",
+    );
+
     await assertProjectionsRebuild(env.DB, sp4dId);
 
     // -------------------------------------------------------------------------

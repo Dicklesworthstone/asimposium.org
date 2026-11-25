@@ -2465,4 +2465,156 @@ describe("W8.2 Stoa Discovery, Areas, Fellow Card & Now routes", () => {
     expect(errDoc.fix_hint).toBeDefined();
     expect(errDoc.rule).toBe("A5");
   });
+
+  test("Fellow calibration separates claims by kind and current computed disposition and counts force_note without leaking private drafts (5ujc)", async () => {
+    const { db, raw } = createMigratedDb();
+    seedDiscoveryData(raw);
+    const fellowId = "F-01CAL5UJC00000000000000001";
+    const problemId = "P-CAL5";
+    const sessionId = "S-CAL-5UJC-01";
+    const ts = "2026-09-10T00:00:00.000Z";
+    raw.run(
+      "INSERT INTO enrollment_fellows (fellow_id, sponsor_id, name, model, harness, created_at) VALUES (?, 'SPON-01', 'cal-5ujc-agent', 'test-model', 'test-harness', 1785578400000)",
+      [fellowId],
+    );
+    seedScopeProblem(raw, problemId);
+    raw.run(
+      "INSERT OR IGNORE INTO problem_memberships (problem_id, fellow_id, role, joined_at) VALUES (?, ?, 'contributor', ?)",
+      [problemId, fellowId, ts],
+    );
+    raw.run(
+      "INSERT INTO sessions (session_id, fellow_id, problem_id, opened_at, last_heartbeat_at, idle_close_at) VALUES (?, ?, ?, ?, ?, ?)",
+      [sessionId, fellowId, problemId, ts, ts, "2026-09-10T12:00:00.000Z"],
+    );
+
+    const insertCanonicalClaim = (
+      claimId: string,
+      seq: number,
+      kind: "conjecture" | "theorem-attempt",
+      statement: string,
+      falsifier: string,
+    ) => {
+      const payload = JSON.stringify({
+        claim_id: claimId,
+        kind,
+        statement,
+        falsifier,
+        dependency_pins: [],
+        scientific_provenance: {
+          model_family_self_declared: "test",
+          method: { category: "deductive", procedure: "Direct check.", evidence: [] },
+        },
+      });
+      const digest = createHash("sha256").update(payload).digest("hex");
+      const contentDigest = `sha256:${createHash("sha256")
+        .update(JSON.stringify({ falsifier, kind, statement }))
+        .digest("hex")}`;
+      const eventId = `E-CAL-${claimId}`;
+      const at = `2026-09-10T00:00:${String(seq).padStart(2, "0")}.000Z`;
+      raw.run(
+        "UPDATE problems SET public_seq = ?, chain_digest = 'sha256:chain', updated_at = ? WHERE id = ?",
+        [seq, at, problemId],
+      );
+      raw.run(
+        `INSERT INTO events (id, problem_id, seq, type, object_kind, object_id, object_version, payload_sha256, row_digest, chain_digest, created_at, actor_fellow_id, actor_sponsor_id, actor_session_id, model_string_self_declared, harness)
+         VALUES (?, ?, ?, 'claim.created', 'claim', ?, 1, ?, 'sha256:r', 'sha256:chain', ?, ?, 'SPON-01', ?, 'test-model', 'test-harness')`,
+        [eventId, problemId, seq, claimId, digest, at, fellowId, sessionId],
+      );
+      raw.run(
+        "INSERT INTO event_content (event_id, payload_sha256, payload_json) VALUES (?, ?, ?)",
+        [eventId, digest, payload],
+      );
+      raw.run(
+        "INSERT INTO claims (id, problem_id, statement, payload_sha256, source_seq, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+        [claimId, problemId, statement, digest, seq, at],
+      );
+      raw.run(
+        "INSERT INTO claim_versions (problem_id, claim_id, version, kind, statement, falsifier, editor_fellow_id, created_at, content_digest) VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?)",
+        [problemId, claimId, kind, statement, falsifier, fellowId, at, contentDigest],
+      );
+    };
+
+    // 1. Conjecture C-1 (open) on P-CAL5.
+    insertCanonicalClaim(
+      "C-1",
+      2,
+      "conjecture",
+      "Every compact surface admits a finite triangulation.",
+      "Counterexample compact surface without finite triangulation.",
+    );
+
+    // 2. Theorem-attempt C-2 on P-CAL5, then self-corrected retraction -> withdrawn.
+    insertCanonicalClaim(
+      "C-2",
+      3,
+      "theorem-attempt",
+      "Every compact surface admits a canonical foliation.",
+      "Counterexample surface without foliation.",
+    );
+    const retPayload = JSON.stringify({
+      retraction_id: "RET-CAL-5",
+      target_object: "C-2@1",
+      retraction_kind: "self-corrected",
+      reason: "Found boundary counterexample on S^2.",
+    });
+    const retDigest = createHash("sha256").update(retPayload).digest("hex");
+    raw.run(
+      "UPDATE problems SET public_seq = 4, chain_digest = 'sha256:chain', updated_at = ? WHERE id = ?",
+      ["2026-09-10T00:00:04.000Z", problemId],
+    );
+    raw.run(
+      `INSERT INTO events (id, problem_id, seq, type, object_kind, object_id, object_version, payload_sha256, row_digest, chain_digest, created_at, actor_fellow_id, actor_sponsor_id, actor_session_id, model_string_self_declared, harness)
+       VALUES ('E-CAL-RET-5', ?, 4, 'object.retracted', 'retraction', 'RET-CAL-5', 1, ?, 'sha256:r4', 'sha256:chain', '2026-09-10T00:00:04.000Z', ?, 'SPON-01', ?, 'test-model', 'test-harness')`,
+      [problemId, retDigest, fellowId, sessionId],
+    );
+    raw.run(
+      "INSERT INTO event_content (event_id, payload_sha256, payload_json) VALUES ('E-CAL-RET-5', ?, ?)",
+      [retDigest, retPayload],
+    );
+    raw.run(
+      `INSERT INTO retractions (retraction_id, problem_id, target_object, reason, author_fellow_id, created_at, seq, retraction_kind)
+       VALUES ('RET-CAL-5', ?, 'C-2@1', 'Found boundary counterexample on S^2.', ?, '2026-09-10T00:00:04.000Z', 4, 'self-corrected')`,
+      [problemId, fellowId],
+    );
+
+    // 3. Private workshop notes: 2 with force_note = 1, 1 with force_note = 0.
+    raw.run(
+      `INSERT INTO workshop_objects (workshop_id, problem_id, fellow_id, session_id, workshop_seq, type, title, body_md, cas_hash, relates_to_json, force_note, created_at)
+       VALUES ('W-FN-1', ?, ?, ?, 1, 'note', 'SECRET_PRIVATE_TITLE_1', 'SECRET_PRIVATE_BODY_1', NULL, '[]', 1, ?),
+              ('W-FN-2', ?, ?, ?, 2, 'note', 'SECRET_PRIVATE_TITLE_2', 'SECRET_PRIVATE_BODY_2', NULL, '[]', 1, ?),
+              ('W-FN-3', ?, ?, ?, 3, 'note', 'SECRET_PRIVATE_TITLE_3', 'SECRET_PRIVATE_BODY_3', NULL, '[]', 0, ?)`,
+      [
+        problemId,
+        fellowId,
+        sessionId,
+        ts,
+        problemId,
+        fellowId,
+        sessionId,
+        ts,
+        problemId,
+        fellowId,
+        sessionId,
+        ts,
+      ],
+    );
+
+    const card = await loadFellowCard(db, fellowId);
+    expect(card).not.toBeNull();
+    expect(card?.calibration.conjectures_promoted).toBe(1);
+    expect(card?.calibration.theorems_attempted).toBe(1);
+    expect(card?.calibration.refutations_self_corrected).toBe(1);
+    expect(card?.calibration.force_note_count).toBe(2);
+    expect(card?.calibration.claims_by_kind_and_disposition?.conjecture.open).toBe(1);
+    expect(card?.calibration.claims_by_kind_and_disposition?.conjecture.withdrawn).toBe(0);
+    expect(card?.calibration.claims_by_kind_and_disposition?.theorem_attempt.withdrawn).toBe(1);
+    expect(card?.calibration.claims_by_kind_and_disposition?.theorem_attempt.open).toBe(0);
+    // Rule A2: private workshop content never leaks onto the public Fellow card.
+    const serialized = JSON.stringify(card);
+    expect(serialized).not.toContain("SECRET_PRIVATE_TITLE");
+    expect(serialized).not.toContain("SECRET_PRIVATE_BODY");
+    // Fail-closed negative check: gauss-agent owns legacy P-4DSP/C-1 without scientific provenance.
+    const legacyCard = await loadFellowCard(db, "F-01M0HCVW4XTFWMZCQ40EJ0S0J7");
+    expect(legacyCard?.calibration.claims_by_kind_and_disposition).toBeNull();
+  });
 });

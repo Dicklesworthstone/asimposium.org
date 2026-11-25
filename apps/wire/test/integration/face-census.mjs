@@ -2,6 +2,11 @@ import {
   LateProducerDegradedFaceSchema,
   PUBLIC_RESOURCE_REGISTRY,
 } from "../../../../packages/contracts/src/public-resources.ts";
+import {
+  renderClaimsListToon,
+  renderEventTailToon,
+  renderProblemsIndexToon,
+} from "../../../../packages/render/src/toon.ts";
 
 // Shared same-cursor public face census (beads asimposiumorg-lu59 / 92x, Rule
 // A1 Diptych). Every registry entry whose URL parameters the caller can
@@ -21,45 +26,12 @@ function statedCursors(markdown) {
   );
 }
 /** The TOON face of a uniform list, derived independently from its JSON face
- * at the same cursor (lu59: TOON content was never compared). Returns null for
- * kinds without a TOON face. */
+ * at the same cursor via the canonical @asimposium/render @toon-format/toon
+ * encoder (lu59 / hrcc). Returns null for kinds without a TOON face. */
 function expectedToon(kind, json) {
-  const field = (value) =>
-    String(value).replace(/\\/g, "\\\\").replace(/\|/g, "\\|").replace(/\n/g, "\\n");
-  if (kind === "problems-index") {
-    const rows = json.problems.map((p) =>
-      [
-        p.id,
-        p.public_seq,
-        p.status,
-        p.created_at,
-        p.updated_at,
-        p.title === null ? "none" : field(p.title),
-      ].join("|"),
-    );
-    const footer = `[control:page_end|next_after:${json.next_after ?? "none"}|omitted:${json.omitted.length}]`;
-    return ["id|public_seq|status|created_at|updated_at|title", ...rows, footer].join("\n") + "\n";
-  }
-  if (kind === "events-tail") {
-    const rows = json.events.map((envelope) =>
-      envelope.event === null
-        ? `none|${envelope.seq}|undisclosed|none|none|null|unavailable`
-        : [
-            envelope.event.id,
-            envelope.seq,
-            envelope.event.type,
-            envelope.event.object_id,
-            envelope.event.created_at,
-            JSON.stringify(envelope.event.caused_by),
-            envelope.event.causality_omitted ?? "none",
-          ].join("|"),
-    );
-    const footer = `[control:page_end|next_cursor:${json.page_end.next_cursor}|has_more:${json.page_end.has_more}]`;
-    return (
-      ["id|seq|type|object_id|created_at|caused_by|causality_omitted", ...rows, footer].join("\n") +
-      "\n"
-    );
-  }
+  if (kind === "problems-index") return renderProblemsIndexToon(json);
+  if (kind === "events-tail") return renderEventTailToon(json);
+  if (kind === "claims-list") return renderClaimsListToon(json);
   return null;
 }
 const AGENT_SUFFIXES = new Set([".md", ".json", ".html", ".toon", ".ndjson", ".bib", ".csl.json"]);
@@ -69,7 +41,7 @@ const SUFFIX_MEDIA_TYPES = {
   ".md": ["text/markdown"],
   ".json": ["application/json"],
   ".html": ["text/html"],
-  ".toon": ["text/vnd.toon", "text/plain"],
+  ".toon": ["text/toon"],
   ".ndjson": ["application/x-ndjson", "application/ndjson"],
   ".bib": ["application/x-bibtex"],
   ".csl.json": ["application/vnd.citationstyles.csl+json"],

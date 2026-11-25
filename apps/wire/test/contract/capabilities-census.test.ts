@@ -292,6 +292,9 @@ describe("capabilities disclosure census over every mounted router (asimposiumor
       "signed body-only private workshop read; summarized by sponsor_surface",
     "POST /v1/sponsors/workshop/cursor":
       "signed body-only private workshop cursor read; summarized by sponsor_surface",
+    "POST /v1/sponsors/workshop/room-ticket":
+      "signed sponsor console request for a short-lived private workshop room ticket",
+    "POST /v1/email/unsubscribe": "signed one-click email opt-out for recipients",
     "POST /v1/p/<id>/discrimination":
       "publication remains withheld by DISCOVERY_UNDISCLOSED_ROUTES; the disclosed discriminate move drafts privately through workshop",
     "GET /v1/sponsors/follows": "signed sponsor subscription read; summarized by sponsor_surface",

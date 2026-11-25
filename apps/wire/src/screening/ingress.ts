@@ -4,8 +4,11 @@ import {
 } from "@asimposium/contracts";
 import type { Env } from "../env";
 import { screeningPostureGuardStatement } from "../moderation/posture";
-import { screeningCaseReleasedSql } from "../moderation/screening-release.ts";
-import { AUTOMATED_REJECTION_DECIDED_BY } from "../moderation/store";
+import {
+  screeningCaseReleasedSql,
+  sponsorScreeningCaseReleasedSql,
+} from "../moderation/screening-release.ts";
+import { AUTOMATED_REJECTION_DECIDED_BY, sponsorIdFromCaseActor } from "../moderation/store";
 import {
   type PublicationContextGuard,
   screeningContextGuardStatement,
@@ -194,6 +197,41 @@ export function screeningDecisionGuardStatement(
   screened: ScreenedPublication,
   eventId: string,
 ) {
+  const sponsorActorId = sponsorIdFromCaseActor(screened.fellowId);
+  if (sponsorActorId !== null) {
+    return db
+      .prepare(
+        `SELECT CASE WHEN NOT EXISTS (SELECT 1 FROM events WHERE id = ?1)
+          OR (CASE WHEN ?7 = 1 THEN EXISTS (
+            SELECT 1 FROM sponsor_screening_cases c
+            WHERE c.case_id = ?6 AND ${sponsorScreeningCaseReleasedSql("c")}
+              AND c.sponsor_id = ?2 AND c.problem_id = ?3
+              AND c.input_digest = ?4 AND c.context_digest = ?5)
+          ELSE NOT EXISTS (
+            SELECT 1 FROM sponsor_screening_cases c
+            WHERE c.sponsor_id = ?2 AND c.problem_id = ?3
+              AND c.input_digest = ?4 AND c.context_digest = ?5
+              AND c.state = 'rejected'
+              AND (
+                c.decided_by <> ?8
+                OR EXISTS (
+                  SELECT 1 FROM sponsor_screening_case_appeals a
+                  WHERE a.case_id = c.case_id AND a.state = 'upheld'
+                )
+              )) END)
+          THEN 1 ELSE json_extract('[]', '$[${SCREENING_DECISION_CHANGED_MARKER}]') END`,
+      )
+      .bind(
+        eventId,
+        sponsorActorId,
+        screened.problemId,
+        screened.provenance.input_digest,
+        screened.provenance.context_digest,
+        screened.provenance.review_case_id ?? null,
+        screened.provenance.decision_path === "operator-release" ? 1 : 0,
+        AUTOMATED_REJECTION_DECIDED_BY,
+      );
+  }
   return db
     .prepare(
       `SELECT CASE WHEN NOT EXISTS (SELECT 1 FROM events WHERE id = ?1)
@@ -266,6 +304,24 @@ export function supersedeHeldCaseStatement(
   screened: ScreenedPublication,
   eventId: string,
 ) {
+  const sponsorActorId = sponsorIdFromCaseActor(screened.fellowId);
+  if (sponsorActorId !== null) {
+    return db
+      .prepare(
+        `UPDATE sponsor_screening_cases
+            SET state = 'superseded', decided_at = ?, decided_by = 'platform:symposiarch',
+                decision_reason = 'A later screen of the same bytes passed and was published.'
+          WHERE sponsor_id = ? AND problem_id = ? AND input_digest = ? AND state = 'pending'
+            AND EXISTS (SELECT 1 FROM events WHERE id = ?)`,
+      )
+      .bind(
+        new Date().toISOString(),
+        sponsorActorId,
+        screened.problemId,
+        screened.supersedeInputDigest ?? "",
+        eventId,
+      );
+  }
   return db
     .prepare(
       `UPDATE screening_cases

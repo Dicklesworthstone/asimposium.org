@@ -9,6 +9,7 @@ import { renderCommentaryHtml, renderCommentaryMarkdown } from "@asimposium/rend
 import { Hono } from "hono";
 import { parseExactJsonBytes } from "../auth/http.ts";
 import type { Env } from "../env.ts";
+import type { PublicCandidateScreener } from "../screening/public-candidate.ts";
 import { CommentaryService, commentaryContractProblem as problem, sha256Hex } from "./service.ts";
 
 const MAX_IDEMPOTENCY_KEY = 160;
@@ -25,6 +26,7 @@ export interface CommentaryRouterOptions {
       }
     | Response
   >;
+  readonly screenPromotion?: PublicCandidateScreener;
 }
 
 function privateNoStore(response: Response): Response {
@@ -33,11 +35,31 @@ function privateNoStore(response: Response): Response {
   return response;
 }
 
-function publicCache(response: Response, etag: string): Response {
-  response.headers.set("cache-control", "public, max-age=0, must-revalidate");
+function publicCache(response: Response, etag: string, unlisted: boolean): Response {
+  response.headers.set(
+    "cache-control",
+    unlisted ? "private, no-store" : "public, max-age=0, must-revalidate",
+  );
+  if (unlisted) {
+    response.headers.set("x-robots-tag", "noindex, nofollow");
+  }
   response.headers.set("etag", etag);
   response.headers.set("x-content-type-options", "nosniff");
   return response;
+}
+
+function commentaryNotFoundResponse(method: string): Response {
+  const res = privateNoStore(
+    problem({
+      status: 404,
+      code: "PROBLEM_NOT_FOUND",
+      title: "Problem Not Found",
+      detail: "No public problem is available at this identifier.",
+      fixHint: "Verify the problem identifier.",
+      rule: "A5",
+    }),
+  );
+  return method === "HEAD" ? new Response(null, { status: res.status, headers: res.headers }) : res;
 }
 
 async function computeEtag(face: string, body: string): Promise<string> {
@@ -142,7 +164,14 @@ export function createCommentaryRouter(options: CommentaryRouterOptions): Hono<{
     }
 
     const requestDigest = await sha256Hex(verified.rawBody);
-    const service = new CommentaryService({ db: c.env.DB, ai: c.env.AI });
+    const service = new CommentaryService({
+      db: c.env.DB,
+      ai: c.env.AI,
+      sponsorLimit: c.env.SPONSOR_PROMOTION_RATE_LIMIT,
+      ...(options.screenPromotion === undefined
+        ? {}
+        : { screenPromotion: options.screenPromotion }),
+    });
     const result = await service.postCommentary(
       verified.principal.sponsorId,
       parsed.data,
@@ -250,7 +279,14 @@ export function createCommentaryRouter(options: CommentaryRouterOptions): Hono<{
     }
 
     const requestDigest = await sha256Hex(verified.rawBody);
-    const service = new CommentaryService({ db: c.env.DB, ai: c.env.AI });
+    const service = new CommentaryService({
+      db: c.env.DB,
+      ai: c.env.AI,
+      sponsorLimit: c.env.SPONSOR_PROMOTION_RATE_LIMIT,
+      ...(options.screenPromotion === undefined
+        ? {}
+        : { screenPromotion: options.screenPromotion }),
+    });
     const result = await service.tombstoneCommentary(
       verified.principal.sponsorId,
       parsed.data,
@@ -270,145 +306,122 @@ export function createCommentaryRouter(options: CommentaryRouterOptions): Hono<{
     );
   });
 
-  // 3. GET /p/:id/commentary (canonical 308 redirect to .md face)
-  app.get("/p/:id/commentary", (c) => {
+  // 3. GET/HEAD /p/:id/commentary (canonical 308 redirect to .md face)
+  app.on(["GET", "HEAD"], "/p/:id/commentary", (c) => {
     const problemId = c.req.param("id");
     const url = new URL(c.req.url);
     const redirectUrl = `/p/${encodeURIComponent(problemId)}/commentary.md${url.search}`;
     return c.redirect(redirectUrl, 308);
   });
 
-  // 4. GET /p/:id/commentary.md (Markdown canonical agent face)
-  app.get("/p/:id/commentary.md", async (c) => {
+  // 4. GET/HEAD /p/:id/commentary.md (Markdown canonical agent face)
+  app.on(["GET", "HEAD"], "/p/:id/commentary.md", async (c) => {
     const problemId = c.req.param("id");
     const query = commentaryQuery(c.req.query());
-    if (query instanceof Response) return query;
+    if (query instanceof Response) return privateNoStore(query);
     const service = new CommentaryService({ db: c.env.DB, ai: c.env.AI });
-    const list = await service.listCommentaries(problemId, query);
+    const scoped = await service.listCommentariesWithScope(problemId, query);
 
-    if (!list) {
-      return problem({
-        status: 404,
-        code: "PROBLEM_NOT_FOUND",
-        title: "Problem Not Found",
-        detail: `Problem ${problemId} does not exist.`,
-        fixHint: "Verify the problem identifier.",
-        rule: "A5",
-      });
+    if (!scoped) {
+      return commentaryNotFoundResponse(c.req.method);
     }
 
-    const md = renderCommentaryMarkdown(list);
+    const md = renderCommentaryMarkdown(scoped.list);
     const etag = await computeEtag("markdown", md);
     if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) {
-      return publicCache(new Response(null, { status: 304 }), etag);
+      return publicCache(new Response(null, { status: 304 }), etag, scoped.unlisted);
     }
 
     return publicCache(
-      new Response(md, {
+      new Response(c.req.method === "HEAD" ? null : md, {
         status: 200,
         headers: { "content-type": "text/markdown; charset=utf-8" },
       }),
       etag,
+      scoped.unlisted,
     );
   });
 
-  // 5. GET /p/:id/commentary.json (JSON face)
-  app.get("/p/:id/commentary.json", async (c) => {
+  // 5. GET/HEAD /p/:id/commentary.json (JSON face)
+  app.on(["GET", "HEAD"], "/p/:id/commentary.json", async (c) => {
     const problemId = c.req.param("id");
     const query = commentaryQuery(c.req.query());
-    if (query instanceof Response) return query;
+    if (query instanceof Response) return privateNoStore(query);
     const service = new CommentaryService({ db: c.env.DB, ai: c.env.AI });
-    const list = await service.listCommentaries(problemId, query);
+    const scoped = await service.listCommentariesWithScope(problemId, query);
 
-    if (!list) {
-      return problem({
-        status: 404,
-        code: "PROBLEM_NOT_FOUND",
-        title: "Problem Not Found",
-        detail: `Problem ${problemId} does not exist.`,
-        fixHint: "Verify the problem identifier.",
-        rule: "A5",
-      });
+    if (!scoped) {
+      return commentaryNotFoundResponse(c.req.method);
     }
 
-    const json = JSON.stringify(list, null, 2);
+    const json = JSON.stringify(scoped.list, null, 2);
     const etag = await computeEtag("json", json);
     if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) {
-      return publicCache(new Response(null, { status: 304 }), etag);
+      return publicCache(new Response(null, { status: 304 }), etag, scoped.unlisted);
     }
 
     return publicCache(
-      new Response(json, {
+      new Response(c.req.method === "HEAD" ? null : json, {
         status: 200,
         headers: { "content-type": "application/json; charset=utf-8" },
       }),
       etag,
+      scoped.unlisted,
     );
   });
 
-  // 6. GET /p/:id/commentary.html (HTML face)
-  app.get("/p/:id/commentary.html", async (c) => {
+  // 6. GET/HEAD /p/:id/commentary.html (HTML face)
+  app.on(["GET", "HEAD"], "/p/:id/commentary.html", async (c) => {
     const problemId = c.req.param("id");
     const query = commentaryQuery(c.req.query());
-    if (query instanceof Response) return query;
+    if (query instanceof Response) return privateNoStore(query);
     const service = new CommentaryService({ db: c.env.DB, ai: c.env.AI });
-    const list = await service.listCommentaries(problemId, query);
+    const scoped = await service.listCommentariesWithScope(problemId, query);
 
-    if (!list) {
-      return problem({
-        status: 404,
-        code: "PROBLEM_NOT_FOUND",
-        title: "Problem Not Found",
-        detail: `Problem ${problemId} does not exist.`,
-        fixHint: "Verify the problem identifier.",
-        rule: "A5",
-      });
+    if (!scoped) {
+      return commentaryNotFoundResponse(c.req.method);
     }
 
-    const html = renderCommentaryHtml(list);
+    const html = renderCommentaryHtml(scoped.list);
     const etag = await computeEtag("html", html);
     if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) {
-      return publicCache(new Response(null, { status: 304 }), etag);
+      return publicCache(new Response(null, { status: 304 }), etag, scoped.unlisted);
     }
 
     return publicCache(
-      new Response(html, {
+      new Response(c.req.method === "HEAD" ? null : html, {
         status: 200,
         headers: { "content-type": "text/html; charset=utf-8" },
       }),
       etag,
+      scoped.unlisted,
     );
   });
 
-  // 7. GET /v1/problems/:id/commentary (JSON API read)
-  app.get("/v1/problems/:id/commentary", async (c) => {
+  // 7. GET/HEAD /v1/problems/:id/commentary (JSON API read)
+  app.on(["GET", "HEAD"], "/v1/problems/:id/commentary", async (c) => {
     const problemId = c.req.param("id");
     const query = commentaryQuery(c.req.query());
-    if (query instanceof Response) return query;
+    if (query instanceof Response) return privateNoStore(query);
     const service = new CommentaryService({ db: c.env.DB, ai: c.env.AI });
-    const list = await service.listCommentaries(problemId, query);
+    const scoped = await service.listCommentariesWithScope(problemId, query);
 
-    if (!list) {
-      return problem({
-        status: 404,
-        code: "PROBLEM_NOT_FOUND",
-        title: "Problem Not Found",
-        detail: `Problem ${problemId} does not exist.`,
-        fixHint: "Verify the problem identifier.",
-        rule: "A5",
-      });
+    if (!scoped) {
+      return commentaryNotFoundResponse(c.req.method);
     }
 
-    const json = JSON.stringify(list);
+    const json = JSON.stringify(scoped.list);
     const etag = await computeEtag("json-api", json);
-    if (ifNoneMatchMatches(c.req.header("if-none-match"), etag))
-      return publicCache(new Response(null, { status: 304 }), etag);
+    if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) {
+      return publicCache(new Response(null, { status: 304 }), etag, scoped.unlisted);
+    }
     return publicCache(
-      new Response(json, {
+      new Response(c.req.method === "HEAD" ? null : json, {
         status: 200,
         headers: { "content-type": "application/json; charset=utf-8" },
       }),
       etag,
+      scoped.unlisted,
     );
   });
 

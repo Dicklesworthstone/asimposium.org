@@ -6,7 +6,7 @@ import {
 import type { D1Database } from "@cloudflare/workers-types";
 import { loadReviewQueue } from "../discovery/review-queue-service.ts";
 import { loadProofGapMove } from "./gap-moves-service.ts";
-import { loadLedgerMoves } from "./ledger-moves.ts";
+import { loadLedgerMoveQueue, loadLedgerMoves, selectPublicLedgerMoves } from "./ledger-moves.ts";
 import {
   type CeremonyMoveContext,
   type CeremonyNeedReaders,
@@ -27,6 +27,30 @@ const ceremonyNeeds: CeremonyNeedReaders = {
       cursor,
       { includeUnlisted: true },
     ),
+  publicClaims: async (db, problemId, cursor, options) => {
+    const loaded = await loadLedgerMoveQueue(
+      db,
+      problemId,
+      {
+        loadQueue: (database, query, snapshot) =>
+          loadReviewQueue(
+            database,
+            query,
+            options.excludeOffScope
+              ? { ...snapshot, problemId, through: cursor, excludeOffScope: true }
+              : snapshot,
+          ),
+      },
+      cursor,
+      { includeUnlisted: options.includeUnlisted },
+    );
+    return {
+      items: loaded.items,
+      moves: selectPublicLedgerMoves(loaded.items, getMoveTemplate),
+      degraded: loaded.degraded,
+      continuation: loaded.continuation,
+    };
+  },
   gap: loadProofGapMove,
 };
 

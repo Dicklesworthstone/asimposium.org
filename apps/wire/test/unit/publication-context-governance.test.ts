@@ -2,7 +2,7 @@ import { test } from "bun:test";
 import assert from "node:assert/strict";
 import { ProblemDocumentSchema, ScreeningPublicationProvenanceSchema } from "@asimposium/contracts";
 import type { Env } from "../../src/env";
-import { decideScreeningCase } from "../../src/moderation/store";
+import { decideScreeningCase, sponsorCaseActorId } from "../../src/moderation/store";
 import { applyPublicProblemGovernance } from "../../src/problems/lifecycle-ledger";
 import { readProblemPublicationPreview } from "../../src/problems/publication-preview";
 import { screenPublicCandidate } from "../../src/screening/public-candidate";
@@ -337,5 +337,149 @@ test("complete-context failure settles governance quota before any paid classifi
         }
       ).status,
       "settled_failed",
+    );
+  }));
+
+test("sponsor-only problem lifecycle hold (null created_by_fellow_id) uses sponsor_screening_cases without Fellow FK failure and commits on release (Wave 19)", () =>
+  using(async (f) => {
+    // First publish the draft via the real governance path so an immutable problem.admitted
+    // formulation event exists, then clear created_by_fellow_id to model a sponsor-only problem.
+    f.sql.query("UPDATE problems SET status='private-draft' WHERE id = ?").run(PROBLEM);
+    const preview = await readProblemPublicationPreview(f.db, PROBLEM, SPONSOR);
+    assert.ok(preview);
+    const published = await applyPublicProblemGovernance(
+      f.db,
+      snapshot(f),
+      SPONSOR,
+      {
+        action: "publish",
+        reviewed_statement_version: preview.problem.current_statement_version,
+        reviewed_digest: preview.review_digest,
+      },
+      request("sponsor-only-publish"),
+      screening(
+        f,
+        {
+          ...f.input(
+            "Context problem\n\nExact public problem statement.\n\nExact public motivation.",
+          ),
+          kind: "problem-proposal",
+          falsifier: "Exact public falsifier.",
+        },
+        { calls: 0 },
+      ),
+    );
+    assert.equal(published.status, 200, await published.clone().text());
+    f.sql.query("UPDATE problems SET created_by_fellow_id = NULL WHERE id = ?").run(PROBLEM);
+
+    const retireAction = {
+      action: "retire",
+      reason: "Retiring legacy problem without a Fellow creator after sponsor review.",
+    } as const;
+    const candidate: WorkersAIPromotionInput = {
+      problemId: PROBLEM,
+      fellowId: sponsorCaseActorId(SPONSOR),
+      kind: "problem-lifecycle",
+      statement: JSON.stringify(retireAction),
+      falsifier: null,
+    };
+
+    const held = await screenPublicCandidate(
+      (input) =>
+        syntheticScreeningObservation(input, {
+          decision: "quarantine",
+          coarse_category: "dual-use-boundary",
+          provider_status: "ok",
+        }),
+      { DB: f.db } as Env,
+      candidate,
+      { sponsorId: SPONSOR, route: "problem-retire", authorKind: "sponsor" },
+    );
+    assert.ok(held instanceof Response);
+    assert.equal(held.status, 202);
+    const { case_id: caseId } = (await held.json()) as { case_id: string };
+    assert.match(caseId, /^QC-/);
+    assert.equal(count(f, "sponsor_screening_cases"), 1);
+    assert.equal(count(f, "screening_cases"), 0);
+
+    const decision = await decideScreeningCase(f.db, "operator_wave19", {
+      caseId,
+      decision: "release",
+      reason: "Confirmed benign sponsor retirement notice.",
+    });
+    assert.equal(decision.ok, true);
+
+    let aiCallsAfterRelease = 0;
+    const response = await applyPublicProblemGovernance(
+      f.db,
+      snapshot(f),
+      SPONSOR,
+      retireAction,
+      request("sponsor-only-retire"),
+      {
+        sponsorLimit: 100,
+        screen: () =>
+          screenPublicCandidate(
+            async (input) => {
+              aiCallsAfterRelease++;
+              return syntheticScreeningObservation(input, {
+                decision: "pass",
+                coarse_category: "benign-context",
+                provider_status: "ok",
+              });
+            },
+            { DB: f.db } as Env,
+            candidate,
+            { sponsorId: SPONSOR, route: "problem-retire", authorKind: "sponsor" },
+          ),
+      },
+    );
+    assert.equal(response.status, 200, await response.clone().text());
+    assert.equal(
+      aiCallsAfterRelease,
+      0,
+      "released sponsor governance case commits with 0 AI calls",
+    );
+    assert.equal(snapshot(f).status, "retired");
+    assert.equal(count(f, "screening_publications"), 2);
+
+    // Wave 20: even if a caller passes fellowId = sponsorCaseActorId(SPONSOR) WITHOUT
+    // authorKind: "sponsor", screenPublicCandidate must never touch fellow_screening_refusals
+    // (impossible Fellow FK) and must record direct rejections in sponsor_screening_cases.
+    const directReject = await screenPublicCandidate(
+      (input) =>
+        syntheticScreeningObservation(input, {
+          decision: "reject",
+          coarse_category: "harassment",
+          provider_status: "ok",
+        }),
+      { DB: f.db } as Env,
+      {
+        problemId: PROBLEM,
+        fellowId: sponsorCaseActorId(SPONSOR),
+        kind: "problem-lifecycle",
+        statement: JSON.stringify({
+          action: "retire",
+          reason: "Sponsor actor without explicit authorKind flag",
+        }),
+        falsifier: null,
+      },
+      { sponsorId: SPONSOR, route: "problem-retire" },
+    );
+    assert.ok(directReject instanceof Response);
+    assert.equal(directReject.status, 403);
+    const { case_id: rejectedCaseId } = (await directReject.json()) as { case_id: string };
+    assert.match(rejectedCaseId, /^QC-/);
+    assert.equal(count(f, "sponsor_screening_cases"), 2);
+    // The fixture omits fellow_screening_refusals entirely, so reaching HTTP 403
+    // with a persisted sponsor_screening_cases receipt proves neither posture lookup
+    // nor refusal recording touched the Fellow-FK table.
+    assert.equal(
+      f.sql
+        .query(
+          "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'fellow_screening_refusals'",
+        )
+        .get(),
+      null,
     );
   }));

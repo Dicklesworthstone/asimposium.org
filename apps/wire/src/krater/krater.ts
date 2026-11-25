@@ -1621,8 +1621,9 @@ export function claimCreationProjection(
   db: D1Database,
   input: KraterWriteInput,
   outboxCreatedAt = serverAuthoredOutboxTimestamp(Date.now()),
+  serverNowMs = Date.now(),
 ): KraterLedgerProjectionPlan {
-  validateWriteInput(input, Date.now());
+  validateWriteInput(input, serverNowMs);
   return {
     statementsAfterEvent: ({ eventId, objectId, sequence, payloadSha256 }) => {
       const source = `FROM events e
@@ -1821,7 +1822,12 @@ export async function writeClaim(
           input.problemId,
           input.idempotencyKey,
         ),
-        ...(await claimCreationProjection(db, attemptInput, outboxCreatedAt).statementsAfterEvent({
+        ...(await claimCreationProjection(
+          db,
+          attemptInput,
+          outboxCreatedAt,
+          serverNowMs,
+        ).statementsAfterEvent({
           eventId: input.eventId,
           objectId: attemptInput.claimId,
           sequence: candidateSeq,

@@ -10,6 +10,8 @@ import {
 } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
 import { type Context, Hono } from "hono";
+import { cancelUnconsumedRequestBody, SERVICE_ENVELOPE_HEADER } from "../auth/http.ts";
+import { wrongPrincipalProblem } from "../auth/refusal.ts";
 import { buildHelloResponse } from "../enrollment/router.ts";
 import type { EnrollmentService, FellowCredentialBinding } from "../enrollment/service.ts";
 import type { Env } from "../env.ts";
@@ -45,6 +47,10 @@ export function createMegaCommandsRouter(
   const movesProvider = options.movesProvider ?? new TruthfulProductionMovesProvider();
 
   async function authenticateFellow(request: Request): Promise<FellowCredentialBinding | Response> {
+    if (request.headers.get(SERVICE_ENVELOPE_HEADER) !== null) {
+      cancelUnconsumedRequestBody(request);
+      return wrongPrincipalProblem();
+    }
     const token = bearerToken(request);
     if (token === undefined) {
       return problem({

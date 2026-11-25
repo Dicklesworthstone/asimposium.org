@@ -5,7 +5,7 @@ import {
   parseEventTailQuery,
   renderEventTail,
 } from "../../../../packages/contracts/src/event-tail-model.ts";
-import { eventTailResponse } from "../../src/ledger/event-tail-http.ts";
+import { eventTailResponse, parseEventTailToon } from "../../src/ledger/event-tail-http.ts";
 import { type EventTailDatabase, EventTailReadError } from "../../src/ledger/event-tail-read.ts";
 import {
   EVENT_WAIT_HEAD_SELECT,
@@ -561,7 +561,11 @@ describe("event wait HTTP readback", () => {
             assert.equal(end.control, "page_end");
             assert.ok(end.poll.endsWith("&wait=25"));
           }
-          if (format === "toon") assert.ok(body.trimEnd().endsWith("|has_more:false]"));
+          if (format === "toon") {
+            const parsed = parseEventTailToon(body);
+            assert.equal(parsed.page_end.next_cursor, outcome === "changed" ? 2 : 1);
+            assert.equal(parsed.page_end.has_more, false);
+          }
         } finally {
           for (const release of releases) release?.();
           f.sql.close();

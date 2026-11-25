@@ -74,8 +74,10 @@ export async function loadPlatformStats(
   const hasDeadEnds = tables.has("dead_ends");
   const hasIdempotency = tables.has("idempotency");
   const hasScreeningCases = tables.has("screening_cases");
+  const hasSponsorScreeningCases = tables.has("sponsor_screening_cases");
   const hasReports = tables.has("reports");
   const hasAppeals = tables.has("screening_case_appeals");
+  const hasSponsorAppeals = tables.has("sponsor_screening_case_appeals");
   const hasRetractions = tables.has("retractions");
   const hasClaimVersions = tables.has("claim_versions");
 
@@ -179,7 +181,7 @@ export async function loadPlatformStats(
   let independentlyReviewedClaims = 0;
   let corroboratedAwaitingIndependence = 0;
   if (hasClaims) {
-    const retractedWholeClaims = new Set<string>();
+    const retractedTargets = new Set<string>();
     if (hasRetractions) {
       const retractionRows = await db
         .prepare(
@@ -187,18 +189,25 @@ export async function loadPlatformStats(
             ? `SELECT r.problem_id, r.target_object
                FROM retractions r
                JOIN problems p ON p.id = r.problem_id
-               WHERE ${publicProblemFilterAliased} AND instr(r.target_object, '@') = 0
-               LIMIT 2000`
+               WHERE ${publicProblemFilterAliased}
+               LIMIT 4000`
             : `SELECT problem_id, target_object
                FROM retractions
-               WHERE instr(target_object, '@') = 0
-               LIMIT 2000`,
+               LIMIT 4000`,
         )
         .all<{ problem_id: string; target_object: string }>();
       for (const row of retractionRows.results ?? []) {
-        retractedWholeClaims.add(`${row.problem_id}\u0000${row.target_object}`);
+        retractedTargets.add(`${row.problem_id}\u0000${row.target_object}`);
       }
     }
+
+    const headVersionJoin = hasClaimVersions
+      ? `LEFT JOIN (
+           SELECT problem_id, claim_id, MAX(version) AS head_version
+           FROM claim_versions
+           GROUP BY problem_id, claim_id
+         ) cv ON cv.problem_id = c.problem_id AND cv.claim_id = c.id`
+      : "";
 
     if (hasReviews) {
       const reviewCols = await listColumns(db, "reviews");
@@ -206,26 +215,21 @@ export async function loadPlatformStats(
         ? "AND r.capable_of_failure IS NOT NULL AND length(trim(r.capable_of_failure)) > 0"
         : "";
       const pinCurrentVersion = hasClaimVersions && reviewCols.has("target_version");
-      const versionJoin = pinCurrentVersion
-        ? `LEFT JOIN (
-             SELECT problem_id, claim_id, MAX(version) AS head_version
-             FROM claim_versions
-             GROUP BY problem_id, claim_id
-           ) cv ON cv.problem_id = c.problem_id AND cv.claim_id = c.id`
-        : "";
       const versionPinClause = pinCurrentVersion
         ? "AND (cv.head_version IS NULL OR r.target_version = cv.head_version)"
         : "";
       const claimReviewStats = await db
         .prepare(
           `SELECT c.problem_id, c.id,
+                  ${hasClaimVersions ? "cv.head_version" : "NULL AS head_version"},
                   SUM(CASE WHEN r.verdict IN ('confirm', 'reproduces') AND r.tier IN ('T2', 'T3') ${substantiveCheck} THEN 1 ELSE 0 END) AS high_tier_confirms,
                   SUM(CASE WHEN r.verdict IN ('confirm', 'reproduces') AND r.tier = 'T1' ${substantiveCheck} THEN 1 ELSE 0 END) AS t1_confirms,
                   SUM(CASE WHEN r.verdict IN ('refute', 'fails-to-reproduce') THEN 1 ELSE 0 END) AS refutes,
+                  SUM(CASE WHEN r.verdict IN ('refute', 'fails-to-reproduce') AND r.tier IN ('T2', 'T3') THEN 1 ELSE 0 END) AS high_tier_refutes,
                   COUNT(r.review_id) AS total_reviews
            FROM claims c
            ${hasProblems ? `JOIN problems p ON p.id = c.problem_id` : ""}
-           ${versionJoin}
+           ${headVersionJoin}
            LEFT JOIN reviews r ON r.problem_id = c.problem_id AND r.target_claim_id = c.id ${versionPinClause}
            ${hasProblems ? `WHERE ${publicProblemFilterAliased}` : ""}
            GROUP BY c.problem_id, c.id
@@ -234,17 +238,25 @@ export async function loadPlatformStats(
         .all<{
           problem_id: string;
           id: string;
+          head_version: number | null;
           high_tier_confirms: number;
           t1_confirms: number;
           refutes: number;
+          high_tier_refutes: number;
           total_reviews: number;
         }>();
       for (const row of claimReviewStats.results ?? []) {
         const highConf = Number(row.high_tier_confirms ?? 0);
         const t1Conf = Number(row.t1_confirms ?? 0);
         const refutes = Number(row.refutes ?? 0);
+        const highRefutes = Number(row.high_tier_refutes ?? 0);
+        const isRetracted =
+          retractedTargets.has(`${row.problem_id}\u0000${row.id}`) ||
+          (row.head_version !== null &&
+            row.head_version !== undefined &&
+            retractedTargets.has(`${row.problem_id}\u0000${row.id}@${row.head_version}`));
         let bucket = "open";
-        if (retractedWholeClaims.has(`${row.problem_id}\u0000${row.id}`)) {
+        if (isRetracted) {
           bucket = "retracted";
         } else if (refutes > 0 && highConf + t1Conf > 0) {
           bucket = "disputed";
@@ -257,14 +269,30 @@ export async function loadPlatformStats(
           if (highConf === 0) corroboratedAwaitingIndependence += 1;
         }
         claimsByDisposition[bucket] = (claimsByDisposition[bucket] ?? 0) + 1;
-        if (highConf > 0 || refutes > 0) {
+        if (highConf > 0 || highRefutes > 0) {
           independentlyReviewedClaims += 1;
         }
       }
     } else if (claimsTotal > 0) {
-      const retractedCount = Math.min(claimsTotal, retractedWholeClaims.size);
-      if (retractedCount > 0) claimsByDisposition.retracted = retractedCount;
-      if (claimsTotal - retractedCount > 0) claimsByDisposition.open = claimsTotal - retractedCount;
+      const claimRows = await db
+        .prepare(
+          `SELECT c.problem_id, c.id, ${hasClaimVersions ? "cv.head_version" : "NULL AS head_version"}
+           FROM claims c
+           ${hasProblems ? `JOIN problems p ON p.id = c.problem_id` : ""}
+           ${headVersionJoin}
+           ${hasProblems ? `WHERE ${publicProblemFilterAliased}` : ""}
+           LIMIT 2000`,
+        )
+        .all<{ problem_id: string; id: string; head_version: number | null }>();
+      for (const row of claimRows.results ?? []) {
+        const isRetracted =
+          retractedTargets.has(`${row.problem_id}\u0000${row.id}`) ||
+          (row.head_version !== null &&
+            row.head_version !== undefined &&
+            retractedTargets.has(`${row.problem_id}\u0000${row.id}@${row.head_version}`));
+        const bucket = isRetracted ? "retracted" : "open";
+        claimsByDisposition[bucket] = (claimsByDisposition[bucket] ?? 0) + 1;
+      }
     }
   }
 
@@ -359,30 +387,60 @@ export async function loadPlatformStats(
   }
 
   // 5. Safety family
-  const quarantineCasesOpen = hasScreeningCases
-    ? await scalarInt(db, "SELECT COUNT(*) AS value FROM screening_cases WHERE state = 'pending'")
-    : 0;
-  const quarantineCasesResolved = hasScreeningCases
-    ? await scalarInt(
-        db,
-        "SELECT COUNT(*) AS value FROM screening_cases WHERE state IN ('released', 'rejected')",
-      )
-    : 0;
-  const screeningAppealsTotal = hasAppeals
-    ? await scalarInt(db, "SELECT COUNT(*) AS value FROM screening_case_appeals")
-    : 0;
-  const screeningAppealReversals = hasAppeals
-    ? await scalarInt(
-        db,
-        "SELECT COUNT(*) AS value FROM screening_case_appeals WHERE state = 'released'",
-      )
-    : 0;
-  const screeningAppealsDecided = hasAppeals
-    ? await scalarInt(
-        db,
-        "SELECT COUNT(*) AS value FROM screening_case_appeals WHERE state IN ('released', 'upheld')",
-      )
-    : 0;
+  const quarantineCasesOpen =
+    (hasScreeningCases
+      ? await scalarInt(db, "SELECT COUNT(*) AS value FROM screening_cases WHERE state = 'pending'")
+      : 0) +
+    (hasSponsorScreeningCases
+      ? await scalarInt(
+          db,
+          "SELECT COUNT(*) AS value FROM sponsor_screening_cases WHERE state = 'pending'",
+        )
+      : 0);
+  const quarantineCasesResolved =
+    (hasScreeningCases
+      ? await scalarInt(
+          db,
+          "SELECT COUNT(*) AS value FROM screening_cases WHERE state IN ('released', 'rejected')",
+        )
+      : 0) +
+    (hasSponsorScreeningCases
+      ? await scalarInt(
+          db,
+          "SELECT COUNT(*) AS value FROM sponsor_screening_cases WHERE state IN ('released', 'rejected')",
+        )
+      : 0);
+  const screeningAppealsTotal =
+    (hasAppeals ? await scalarInt(db, "SELECT COUNT(*) AS value FROM screening_case_appeals") : 0) +
+    (hasSponsorAppeals
+      ? await scalarInt(db, "SELECT COUNT(*) AS value FROM sponsor_screening_case_appeals")
+      : 0);
+  const screeningAppealReversals =
+    (hasAppeals
+      ? await scalarInt(
+          db,
+          "SELECT COUNT(*) AS value FROM screening_case_appeals WHERE state = 'released'",
+        )
+      : 0) +
+    (hasSponsorAppeals
+      ? await scalarInt(
+          db,
+          "SELECT COUNT(*) AS value FROM sponsor_screening_case_appeals WHERE state = 'released'",
+        )
+      : 0);
+  const screeningAppealsDecided =
+    (hasAppeals
+      ? await scalarInt(
+          db,
+          "SELECT COUNT(*) AS value FROM screening_case_appeals WHERE state IN ('released', 'upheld')",
+        )
+      : 0) +
+    (hasSponsorAppeals
+      ? await scalarInt(
+          db,
+          "SELECT COUNT(*) AS value FROM sponsor_screening_case_appeals WHERE state IN ('released', 'upheld')",
+        )
+      : 0);
 
   const face: PlatformStatsFace = PlatformStatsFaceSchema.parse({
     kind: "stats",

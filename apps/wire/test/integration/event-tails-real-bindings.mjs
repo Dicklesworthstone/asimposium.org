@@ -8,6 +8,7 @@ import {
   EventTailResponseSchema,
   renderEventTail,
 } from "../../../../packages/contracts/src/event-tail.ts";
+import { parseEventTailToon, TOON_MEDIA_TYPE } from "../../../../packages/render/src/toon.ts";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 
 // Event-tail formats and feeds on real local Workerd/D1 (bead asimposiumorg-yv6).
@@ -414,15 +415,15 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, worker, origin, 
         next = control.next_cursor;
         more = control.has_more;
       } else {
-        const lines = text.trimEnd().split("\n");
-        assert.equal(lines[0], "id|seq|type|object_id|created_at|caused_by|causality_omitted");
-        const footer = /^\[control:page_end\|next_cursor:(\d+)\|has_more:(true|false)\]$/.exec(
-          lines.at(-1),
+        assert.equal(response.headers.get("content-type"), TOON_MEDIA_TYPE);
+        assert.ok(
+          !text.startsWith("id|seq|type|object_id|"),
+          "legacy pipe-delimited TOON format must not be served",
         );
-        assert.ok(footer, "TOON page ends with its control record");
-        seen.push(...lines.slice(1, -1).map((line) => Number(line.split("|")[1])));
-        next = Number(footer[1]);
-        more = footer[2] === "true";
+        const body = parseEventTailToon(text);
+        seen.push(...body.events.map((event) => event.seq));
+        next = body.page_end.next_cursor;
+        more = body.page_end.has_more;
       }
       since = next;
       if (!more) break;

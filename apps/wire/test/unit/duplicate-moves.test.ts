@@ -19,6 +19,9 @@ async function fixture() {
     CREATE TABLE claims(id TEXT, problem_id TEXT, norm_hash TEXT);
     CREATE TABLE claim_relations(problem_id TEXT, kind TEXT, source_claim_id TEXT,
       source_version INTEGER, target_ref TEXT, asserted_by_event TEXT, status TEXT);
+    CREATE TABLE public_duplicate_advisories(problem_id TEXT, source_claim_id TEXT,
+      source_version INTEGER, matched_claim_id TEXT, matched_version INTEGER,
+      similarity REAL, model_id TEXT, model_version TEXT);
     CREATE TABLE retractions(retraction_id TEXT, problem_id TEXT, target_object TEXT);
     INSERT INTO problems VALUES ('P-DEMO','active',0);
   `);
@@ -225,7 +228,7 @@ describe("duplicate recommendations from current immutable statements", () => {
     }
   });
 
-  test("revision, controls and source-byte races fail closed between the two reads", async () => {
+  test("revision, controls and source-byte races fail closed during exact pair verification", async () => {
     for (const state of ["revised", "hidden", "redacted", "tampered"] as const) {
       const f = await fixture();
       try {
@@ -239,7 +242,9 @@ describe("duplicate recommendations from current immutable statements", () => {
             f.sql.exec("UPDATE event_content SET payload_json='{}' WHERE event_id='EV-2'");
         });
         expect(await f.read()).toEqual({ move: null, degraded: true });
-        expect(f.queries).toHaveLength(2);
+        expect(f.queries).toHaveLength(3);
+        expect(f.queries[1]).toContain("FROM public_duplicate_advisories");
+        expect(f.queries[2]).toContain("json_each(j, '$.pairs')");
       } finally {
         f.sql.close();
       }
@@ -272,6 +277,39 @@ describe("duplicate recommendations from current immutable statements", () => {
       } finally {
         f.sql.close();
       }
+    }
+  });
+
+  test("stale and self-pair semantic advisories past PAIR_LIMIT cannot starve live semantic duplicates", async () => {
+    const f = await fixture();
+    try {
+      // Remove lexical match between C-1 and C-2 so only semantic advisories can match.
+      await f.claim("C-2", "Every odd square leaves remainder one modulo four.", 2);
+      await f.claim("C-3", "Squares of odd integers are congruent to 1 mod 4.");
+      // Insert 10 high-similarity stale/self-pair advisories ahead of the real (C-2@2, C-3@1) pair.
+      for (let i = 1; i <= 9; i++) {
+        f.sql
+          .query("INSERT INTO public_duplicate_advisories VALUES('P-DEMO',?,1,?,1,0.99,'m','v1')")
+          .run(`C-90${i}`, `C-91${i}`);
+      }
+      f.sql
+        .query(
+          "INSERT INTO public_duplicate_advisories VALUES('P-DEMO','C-2',2,'C-2',2,0.98,'m','v1')",
+        )
+        .run();
+      f.sql
+        .query(
+          "INSERT INTO public_duplicate_advisories VALUES('P-DEMO','C-2',2,'C-3',1,0.91,'m','v1')",
+        )
+        .run();
+
+      const result = await f.read();
+      expect(result.degraded).toBe(false);
+      expect(result.move?.move).toBe("collapse-duplicate");
+      expect(result.move?.refs).toEqual(["P-DEMO", "C-2@2", "C-3@1"]);
+      expect(result.move?.why).toContain("semantic near-duplicates");
+    } finally {
+      f.sql.close();
     }
   });
 });

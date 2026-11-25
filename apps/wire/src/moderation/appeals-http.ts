@@ -7,7 +7,9 @@ import {
 } from "@asimposium/contracts/appeals";
 import { Hono } from "hono";
 import { cancelUnconsumedRequestBody, parseAuthenticatedJsonBytes } from "../auth/http";
+import { enqueueSponsorNotificationIfConfigured } from "../email/transactional-email";
 import type { EnrollmentRouterOptions } from "../enrollment/router";
+import type { Env } from "../env";
 import { validatedProblem } from "../http/envelope";
 import { scanFieldsForCredentials, secretShapedContentProblem } from "../screening/credential-scan";
 import {
@@ -17,6 +19,7 @@ import {
   sponsorScreeningCases,
   submitScreeningAppeal,
 } from "./appeals-store";
+import { getScreeningCase } from "./store";
 
 function privateResponse(response: Response) {
   response.headers.set("cache-control", "private, no-store");
@@ -46,7 +49,7 @@ function invalid(detail: string) {
 export function createScreeningAppealsApp(
   options: Pick<EnrollmentRouterOptions, "db" | "verifiedSponsor" | "verifiedOperator">,
 ) {
-  const app = new Hono();
+  const app = new Hono<{ Bindings: Env }>();
   const routes = [
     {
       method: "GET",
@@ -148,13 +151,31 @@ export function createScreeningAppealsApp(
         if (secrets.length) return privateResponse(secretShapedContentProblem(secrets));
         const key = c.req.header("idempotency-key");
         if (!key) return invalid("An Idempotency-Key is required.");
-        return privateResponse(
-          Response.json(
-            "statement" in parsed.data
-              ? await submitScreeningAppeal(options.db, principalId, parsed.data, key)
-              : await decideScreeningAppeal(options.db, principalId, parsed.data, key),
-          ),
-        );
+        const result =
+          "statement" in parsed.data
+            ? await submitScreeningAppeal(options.db, principalId, parsed.data, key)
+            : await decideScreeningAppeal(options.db, principalId, parsed.data, key);
+        if (!("statement" in parsed.data)) {
+          try {
+            const caseRow = await getScreeningCase(options.db, result.case_id);
+            if (caseRow?.sponsor_id) {
+              await enqueueSponsorNotificationIfConfigured(c.env, {
+                db: options.db,
+                idempotencyKey: `ops7:moderation_notice:appeal:${result.appeal_id}:${result.state}`,
+                causalEventId: result.audit_event_id ?? result.appeal_id,
+                sponsorId: caseRow.sponsor_id,
+                emailClass: "moderation_notice",
+                actionPath: "/console/appeals",
+                summaryLabel: `Screening appeal ${result.state} (${result.case_id})`,
+                referenceId: result.appeal_id,
+                ...(result.decided_at ? { occurredAtIso: result.decided_at } : {}),
+              });
+            }
+          } catch {
+            // Non-blocking: console appeals surface remains canonical.
+          }
+        }
+        return privateResponse(Response.json(result));
       } catch (error) {
         if (error instanceof ScreeningAppealError)
           return privateResponse(

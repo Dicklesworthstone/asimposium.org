@@ -51,6 +51,7 @@ import {
   SUPPORTED_PROTOCOL_VERSIONS,
 } from "./discovery/discovery";
 import { createDiscoveryRoutes } from "./discovery/router";
+import { createPublicEmailUnsubscribeRouter, createTransactionalEmailApp } from "./email/router";
 import { D1EnrollmentStore } from "./enrollment/d1-store";
 import { createEnrollmentRouter } from "./enrollment/router";
 import {
@@ -80,6 +81,7 @@ import { createMegaCommandsRouter } from "./mega-commands/router";
 import { createScreeningAppealsApp } from "./moderation/appeals-http";
 import { createModerationLogRoutes, createModerationRouter } from "./moderation/router";
 import { sponsorMutationRefusal } from "./moderation/sponsor-suspension";
+import { createSynthesisDraftsAndExternalReviewsApp } from "./problems/nkz2-router";
 import { createProblemRouter } from "./problems/router";
 import { loadReadiness } from "./readiness";
 import { handleScreeningRequest, SCREENING_ROUTE_PATH } from "./screening/route";
@@ -173,8 +175,10 @@ const EXACT_ENROLLMENT_PATHS = new Set([
   "/v1/operators/content-control",
   "/v1/operators/areas/rename",
   "/v1/operators/audit-history",
+  "/v1/operators/email-outbox/health",
   "/v1/protocol/ack",
   "/v1/sponsors/bootstrap",
+  "/v1/sponsors/email-preferences",
   "/v1/sponsors/panic",
   "/v1/sponsors/reports",
   "/v1/sponsors/screening-posture",
@@ -657,7 +661,32 @@ function isEnrollmentPath(pathname: string): boolean {
       segments[5] === "history" &&
       segments[6] === "after" &&
       segments[7] !== "" &&
-      !segments[7]?.includes("/"))
+      !segments[7]?.includes("/")) ||
+    (segments.length === 6 &&
+      segments[0] === "v1" &&
+      segments[1] === "sponsors" &&
+      segments[2] === "problems" &&
+      segments[3] !== "" &&
+      !segments[3]?.includes("/") &&
+      segments[4] === "syntheses" &&
+      segments[5] === "drafts") ||
+    (segments.length === 7 &&
+      segments[0] === "v1" &&
+      segments[1] === "sponsors" &&
+      segments[2] === "problems" &&
+      segments[3] !== "" &&
+      !segments[3]?.includes("/") &&
+      segments[4] === "syntheses" &&
+      segments[5] !== "" &&
+      !segments[5]?.includes("/") &&
+      segments[6] === "publish") ||
+    (segments.length === 5 &&
+      segments[0] === "v1" &&
+      segments[1] === "operators" &&
+      segments[2] === "problems" &&
+      segments[3] !== "" &&
+      !segments[3]?.includes("/") &&
+      segments[4] === "external-expert-reviews")
   );
 }
 
@@ -972,6 +1001,11 @@ function enrollmentStack(env: Env, options: CreateAppOptions): EnrollmentStack |
     verifiedOperator,
   });
   router.route("/", createScreeningAppealsApp({ db: env.DB, verifiedSponsor, verifiedOperator }));
+  router.route(
+    "/",
+    createSynthesisDraftsAndExternalReviewsApp({ db: env.DB, verifiedSponsor, verifiedOperator }),
+  );
+  router.route("/", createTransactionalEmailApp({ db: env.DB, verifiedSponsor, verifiedOperator }));
   router.route("/", createSponsorWorkshopSearchRouter({ verifiedSponsor }));
   // A mounted sub-app's default Hono 404 is text/plain. Mark only that internal
   // miss so createApp can replace it with the canonical ProblemDocument without
@@ -1632,6 +1666,7 @@ export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env 
   app.route("/", createCheckpointFaceRoutes());
   app.route("/", createPublicDirectiveDisclosureRouter());
   app.route("/", createPublicProtocolConflictRouter());
+  app.route("/", createPublicEmailUnsubscribeRouter());
 
   // The problem lifecycle (W5.1) & sponsor commentary (W8.3a): Fellow problem proposals,
   // problem detail, statement reviews, sponsor briefs & lifecycle actions, and sponsor commentary.
@@ -1739,6 +1774,7 @@ export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env 
       pathname !== "/v1/sponsors/workshops" &&
       pathname !== "/v1/sponsors/workshop" &&
       pathname !== "/v1/sponsors/workshop/cursor" &&
+      pathname !== "/v1/sponsors/workshop/room-ticket" &&
       pathname !== "/v1/sponsors/workshop/action" &&
       pathname !== "/v1/sponsors/leases" &&
       pathname !== "/v1/sponsors/leases/release"

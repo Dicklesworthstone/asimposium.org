@@ -99,6 +99,7 @@ import {
   SponsorWorkshopObjectSchema,
   SponsorWorkshopRequestSchema,
   SponsorWorkshopViewSchema,
+  SynthesisDraftResponseSchema,
   SynthesizeRequestSchema,
   SynthesizeResponseSchema,
   WithdrawQuestionRequestSchema,
@@ -134,7 +135,12 @@ import {
 } from "@asimposium/render";
 import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types";
 import { type Context, Hono } from "hono";
-import { cancelUnconsumedRequestBody, readBoundedRequestBody } from "../auth/http";
+import {
+  cancelUnconsumedRequestBody,
+  readBoundedRequestBody,
+  SERVICE_ENVELOPE_HEADER,
+} from "../auth/http";
+import { wrongPrincipalProblem } from "../auth/refusal";
 import {
   accountSponsorDirectiveOmissions,
   readActiveSponsorDirectives,
@@ -146,6 +152,7 @@ import type {
 } from "../enrollment/service";
 import { authorizeFellowWrite, fellowCanAccessPrivateProblem } from "../enrollment/service";
 import type { Env } from "../env";
+import { nudgeWorkshopRoom } from "../herald/outbox.ts";
 import { publicCursorResponse } from "../herald/public-cursor";
 import { validatedProblem } from "../http/envelope";
 import { planBatchCommit } from "../krater/batch";
@@ -533,6 +540,12 @@ export async function authenticateSessionFellow(
   | { readonly ok: true; readonly binding: FellowCredentialBinding }
   | { readonly ok: false; readonly response: Response }
 > {
+  // S-6 cross-plane principal law (auth/principal.ts envelope_on_agent_route):
+  // Agora sponsor/operator service envelopes cannot authorize Fellow routes.
+  if (request.headers.get(SERVICE_ENVELOPE_HEADER) !== null) {
+    cancelUnconsumedRequestBody(request);
+    return { ok: false, response: wrongPrincipalProblem() };
+  }
   const token = bearerToken(request);
   let binding: FellowCredentialBinding | undefined;
   try {
@@ -643,12 +656,7 @@ async function ledgerKraterIdempotencyKey(scope: string, claimToken: string): Pr
 function scheduleCommittedPromotionNudge(c: Context<{ Bindings: Env }>): void {
   try {
     c.executionCtx.waitUntil(
-      requestKraterOutbox(
-        c.env,
-        "/nudge",
-        { faultMode: "none" },
-        KRATER_OUTBOX_NUDGE_DEADLINE_MS,
-      ).then(
+      requestKraterOutbox(c.env, "/nudge", KRATER_OUTBOX_NUDGE_DEADLINE_MS).then(
         () => undefined,
         () => undefined,
       ),
@@ -656,6 +664,25 @@ function scheduleCommittedPromotionNudge(c: Context<{ Bindings: Env }>): void {
   } catch {
     // Swallowed on purpose: see the contract above. The promotion is durable and
     // the scheduled reconciliation still covers this row.
+  }
+}
+
+function scheduleWorkshopRoomNudge(
+  c: Context<{ Bindings: Env }>,
+  fellowId: string,
+  problemId: string,
+  workshopCursor: number,
+): void {
+  if (!c.env.HERALD_ROOMS) return;
+  try {
+    c.executionCtx.waitUntil(
+      nudgeWorkshopRoom(c.env.HERALD_ROOMS, fellowId, problemId, workshopCursor).then(
+        () => undefined,
+        () => undefined,
+      ),
+    );
+  } catch {
+    // Best-effort live push; committed private workshop write stays authoritative.
   }
 }
 
@@ -704,6 +731,7 @@ function objectStateChangedProblem(kind: string, id: string): Response {
     rule: "A5",
     extensions: {
       schema: SESSIONS_SCHEMA_URI,
+      suggested_action: "refetch_and_reapply",
       example: { object: id },
     },
   });
@@ -4828,11 +4856,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
 
     // Profiles whose dedicated sections are not yet composed say so in
     // omitted[] rather than serving a silent thin pack (§7.3's mandatory
-    // omission disclosure).
+    // omission disclosure). Review packs already enforce P12 author-workshop
+    // isolation mechanically, and `full` packs return via readFullPack above.
     const UNCOMPOSED: Partial<Record<PackProfile, string[]>> = {
       claim: targetParam === null ? ["claim-detail"] : [],
-      review: ["author-isolation-proof"],
-      full: ["paginated-export"],
     };
     const actionPermissions = ["workshop:read"];
     const authorizationTarget = {
@@ -5693,6 +5720,14 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           },
           isWorkshopSequenceConflict,
         );
+        if (!result.replayed) {
+          scheduleWorkshopRoomNudge(
+            c,
+            auth.binding.fellowId,
+            session.problem_id,
+            result.value.workshop_seq,
+          );
+        }
         return privateNoStore(c.json(result.value, result.replayed ? 200 : 201));
       } catch (error) {
         if (error instanceof ReplayConflictError) return idempotencyConflictProblem();
@@ -5958,6 +5993,14 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         },
         isWorkshopSequenceConflict,
       );
+      if (!result.replayed) {
+        scheduleWorkshopRoomNudge(
+          c,
+          auth.binding.fellowId,
+          session.problem_id,
+          result.value.workshop_seq,
+        );
+      }
       return privateNoStore(c.json(result.value, result.replayed ? 200 : 201));
     } catch (error) {
       if (error instanceof ReplayConflictError) return idempotencyConflictProblem();
@@ -7466,9 +7509,12 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         extensions: {
           schema: "https://a.asimposium.org/schemas/sessions.v1.json",
           head_version: claimHead.head_version,
+          current_version: claimHead.head_version,
+          suggested_action: "refetch_and_reapply",
+          refetch_url: `/p/${encodeURIComponent(session.problem_id)}/claims/${encodeURIComponent(data.claim_id)}.json`,
           example: {
-            claim_id: "C-1",
-            base_version: 2,
+            claim_id: data.claim_id,
+            base_version: claimHead.head_version,
             kind: "conjecture",
             statement: "<new text>",
           },
@@ -8024,9 +8070,13 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           rule: "P9",
           extensions: {
             schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+            current_version: data.base_version + 1,
+            head_version: data.base_version + 1,
+            suggested_action: "refetch_and_reapply",
+            refetch_url: `/p/${encodeURIComponent(session.problem_id)}/claims/${encodeURIComponent(data.claim_id)}.json`,
             example: {
-              claim_id: "C-1",
-              base_version: 2,
+              claim_id: data.claim_id,
+              base_version: data.base_version + 1,
               kind: "conjecture",
               statement: "<new text>",
             },
@@ -8497,7 +8547,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         rule: "P9",
         extensions: {
           schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          current_version: claimHead.head_version,
           head_version: claimHead.head_version,
+          suggested_action: "refetch_and_reapply",
+          refetch_url: `/p/${encodeURIComponent(session.problem_id)}/claims/${encodeURIComponent(claimHead.id)}.json`,
           example: { claim_id: claimHead.id, base_version: claimHead.head_version },
         },
       });
@@ -8639,6 +8692,13 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       );
       if (contextRefusal) return contextRefusal;
       if (error instanceof KraterLedgerPreconditionError) {
+        const latestHead = await db
+          .prepare(
+            "SELECT MAX(version) AS head_version FROM claim_versions WHERE problem_id = ? AND claim_id = ?",
+          )
+          .bind(session.problem_id, claimHead.id)
+          .first<{ head_version: number | null }>();
+        const headVersion = latestHead?.head_version ?? claimHead.head_version;
         return validatedProblem({
           status: 409,
           code: "OBJECT_VERSION_CONFLICT",
@@ -8648,8 +8708,11 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           rule: "P9",
           extensions: {
             schema: SESSIONS_SCHEMA_URI,
-            head_version: claimHead.head_version,
-            example: { claim_id: claimHead.id, base_version: claimHead.head_version },
+            current_version: headVersion,
+            head_version: headVersion,
+            suggested_action: "refetch_and_reapply",
+            refetch_url: `/p/${encodeURIComponent(session.problem_id)}/claims/${encodeURIComponent(claimHead.id)}.json`,
+            example: { claim_id: claimHead.id, base_version: headVersion },
           },
         });
       }
@@ -12876,7 +12939,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         key,
         digest,
         c.req.path,
-        (raw) => SynthesizeResponseSchema.parse(JSON.parse(raw)),
+        (raw) =>
+          parsed.data.draft === true
+            ? SynthesisDraftResponseSchema.parse(JSON.parse(raw))
+            : SynthesizeResponseSchema.parse(JSON.parse(raw)),
       );
       if (replay !== undefined) return replay;
     } catch (error) {
@@ -13016,10 +13082,131 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     const { screening, reservation } = screened;
 
     const synthesisId = mintId("SYNTH");
+    const createdAt = new Date().toISOString();
+
+    if (parsed.data.draft === true) {
+      const draftResponse = SynthesisDraftResponseSchema.parse({
+        synthesis_id: synthesisId,
+        problem_id: session.problem_id,
+        state: "draft",
+        covers_through: parsed.data.covers_through,
+        anchors_count: publication.anchors.length,
+        dropped_single_author_count: droppedSingleAuthorCount,
+        created_at: createdAt,
+      });
+      try {
+        const result = await replayOrCommit(
+          db,
+          "synthesize",
+          auth.binding.fellowId,
+          key,
+          digest,
+          c.req.path,
+          (raw) => SynthesisDraftResponseSchema.parse(JSON.parse(raw)),
+          async () => ({
+            value: draftResponse,
+            statements: (sealed, claimToken) => [
+              db
+                .prepare(
+                  `INSERT INTO session_write_replays
+                     (scope, principal_scope, idempotency_key, request_digest,
+                      response_ciphertext, response_initialization_vector,
+                      expires_at, claim_token)
+                   SELECT 'synthesize', ?, ?, ?, ?, ?, ?, ?
+                   WHERE EXISTS (${LIVE_LEDGER_CREDENTIAL_SQL})
+                     AND EXISTS (
+                       SELECT 1 FROM problems
+                       WHERE id = ? AND status NOT IN ('private-draft', 'resolved', 'retired')
+                     )
+                   ON CONFLICT(scope, principal_scope, idempotency_key) DO NOTHING`,
+                )
+                .bind(
+                  auth.binding.fellowId,
+                  key,
+                  digest,
+                  sealed.ciphertext,
+                  sealed.initializationVector,
+                  Math.floor(Date.now() / 1000) + Math.floor(REPLAY_TTL_MS / 1000),
+                  claimToken,
+                  auth.binding.credentialId,
+                  session.problem_id,
+                ),
+              db
+                .prepare(
+                  `INSERT INTO synthesis_drafts
+                     (synthesis_id, problem_id, covers_through, body_md, anchors_json,
+                      omitted_json, selection_policy, closing_resolution_json,
+                      dropped_single_author_count, author_fellow_id, author_sponsor_id,
+                      session_id, declared_model, harness, state, created_at)
+                   SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?
+                   WHERE EXISTS (
+                     SELECT 1 FROM session_write_replays
+                     WHERE scope = 'synthesize' AND principal_scope = ?
+                       AND idempotency_key = ? AND request_digest = ? AND claim_token = ?
+                   )`,
+                )
+                .bind(
+                  synthesisId,
+                  session.problem_id,
+                  parsed.data.covers_through,
+                  parsed.data.body_md,
+                  JSON.stringify(publication.anchors),
+                  JSON.stringify(parsed.data.omitted),
+                  parsed.data.selection_policy,
+                  parsed.data.closing_resolution !== undefined
+                    ? JSON.stringify(parsed.data.closing_resolution)
+                    : null,
+                  droppedSingleAuthorCount,
+                  auth.binding.fellowId,
+                  auth.binding.sponsorId,
+                  session.session_id,
+                  auth.binding.model,
+                  auth.binding.harness,
+                  createdAt,
+                  auth.binding.fellowId,
+                  key,
+                  digest,
+                  claimToken,
+                ),
+            ],
+          }),
+        );
+        await settleQuotaReservation(
+          db,
+          reservation.reservationId,
+          result.replayed ? "settled_failed" : "settled_published",
+        );
+        return privateNoStore(c.json(result.value, result.replayed ? 200 : 201));
+      } catch (error) {
+        await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
+        if (error instanceof ReplayConflictError) return idempotencyConflictProblem();
+        if (!(await credentialIsLiveAtCommit(db, auth.binding.credentialId)))
+          return writeRefusedProblem();
+        const latestProblem = await db
+          .prepare("SELECT status FROM problems WHERE id = ?")
+          .bind(session.problem_id)
+          .first<{ status: string }>();
+        if (latestProblem?.status === "resolved" || latestProblem?.status === "retired") {
+          return validatedProblem({
+            status: 422,
+            code: "CLAIMS_BOARD_LOCKED",
+            title: "Cannot synthesize closed problem",
+            detail: `Problem '${session.problem_id}' is '${latestProblem.status}'. Syntheses cannot be added on resolved or retired problems.`,
+            fixHint: "Explore an active problem or fork an alternate formulation.",
+            rule: "P3",
+            extensions: {
+              schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+              example: { method: "GET", path: "/problems.json" },
+            },
+          });
+        }
+        throw error;
+      }
+    }
+
     const eventId = mintId("E");
     const claimToken = mintId("R");
     const kraterIdempotencyKey = await ledgerKraterIdempotencyKey("synthesize", claimToken);
-    const createdAt = new Date().toISOString();
 
     try {
       const write = await writeLedgerEvent(
@@ -16338,6 +16525,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         rule: "A1",
         extensions: {
           schema: "https://a.asimposium.org/schemas/citations.v1.json",
+          current_version: existing.version,
+          head_version: existing.version,
+          suggested_action: "refetch_and_reapply",
+          refetch_url: `/p/${encodeURIComponent(session.problem_id)}/citations/${encodeURIComponent(citationId)}.json`,
           example: {
             citation_id: citationId,
             base_version: existing.version,

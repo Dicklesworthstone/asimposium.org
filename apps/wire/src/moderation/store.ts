@@ -30,7 +30,7 @@ import {
   ReportSourceUnavailableError,
   reportSourcePinBindings,
 } from "./report-detail.ts";
-import { screeningCaseReleasedSql } from "./screening-release.ts";
+import { screeningCaseReleasedSql, sponsorScreeningCaseReleasedSql } from "./screening-release.ts";
 import { type ModerationTargetGuard, moderationTargetGuard } from "./target.ts";
 
 /** Independent sponsors whose reports hide a target pending review (§9.1 L2). */
@@ -206,6 +206,26 @@ export interface ScreeningCaseRow {
   readonly humanConfirmedRejection?: boolean;
 }
 
+export const SPONSOR_CASE_ACTOR_PREFIX = "sponsor:" as const;
+
+export function sponsorCaseActorId(sponsorId: string): string {
+  return `${SPONSOR_CASE_ACTOR_PREFIX}${sponsorId}`;
+}
+
+export function sponsorIdFromCaseActor(fellowId: string): string | null {
+  if (!fellowId.startsWith(SPONSOR_CASE_ACTOR_PREFIX)) return null;
+  const sponsorId = fellowId.slice(SPONSOR_CASE_ACTOR_PREFIX.length);
+  return sponsorId.length > 0 ? sponsorId : null;
+}
+
+function isMissingSponsorScreeningTable(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    (error.message.includes("no such table: sponsor_screening_cases") ||
+      error.message.includes("no such table: sponsor_screening_case_appeals"))
+  );
+}
+
 /** The case for exactly these bytes by this author on this problem, if any. */
 export async function screeningCaseFor(
   db: D1Database,
@@ -213,6 +233,36 @@ export async function screeningCaseFor(
   problemId: string,
   inputDigest: string,
 ): Promise<ScreeningCaseRow | undefined> {
+  const sponsorActorId = sponsorIdFromCaseActor(fellowId);
+  if (sponsorActorId !== null) {
+    const raw = await db
+      .prepare(
+        "SELECT * FROM sponsor_screening_cases WHERE sponsor_id = ? AND problem_id = ? AND input_digest = ?",
+      )
+      .bind(sponsorActorId, problemId, inputDigest)
+      .first<Omit<ScreeningCaseRow, "fellow_id">>();
+    if (!raw) return undefined;
+    const row: ScreeningCaseRow = { ...raw, fellow_id: sponsorCaseActorId(raw.sponsor_id) };
+    if (row.state === "rejected") {
+      const released = await db
+        .prepare(`SELECT c.case_id FROM sponsor_screening_cases c
+        WHERE c.case_id = ? AND ${sponsorScreeningCaseReleasedSql("c")}`)
+        .bind(row.case_id)
+        .first();
+      if (released) return { ...row, state: "released" };
+      if (row.decided_by === AUTOMATED_REJECTION_DECIDED_BY) {
+        const upheld = await db
+          .prepare(
+            "SELECT appeal_id FROM sponsor_screening_case_appeals WHERE case_id = ? AND state = 'upheld'",
+          )
+          .bind(row.case_id)
+          .first();
+        return { ...row, humanConfirmedRejection: upheld !== null };
+      }
+      return { ...row, humanConfirmedRejection: true };
+    }
+    return row;
+  }
   const row = await db
     .prepare(
       "SELECT * FROM screening_cases WHERE fellow_id = ? AND problem_id = ? AND input_digest = ?",
@@ -261,6 +311,59 @@ export async function openScreeningCase(
   );
   const contextualJson =
     input.contextualInput === undefined ? null : JSON.stringify(input.contextualInput);
+  const sponsorActorId = sponsorIdFromCaseActor(input.fellowId);
+  if (sponsorActorId !== null) {
+    if (sponsorActorId !== input.sponsorId)
+      throw new Error("sponsor screening case actor does not match sponsorId");
+    const [inserted] = await db.batch<{ case_id: string }>([
+      db
+        .prepare(
+          `INSERT INTO sponsor_screening_cases
+             (case_id, problem_id, sponsor_id, route, input_digest, context_digest,
+              candidate_json, coarse_category, outcome, decision_path, provider_status,
+              model_version, policy_version, configuration_digest, state, created_at, contextual_input_json)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+           ON CONFLICT (sponsor_id, problem_id, input_digest) DO NOTHING
+           RETURNING case_id`,
+        )
+        .bind(
+          caseId,
+          input.problemId,
+          input.sponsorId,
+          input.route,
+          input.inputDigest,
+          input.contextDigest,
+          candidateJson,
+          input.coarseCategory,
+          input.outcome,
+          input.decisionPath,
+          input.providerStatus,
+          input.modelVersion,
+          input.policyVersion,
+          input.configurationDigest,
+          createdAt,
+          contextualJson,
+        ),
+      moderationLogStatement(
+        db,
+        {
+          action: "quarantined",
+          category: input.logCategory ?? input.coarseCategory,
+          subject: "candidate",
+          problemId: input.problemId,
+          createdAt,
+        },
+        {
+          sql: "EXISTS (SELECT 1 FROM sponsor_screening_cases WHERE case_id = ?)",
+          bindings: [caseId],
+        },
+      ),
+    ]);
+    if ((inserted?.results.length ?? 0) > 0) return { caseId, state: "pending" };
+    const existing = await screeningCaseFor(db, input.fellowId, input.problemId, input.inputDigest);
+    if (existing === undefined) throw new Error("sponsor screening case vanished after a conflict");
+    return { caseId: existing.case_id, state: existing.state };
+  }
   const [inserted] = await db.batch<{ case_id: string }>([
     db
       .prepare(
@@ -363,6 +466,84 @@ export async function recordRejectedScreeningCase(
   );
   const contextualJson =
     input.contextualInput === undefined ? null : JSON.stringify(input.contextualInput);
+  const sponsorActorId = sponsorIdFromCaseActor(input.fellowId);
+  if (sponsorActorId !== null) {
+    if (sponsorActorId !== input.sponsorId)
+      throw new Error("sponsor screening case actor does not match sponsorId");
+    const [inserted] = await db.batch<{ case_id: string }>([
+      db
+        .prepare(
+          `INSERT INTO sponsor_screening_cases
+             (case_id, problem_id, sponsor_id, route, input_digest, context_digest,
+              candidate_json, coarse_category, outcome, decision_path, provider_status,
+              model_version, policy_version, configuration_digest, state, created_at,
+              decided_at, decided_by, decision_reason, contextual_input_json)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'rejected', ?, ?, ?, ?, ?)
+           ON CONFLICT (sponsor_id, problem_id, input_digest) DO NOTHING
+           RETURNING case_id`,
+        )
+        .bind(
+          caseId,
+          input.problemId,
+          input.sponsorId,
+          input.route,
+          input.inputDigest,
+          input.contextDigest,
+          candidateJson,
+          input.coarseCategory,
+          input.outcome,
+          input.decisionPath,
+          input.providerStatus,
+          input.modelVersion,
+          input.policyVersion,
+          input.configurationDigest,
+          createdAt,
+          createdAt,
+          AUTOMATED_REJECTION_DECIDED_BY,
+          AUTOMATED_REJECTION_REASON,
+          contextualJson,
+        ),
+      moderationLogStatement(
+        db,
+        {
+          action: "rejected",
+          category: input.logCategory ?? input.coarseCategory,
+          subject: "candidate",
+          problemId: input.problemId,
+          createdAt,
+        },
+        {
+          sql: "EXISTS (SELECT 1 FROM sponsor_screening_cases WHERE case_id = ?)",
+          bindings: [caseId],
+        },
+      ),
+      ...extraBatchStatements,
+    ]);
+    if ((inserted?.results.length ?? 0) > 0) {
+      logScreeningCaseOutcome(
+        caseId,
+        input.coarseCategory,
+        AUTOMATED_REJECTION_DECIDED_BY,
+        "rejected",
+        null,
+      );
+      return {
+        caseId,
+        state: "rejected",
+        sponsorId: input.sponsorId,
+        coarseCategory: input.coarseCategory,
+      };
+    }
+    const existing = await screeningCaseFor(db, input.fellowId, input.problemId, input.inputDigest);
+    if (existing === undefined)
+      throw new Error("rejected sponsor screening case vanished after a conflict");
+    return {
+      caseId: existing.case_id,
+      state: existing.state,
+      sponsorId: existing.sponsor_id,
+      coarseCategory: existing.coarse_category,
+    };
+  }
   const [inserted] = await db.batch<{ case_id: string }>([
     db
       .prepare(
@@ -442,6 +623,19 @@ export async function supersedePendingCase(
   problemId: string,
   inputDigest: string,
 ): Promise<void> {
+  const sponsorActorId = sponsorIdFromCaseActor(fellowId);
+  if (sponsorActorId !== null) {
+    await db
+      .prepare(
+        `UPDATE sponsor_screening_cases
+            SET state = 'superseded', decided_at = ?, decided_by = 'platform:symposiarch',
+                decision_reason = 'A later screen of the same bytes passed.'
+          WHERE sponsor_id = ? AND problem_id = ? AND input_digest = ? AND state = 'pending'`,
+      )
+      .bind(new Date().toISOString(), sponsorActorId, problemId, inputDigest)
+      .run();
+    return;
+  }
   await db
     .prepare(
       `UPDATE screening_cases
@@ -457,18 +651,52 @@ export async function listPendingCases(
   db: D1Database,
   limit = 100,
 ): Promise<{ readonly rows: ScreeningCaseRow[]; readonly totalPending: number }> {
-  const [rows, total] = await db.batch([
-    db
-      .prepare(
-        "SELECT * FROM screening_cases WHERE state = 'pending' ORDER BY created_at ASC, case_id ASC LIMIT ?",
-      )
-      .bind(Math.max(1, Math.min(limit, 100))),
-    db.prepare("SELECT COUNT(*) AS n FROM screening_cases WHERE state = 'pending'"),
-  ]);
-  return {
-    rows: (rows?.results ?? []) as ScreeningCaseRow[],
-    totalPending: Number((total?.results?.[0] as { n?: number } | undefined)?.n ?? 0),
-  };
+  const boundedLimit = Math.max(1, Math.min(limit, 100));
+  try {
+    const [rows, total] = await db.batch([
+      db
+        .prepare(
+          `SELECT * FROM (
+             SELECT case_id, problem_id, fellow_id, sponsor_id, route, input_digest, context_digest,
+                    candidate_json, contextual_input_json, coarse_category, outcome, decision_path,
+                    provider_status, model_version, policy_version, configuration_digest, state,
+                    created_at, decided_at, decided_by, decision_reason
+               FROM screening_cases WHERE state = 'pending'
+             UNION ALL
+             SELECT case_id, problem_id, 'sponsor:' || sponsor_id AS fellow_id, sponsor_id, route,
+                    input_digest, context_digest, candidate_json, contextual_input_json,
+                    coarse_category, outcome, decision_path, provider_status, model_version,
+                    policy_version, configuration_digest, state, created_at, decided_at,
+                    decided_by, decision_reason
+               FROM sponsor_screening_cases WHERE state = 'pending'
+           )
+           ORDER BY created_at ASC, case_id ASC LIMIT ?`,
+        )
+        .bind(boundedLimit),
+      db.prepare(
+        `SELECT (SELECT COUNT(*) FROM screening_cases WHERE state = 'pending')
+              + (SELECT COUNT(*) FROM sponsor_screening_cases WHERE state = 'pending') AS n`,
+      ),
+    ]);
+    return {
+      rows: (rows?.results ?? []) as ScreeningCaseRow[],
+      totalPending: Number((total?.results?.[0] as { n?: number } | undefined)?.n ?? 0),
+    };
+  } catch (error) {
+    if (!isMissingSponsorScreeningTable(error)) throw error;
+    const [rows, total] = await db.batch([
+      db
+        .prepare(
+          "SELECT * FROM screening_cases WHERE state = 'pending' ORDER BY created_at ASC, case_id ASC LIMIT ?",
+        )
+        .bind(boundedLimit),
+      db.prepare("SELECT COUNT(*) AS n FROM screening_cases WHERE state = 'pending'"),
+    ]);
+    return {
+      rows: (rows?.results ?? []) as ScreeningCaseRow[],
+      totalPending: Number((total?.results?.[0] as { n?: number } | undefined)?.n ?? 0),
+    };
+  }
 }
 
 export async function getScreeningCase(
@@ -479,7 +707,19 @@ export async function getScreeningCase(
     .prepare("SELECT * FROM screening_cases WHERE case_id = ?")
     .bind(caseId)
     .first<ScreeningCaseRow>();
-  return row ?? undefined;
+  if (row) return row;
+  try {
+    const sponsorRow = await db
+      .prepare("SELECT * FROM sponsor_screening_cases WHERE case_id = ?")
+      .bind(caseId)
+      .first<Omit<ScreeningCaseRow, "fellow_id">>();
+    return sponsorRow
+      ? { ...sponsorRow, fellow_id: sponsorCaseActorId(sponsorRow.sponsor_id) }
+      : undefined;
+  } catch (error) {
+    if (isMissingSponsorScreeningTable(error)) return undefined;
+    throw error;
+  }
 }
 
 export type CaseDecision = "release" | "confirm_rejection";
@@ -496,6 +736,8 @@ export async function decideScreeningCase(
   const before = await getScreeningCase(db, input.caseId);
   if (before === undefined) return { ok: false, reason: "not-found" };
   if (before.state !== "pending") return { ok: false, reason: "not-pending" };
+  const isSponsorOwned = sponsorIdFromCaseActor(before.fellow_id) !== null;
+  const caseTable = isSponsorOwned ? "sponsor_screening_cases" : "screening_cases";
   const state = input.decision === "release" ? "released" : "rejected";
   const decidedAt = new Date().toISOString();
   const auditEventId = mintModerationId("OA");
@@ -503,7 +745,7 @@ export async function decideScreeningCase(
     // This immediately follows the guarded UPDATE in the same D1 batch.
     // State/time/operator equality alone can match another attempt that won
     // in the same millisecond, even though this attempt updated no row.
-    sql: "changes() = 1 AND EXISTS (SELECT 1 FROM screening_cases WHERE case_id = ? AND state = ? AND decided_at = ? AND decided_by = ?)",
+    sql: `changes() = 1 AND EXISTS (SELECT 1 FROM ${caseTable} WHERE case_id = ? AND state = ? AND decided_at = ? AND decided_by = ?)`,
     bindings: [input.caseId, state, decidedAt, operatorId],
   };
   const audited = {
@@ -513,7 +755,7 @@ export async function decideScreeningCase(
   const [update] = await db.batch([
     db
       .prepare(
-        `UPDATE screening_cases SET state = ?, decided_at = ?, decided_by = ?, decision_reason = ?
+        `UPDATE ${caseTable} SET state = ?, decided_at = ?, decided_by = ?, decision_reason = ?
           WHERE case_id = ? AND state = 'pending'`,
       )
       .bind(state, decidedAt, operatorId, input.reason, input.caseId),
@@ -545,28 +787,34 @@ export async function decideScreeningCase(
     // Delivery is part of the decision, so a failure leaves the case pending
     // and safely retryable. Only this attempt's audit receipt can notify its
     // author; losing concurrent decisions cannot append a second outcome.
-    await inboxNoticeStatement(
-      db,
-      {
-        fellowId: before.fellow_id,
-        problemId: before.problem_id,
-        noticeType: "moderation_outcome",
-        title:
-          state === "released"
-            ? "A held write was released after review"
-            : "A held write was not released after review",
-        detail:
-          state === "released"
-            ? before.route === "artifact-publications"
-              ? `Case ${input.caseId}: a reviewer approved your held artifact. Read its publication status and use the recovery action with a current owned session and a new Idempotency-Key. Your fresh consent and unchanged sources are required before any bytes are released.`
-              : `Case ${input.caseId}: a reviewer released your held ${before.route} write. Resubmit the identical request (any new Idempotency-Key) to publish exactly those bytes; changed bytes are screened afresh.`
-            : `Case ${input.caseId}: a reviewer confirmed the hold on your ${before.route} write. Identical bytes will be refused. Your sponsor may appeal (SPONSOR_APPEAL_AVAILABLE).`,
-        causedByEventId: auditEventId,
-        targetId: input.caseId,
-        createdAt: Date.parse(decidedAt),
-      },
-      audited,
-    ),
+    // Sponsor-owned cases have no Fellow inbox; sponsors see outcomes on
+    // /console/appeals and receive transactional moderation email notices.
+    ...(isSponsorOwned
+      ? []
+      : [
+          await inboxNoticeStatement(
+            db,
+            {
+              fellowId: before.fellow_id,
+              problemId: before.problem_id,
+              noticeType: "moderation_outcome",
+              title:
+                state === "released"
+                  ? "A held write was released after review"
+                  : "A held write was not released after review",
+              detail:
+                state === "released"
+                  ? before.route === "artifact-publications"
+                    ? `Case ${input.caseId}: a reviewer approved your held artifact. Read its publication status and use the recovery action with a current owned session and a new Idempotency-Key. Your fresh consent and unchanged sources are required before any bytes are released.`
+                    : `Case ${input.caseId}: a reviewer released your held ${before.route} write. Resubmit the identical request (any new Idempotency-Key) to publish exactly those bytes; changed bytes are screened afresh.`
+                  : `Case ${input.caseId}: a reviewer confirmed the hold on your ${before.route} write. Identical bytes will be refused. Your sponsor may appeal (SPONSOR_APPEAL_AVAILABLE).`,
+              causedByEventId: auditEventId,
+              targetId: input.caseId,
+              createdAt: Date.parse(decidedAt),
+            },
+            audited,
+          ),
+        ]),
     ...operatorReceiptStatements(db, command, auditEventId, decidedAt),
   ]);
   if ((update?.meta.changes ?? 0) !== 1) return { ok: false, reason: "not-pending" };

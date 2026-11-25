@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import {
   ClaimReanchorResponseSchema,
   PackResponseSchema,
+  ScreeningPromotionDeniedResponseSchema,
   ScreeningPublicationProvenanceSchema,
   SingleSynthesisResponseSchema,
   SynthesesListResponseSchema,
@@ -541,8 +542,17 @@ await runLocalWorkerJourney(
       omitted: [],
       selection_policy: "Only the selected claim is summarized.",
     };
-    // The local classifier rejects a known marker. These cases prove that all
-    // published text reaches screening; they do not measure Workers AI accuracy.
+    // The local classifier rejects a known marker. Run the first canary under a
+    // dedicated Fellow of the same sponsor so the remaining four canaries still
+    // trigger author quarantine-first while leaving exact budget headroom for
+    // author's reanchor (20/20) before proving 429 quota exhaustion at 21/20.
+    const canaryAuthor = await enroll("synthesis-canary-author", sponsorA);
+    const canarySession = await call(
+      "/v1/sessions",
+      { problem_id: problemId, intent: "explore" },
+      canaryAuthor,
+      201,
+    );
     const canaries = [
       ["body", { body_md: "LOCAL_POLICY_CANARY" }],
       ["selection policy", { selection_policy: "LOCAL_POLICY_CANARY" }],
@@ -567,13 +577,15 @@ await runLocalWorkerJourney(
     for (const [index, [label, override]] of canaries.entries()) {
       const before = await footprint();
       const screeningBefore = await fixtures.screeningCalls();
+      const probeActor = index === 0 ? canaryAuthor : author;
+      const probeSessionId = index === 0 ? canarySession.session_id : sessionId;
       const denied = await call(
-        `/v1/sessions/${sessionId}/synthesize`,
+        `/v1/sessions/${probeSessionId}/synthesize`,
         {
           ...screenable,
           ...override,
         },
-        author,
+        probeActor,
         null,
         `synthesis-screening-${index}`,
       );
@@ -584,7 +596,14 @@ await runLocalWorkerJourney(
       );
       check((await fixtures.screeningCalls()) === screeningBefore + 1, `${label}: screened once`);
       if (denied.code === "POLICY_DENIED") {
-        assert.deepEqual(Object.keys(denied).sort(), ["appeal", "coarse_category", "code"]);
+        const parsedDenied = ScreeningPromotionDeniedResponseSchema.parse(denied);
+        assert.deepEqual(Object.keys(denied).sort(), [
+          "appeal",
+          "case_id",
+          "coarse_category",
+          "code",
+        ]);
+        assert.match(parsedDenied.case_id ?? "", /^QC-[0-9A-HJKMNP-TV-Z]{26}$/);
         assert.ok(!JSON.stringify(denied).includes("LOCAL_POLICY_CANARY"));
       }
     }

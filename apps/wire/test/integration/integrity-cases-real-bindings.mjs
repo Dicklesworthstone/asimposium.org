@@ -197,6 +197,14 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, env }) => {
     }),
     /INVESTIGATOR_CONFLICT_OF_INTEREST/,
   );
+  // Reporter sponsor acting as operator MUST also be refused on restricted read.
+  await assert.rejects(
+    store.readRestrictedCase(caseId, {
+      principal_class: "operator",
+      actor_id: reporterSponsor,
+    }),
+    /INVESTIGATOR_CONFLICT_OF_INTEREST/,
+  );
   const sponsorView = await store.readRestrictedCase(caseId, {
     principal_class: "sponsor",
     actor_id: ownerSponsor,
@@ -214,6 +222,12 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, env }) => {
     { principal_class: "sponsor", actor_id: ownerSponsor, sponsor_id: ownerSponsor },
     "Human sponsor reviewed the anchor and submitted supporting bibliographic records.",
   );
+  // Reassigning investigator after sponsor response MUST preserve state='under-review'.
+  const keptUnderReview = await store.assignInvestigator(caseId, {
+    principal_class: "operator",
+    actor_id: "op_investigator_a",
+  });
+  assert.equal(keptUnderReview.state, "under-review");
 
   // 3. Race TWO concurrent operator resolveCase calls against genuine D1!
   const raceOutcomes = await Promise.allSettled([
@@ -306,6 +320,34 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, env }) => {
   assert.equal(rawOverturned.restricted_evidence_body, null);
   assert.equal(rawOverturned.strike_handoff_json, null);
 
+  // Overturned case refuses new misconduct correction links.
+  await assert.rejects(
+    store.linkScientificCorrection(caseId, {
+      kind: "correction",
+      linked_object_ref: `${claimId}@1`,
+      event_id: "EV-01OVERTURNED01",
+    }),
+    /INTEGRITY_CASE_DISMISSED_NO_CORRECTION_LINK/,
+  );
+
+  // Real D1 immutability triggers refuse DELETE and terminal/binding UPDATE directly in SQL.
+  await assert.rejects(
+    env.DB.prepare("DELETE FROM scientific_integrity_cases WHERE case_id = ?").bind(caseId).run(),
+    /cannot be deleted/i,
+  );
+  await assert.rejects(
+    env.DB.prepare("UPDATE scientific_integrity_cases SET state = 'confirmed' WHERE case_id = ?")
+      .bind(caseId)
+      .run(),
+    /immutable/i,
+  );
+  await assert.rejects(
+    env.DB.prepare("UPDATE scientific_integrity_cases SET evidence_digest = ? WHERE case_id = ?")
+      .bind("0".repeat(64), caseId)
+      .run(),
+    /immutable/i,
+  );
+
   // 5. Second case linked to a REAL immutable event from `events` table + confirmed strike handoff.
   const eventRow = await env.DB.prepare(
     "SELECT id, seq FROM events WHERE problem_id = ? AND object_id = ? ORDER BY seq DESC LIMIT 1",
@@ -336,6 +378,22 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, env }) => {
   });
   assert.equal(linked.correction_links.length, 1);
   assert.equal(linked.correction_links[0].preserves_immutable_envelopes, true);
+
+  // Real D1 append-only triggers refuse UPDATE/DELETE on scientific_integrity_correction_links.
+  await assert.rejects(
+    env.DB.prepare(
+      "UPDATE scientific_integrity_correction_links SET kind = 'retraction' WHERE case_id = ?",
+    )
+      .bind(opened2.record.case_id)
+      .run(),
+    /append-only/i,
+  );
+  await assert.rejects(
+    env.DB.prepare("DELETE FROM scientific_integrity_correction_links WHERE case_id = ?")
+      .bind(opened2.record.case_id)
+      .run(),
+    /cannot be deleted/i,
+  );
 
   const confirmed2 = await store.resolveCase(
     opened2.record.case_id,

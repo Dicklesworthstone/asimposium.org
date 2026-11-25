@@ -40,10 +40,22 @@ test("the deployable Worker bundle excludes the contract fixture moves provider"
     // Booleans, not toContain: a failure must not print a 3 MB bundle.
     expect(bundle.includes("TruthfulProductionMovesProvider")).toBe(true);
     expect(bundle.includes("ledger-needs-v5")).toBe(true);
+    expect(bundle.includes("KraterOutboxDrainer")).toBe(true);
+    expect(bundle.includes("HeraldRoom")).toBe(true);
 
     // The fixture provider and its selection boundary are absent.
     expect(bundle.includes("ContractFixtureMovesProvider")).toBe(false);
     expect(bundle.includes("contract-fixture-provider")).toBe(false);
+
+    // S-2 local fault-injection hooks and routes are excluded from the
+    // production Worker bundle (bead asimposiumorg-rc-strip-s2-faults-prod-do-i9bd).
+    expect(bundle.includes("TestableKraterOutboxDrainer")).toBe(false);
+    expect(bundle.includes("plant-stale-wrap")).toBe(false);
+    expect(bundle.includes("hold-before-ack")).toBe(false);
+    expect(bundle.includes("held-before-ack")).toBe(false);
+    expect(bundle.includes("fault_mode")).toBe(false);
+    expect(bundle.includes("fail-once")).toBe(false);
+    expect(bundle.includes("/__s2/")).toBe(false);
   } finally {
     rmSync(outdir, { recursive: true, force: true });
   }

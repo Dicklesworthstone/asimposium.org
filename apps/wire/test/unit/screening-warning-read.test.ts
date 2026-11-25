@@ -605,7 +605,9 @@ describe("mounted reads of published screening warnings", () => {
         expect(events.events.find((entry) => entry.seq === seq)?.event?.screening_notice).toEqual(
           notice,
         );
-        expect(toon.events.find((entry) => entry.seq === seq)?.screening_notice).toEqual(notice);
+        expect(toon.events.find((entry) => entry.seq === seq)?.event?.screening_notice).toEqual(
+          notice,
+        );
       }
       for (const path of [
         `/p/${PROBLEM}/events.md?since=0`,

@@ -327,8 +327,50 @@ describe("W9.3c Scientific-integrity cases, neutral notices, minimization, and c
         event_id: "EV-01BAD00001",
       }),
     ).toThrow(/INVALID_CORRECTION_LINK/);
+    // Valid correction ref on a dismissed-unsubstantiated case fails closed.
+    expect(() =>
+      ledger.linkScientificCorrection(record.case_id, {
+        kind: "correction",
+        linked_object_ref: "C-1@2",
+        event_id: "EV-01DISMISSED1",
+      }),
+    ).toThrow(/INTEGRITY_CASE_DISMISSED_NO_CORRECTION_LINK/);
     expect(() => ledger.openCase(baseMisconductInput(), "not-a-valid-date")).toThrow(
       /INVALID_INTEGRITY_TIMESTAMP/,
     );
+  });
+
+  test("REGRESSION (Pass 3 fresh-eyes): reporter-operator refused on readRestrictedCase and reassigning investigator after sponsor response preserves under-review", () => {
+    const ledger = new IntegrityCaseLedger();
+    const { record } = ledger.openCase(baseMisconductInput());
+    if (!record) throw new Error("expected record");
+
+    // Reporter sponsor acting as operator MUST be refused from reading restricted details too.
+    expect(() =>
+      ledger.readRestrictedCase(record.case_id, {
+        principal_class: "operator",
+        actor_id: "usr_int_reporter_b",
+      }),
+    ).toThrow(/INVESTIGATOR_CONFLICT_OF_INTEREST/);
+
+    // Sponsor responds -> state transitions to under-review.
+    const responded = ledger.submitSponsorResponse(
+      record.case_id,
+      {
+        principal_class: "sponsor",
+        actor_id: "usr_int_sponsor_a",
+        sponsor_id: "usr_int_sponsor_a",
+      },
+      "Detailed human sponsor response with verifiable archive hashes.",
+    );
+    expect(responded.state).toBe("under-review");
+
+    // Assigning or reassigning an investigator after sponsor response MUST keep state under-review.
+    const reassigned = ledger.assignInvestigator(record.case_id, {
+      principal_class: "operator",
+      actor_id: "op_independent_9",
+    });
+    expect(reassigned.investigator_id).toBe("op_independent_9");
+    expect(reassigned.state).toBe("under-review");
   });
 });

@@ -285,6 +285,7 @@ export async function scientificJourney({
   const searchEtags = new Map();
   async function checkCitationSearch(version, expectedStatement) {
     const canonical = `https://asimposium.org/p/${problem}/claims/${claim.claim_id}@${version}`;
+    const canonicalReadUrl = `/p/${problem}/claims/${claim.claim_id}@${version}.md`;
     for (const q of [
       canonical,
       `${canonical}.md`,
@@ -309,6 +310,7 @@ export async function scientificJourney({
       assert.equal(result.items[0].statement, expectedStatement);
       assert.equal(result.items[0].version, version);
       assert.equal(result.items[0].url, canonical);
+      assert.equal(result.items[0].read_url, canonicalReadUrl);
       assert.equal(result.items[0].match_type, "exact_reference");
       assert.ok(!JSON.stringify(result).includes(privateCanary));
       const etag = response.headers.get("etag");
@@ -325,7 +327,7 @@ export async function scientificJourney({
       assert.ok(md.headers.get("etag"));
       searchEtags.set(`${version}:${q}:md`, md.headers.get("etag"));
       const text = await md.text();
-      assert.ok(text.includes(canonical));
+      assert.ok(text.includes(`](${canonicalReadUrl})`));
       assert.ok(text.includes(`@${version}`));
       assert.ok(!text.includes(privateCanary));
     }
@@ -1618,7 +1620,8 @@ export async function scientificJourney({
   const publicDigest = await call(`/p/${problem}.json`);
   assert.ok(
     publicDigest.next_actions.some(
-      (action) => action.url === `/p/${problem}/claims/${claim.claim_id}.json`,
+      (action) =>
+        action.url === `/p/${problem}/claims/${claim.claim_id}.json?through=${publicDigest.cursor}`,
     ),
   );
   const publicFinal = ClaimFaceResponseSchema.parse(

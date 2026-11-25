@@ -67,13 +67,26 @@ await runLocalWorkerJourney(
     assert.equal((await unmigrated.json()).code, "ROOM_UNAVAILABLE");
     for (const { sql } of heraldObjects) await env.DB.prepare(sql).run();
 
-    // Refusals: no socket without an upgrade or a live credential.
+    // Refusals: non-upgrade gets 426; S-6 cookies and bogus bearer credentials get 401.
+    // Per Fable §11 (kfag), public problem rooms also accept unauthenticated human viewers
+    // (cursor-only frames, no auth required).
     assert.equal((await open({ authorization: `Bearer ${viewer}` })).status, 426);
-    assert.equal((await open({ upgrade: "websocket" })).status, 401);
+    assert.equal(
+      (await open({ upgrade: "websocket", cookie: "asimp.session=forbidden" })).status,
+      401,
+    );
     assert.equal(
       (await open({ upgrade: "websocket", authorization: "Bearer asimp_ag_bogus" })).status,
       401,
     );
+    const anonUpgraded = await open({
+      upgrade: "websocket",
+      "sec-websocket-protocol": PROTOCOL,
+    });
+    assert.equal(anonUpgraded.status, 101, "unauthenticated public human viewer opens public room");
+    assert.ok(anonUpgraded.webSocket);
+    anonUpgraded.webSocket.accept();
+    anonUpgraded.webSocket.close(1000, "public human probe complete");
 
     // A live Fellow credential upgrades.
     const upgraded = await open({

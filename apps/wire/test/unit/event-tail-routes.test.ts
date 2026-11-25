@@ -206,16 +206,27 @@ describe("W6.4 production dispatch", () => {
       f.sql.close();
     }
   });
-  test("TOON format emits after lossless round-trip check", async () => {
+  test("TOON format emits canonical @toon-format/toon after lossless round-trip check", async () => {
     const f = fixture();
     try {
+      const jsonResponse = await f.call("/p/P-DEMO/events.json");
+      expect(jsonResponse.status).toBe(200);
+      const canonical = EventTailResponseSchema.parse(await jsonResponse.json());
+
       const response = await f.call("/p/P-DEMO/events.toon");
       expect(response.status).toBe(200);
-      expect(response.headers.get("content-type")).toBe("text/plain; charset=utf-8");
+      expect(response.headers.get("content-type")).toBe("text/toon; charset=utf-8");
       const text = await response.text();
-      expect(text).toContain("id|seq|type|object_id|created_at|caused_by|causality_omitted\n");
-      expect(text).toContain("E-1|1|claim.created|C-1|");
-      expect(text).toContain("[control:page_end|next_cursor:1|has_more:false]\n");
+      expect(text).not.toContain("id|seq|type|object_id|created_at|caused_by|causality_omitted");
+      expect(text).not.toContain("[control:page_end|");
+      const { parseEventTailToon } = await import("../../src/ledger/event-tail-http.ts");
+      const parsed = parseEventTailToon(text);
+      expect(parsed).toEqual(canonical);
+      expect(parsed.events[0]?.event?.id).toBe("E-1");
+      expect(parsed.events[0]?.event?.type).toBe("claim.created");
+      expect(parsed.events[0]?.event?.actor.fellow_id).toBeTruthy();
+      expect(parsed.page_end.next_cursor).toBe(1);
+      expect(parsed.page_end.has_more).toBe(false);
     } finally {
       f.sql.close();
     }
@@ -225,7 +236,17 @@ describe("W6.4 production dispatch", () => {
     try {
       const toonRes = await f.call("/p/P-DEMO/events?format=toon");
       expect(toonRes.status).toBe(200);
-      expect(toonRes.headers.get("content-type")).toBe("text/plain; charset=utf-8");
+      expect(toonRes.headers.get("content-type")).toBe("text/toon; charset=utf-8");
+      const toonAcceptRes = await f.call("/p/P-DEMO/events", {
+        headers: { accept: "text/toon" },
+      });
+      expect(toonAcceptRes.status).toBe(200);
+      expect(toonAcceptRes.headers.get("content-type")).toBe("text/toon; charset=utf-8");
+      const plainAcceptRes = await f.call("/p/P-DEMO/events", {
+        headers: { accept: "text/plain" },
+      });
+      expect(plainAcceptRes.status).toBe(200);
+      expect(plainAcceptRes.headers.get("content-type")).toBe("application/json; charset=utf-8");
       const ndjsonRes = await f.call("/p/P-DEMO/events", {
         headers: { accept: "application/x-ndjson" },
       });

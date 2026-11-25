@@ -1,6 +1,8 @@
 import {
   type ClaimDependencyPin,
   ClaimDependencyPinSchema,
+  ExternalExpertReviewIdPattern,
+  type ExternalExpertReviewRecord,
   ProblemGovernanceEventSchema,
   type ProblemNoClaimBoundary,
   type ProblemResolutionDirection,
@@ -35,6 +37,7 @@ import {
 import { checkedScientificPayload } from "../ledger/scientific-checks.ts";
 import { readSynthesisPage } from "../ledger/synthesis-read.ts";
 import type { SynthesisAnchorSource } from "../ledger/synthesis-references.ts";
+import { findVerifiedExternalExpertReview } from "./external-expert-reviews.ts";
 
 const MAX_SOURCE_BYTES = 65_536;
 // A single bounded binding avoids D1's parameter limit. Count the serialized
@@ -82,6 +85,7 @@ export interface ProblemResolutionSnapshot {
     readonly synthesis: SynthesisItem;
     readonly source: SynthesisAnchorSource;
   };
+  readonly externalExpertReview?: ExternalExpertReviewRecord;
   readonly through: number;
   /** Ephemeral admission witnesses. Never include bindings in an event,
    * response, error or log: they contain the checked source bodies. */
@@ -195,6 +199,10 @@ function makeGuard(
   lineage: string,
   publications: readonly DependencyClosureRow[],
   sources: readonly SourceWitness[],
+  externalReview?: {
+    readonly record: ExternalExpertReviewRecord;
+    readonly boundaryJson: string;
+  },
 ): ProblemResolutionSnapshot["guard"] | null {
   const unique = new Map<string, SourceWitness>();
   for (const source of sources) {
@@ -235,6 +243,46 @@ function makeGuard(
     ]),
   );
   if (bytes(sourceJson) + bytes(claimJson) > RESOLUTION_GUARD_MAX_BYTES) return null;
+  const famousCondition =
+    externalReview === undefined
+      ? "current_problem.famous_guardrail IS NULL"
+      : "current_problem.famous_guardrail IS NOT NULL";
+  const externalReviewSql =
+    externalReview === undefined
+      ? ""
+      : `
+      AND EXISTS (SELECT 1 FROM external_expert_reviews eer
+        WHERE eer.review_record_id = ? AND eer.problem_id = ?
+          AND eer.claim_id = ? AND eer.claim_version = ?
+          AND eer.claim_content_digest = ?
+          AND eer.verdict = 'supports-resolution'
+          AND eer.revoked_at IS NULL
+          AND eer.no_claim_boundary_json = ?
+          AND NOT EXISTS (
+            SELECT 1 FROM retractions r
+            WHERE r.problem_id = eer.problem_id
+              AND r.target_object IN (eer.claim_id, eer.claim_id || '@' || eer.claim_version)
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM events e
+            JOIN event_content ec ON ec.event_id = e.id AND ec.payload_sha256 = e.payload_sha256
+            WHERE e.problem_id = eer.problem_id
+              AND e.object_kind = 'claim'
+              AND e.object_id = eer.claim_id
+              AND e.object_version = eer.claim_version
+              AND ec.redacted_at IS NOT NULL
+          ))`;
+  const externalReviewBindings: readonly (string | number)[] =
+    externalReview === undefined
+      ? []
+      : [
+          externalReview.record.review_record_id,
+          problem.id,
+          resultClaim.claim_id,
+          resultClaim.version,
+          resultClaim.content_digest,
+          externalReview.boundaryJson,
+        ];
   return {
     // Krater repeats this predicate after electing through+1, before inserting
     // the event. MAX(events.seq) is unchanged in both phases; public_seq alone
@@ -244,7 +292,7 @@ function makeGuard(
     sql: ` AND (SELECT COALESCE(MAX(head.seq),0) FROM events head WHERE head.problem_id = ?) = ?
       AND EXISTS (SELECT 1 FROM problems current_problem
         WHERE current_problem.id = ? AND current_problem.status = 'under-result-review'
-          AND current_problem.current_statement_version = ? AND current_problem.famous_guardrail IS NULL
+          AND current_problem.current_statement_version = ? AND ${famousCondition}
           AND current_problem.public_seq IN (?,?))
       AND NOT EXISTS (SELECT 1 FROM json_each(?) expected WHERE NOT EXISTS (
         SELECT 1 FROM events source JOIN event_content content ON content.event_id = source.id
@@ -267,7 +315,7 @@ function makeGuard(
             WHERE v.problem_id = c.problem_id AND v.claim_id = c.id)
       ))
       AND ${directiveDisclosureCompleteSql("?", "?", "?")}
-      AND ${directiveDisclosureLineageSql("?", "?", "?")} = ?`,
+      AND ${directiveDisclosureLineageSql("?", "?", "?")} = ?${externalReviewSql}`,
     bindings: [
       problem.id,
       through,
@@ -287,13 +335,17 @@ function makeGuard(
       resultClaim.claim_id,
       resultClaim.version,
       lineage,
+      ...externalReviewBindings,
     ],
   };
 }
 
-/** Ordinary resolution is a live eligibility decision, not an author-writable
+/** Resolution is a live eligibility decision, not an author-writable
  * disposition. Canonical bounded readers verify the science; the returned
  * predicate certifies those same inputs atomically with terminal publication.
+ * Famous problems additionally bind an unrevoked operator-recorded
+ * ExternalExpertReviewRecord (`EER-...`) matching the exact claim digest and
+ * no-claim boundary. Bare caller-supplied prose is always refused.
  * Historical withdrawn rows remain admissible inputs to the scientific fold.
  */
 export async function prepareProblemResolution(
@@ -302,19 +354,24 @@ export async function prepareProblemResolution(
   action: ResolutionAction,
 ): Promise<ProblemResolutionAdmission> {
   if (problem.status !== "under-result-review") return refuse("not-under-result-review");
-  if (problem.famous_guardrail != null) return refuse("famous-problem");
-  if (action.external_expert_review_proof !== undefined)
+  const isFamous = problem.famous_guardrail != null;
+  if (!isFamous && action.external_expert_review_proof !== undefined)
     return refuse("external-review-unsupported");
+  if (isFamous) {
+    if (action.external_expert_review_proof === undefined) return refuse("famous-problem");
+    if (!ExternalExpertReviewIdPattern.test(action.external_expert_review_proof))
+      return refuse("external-review-unsupported");
+  }
   if (!action.closing_synthesis.synthesis_id) return refuse("closing-synthesis-unavailable");
   try {
     const head = await db.prepare(REVIEW_HEAD_SQL).bind(problem.id).first<ReviewHead>();
     if (
       !head ||
       head.status !== problem.status ||
-      head.current_statement_version !== problem.current_statement_version
+      head.current_statement_version !== problem.current_statement_version ||
+      (head.famous_guardrail !== null) !== isFamous
     )
       return refuse("snapshot-changed");
-    if (head.famous_guardrail !== null) return refuse("famous-problem");
     if (
       !Number.isSafeInteger(head.public_seq) ||
       head.public_seq < 1 ||
@@ -398,7 +455,7 @@ export async function prepareProblemResolution(
       observed.public_seq !== through ||
       observed.status !== problem.status ||
       observed.current_statement_version !== problem.current_statement_version ||
-      observed.famous_guardrail !== null
+      (observed.famous_guardrail !== null) !== isFamous
     )
       return refuse("snapshot-changed");
     const publications = results[0]!.results as unknown as DependencyClosureRow[];
@@ -499,6 +556,23 @@ export async function prepareProblemResolution(
       )
     )
       return refuse("closing-synthesis-mismatch");
+    let famousVerified:
+      | { readonly record: ExternalExpertReviewRecord; readonly boundaryJson: string }
+      | undefined;
+    if (isFamous) {
+      const reviewRecordId = action.external_expert_review_proof;
+      if (!reviewRecordId) return refuse("famous-problem");
+      const verified = await findVerifiedExternalExpertReview(db, {
+        reviewRecordId,
+        problemId: problem.id,
+        claimId: resultClaim.claim_id,
+        claimVersion: resultClaim.version,
+        claimContentDigest: resultClaim.content_digest,
+        noClaimBoundary: action.closing_synthesis.no_claim_boundary,
+      });
+      if (!verified) return refuse("famous-problem");
+      famousVerified = verified;
+    }
     const guard = makeGuard(
       problem,
       through,
@@ -522,6 +596,7 @@ export async function prepareProblemResolution(
           payload_json: closing.source.payloadJson,
         },
       ],
+      famousVerified,
     );
     if (guard === null) return refuse("source-limit");
     const stable = await db
@@ -536,6 +611,7 @@ export async function prepareProblemResolution(
         formulation: formulation.problem,
         disclosureLineage: disclosure.lineage_digest,
         closingSynthesis: { synthesis: closing.synthesis, source: closing.source },
+        ...(famousVerified ? { externalExpertReview: famousVerified.record } : {}),
         through,
         guard,
       },

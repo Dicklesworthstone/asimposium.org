@@ -4,14 +4,21 @@ import type {
   DurableObjectState,
   WebSocket as WorkerSocket,
 } from "@cloudflare/workers-types";
-import { roomCursor, roomName } from "../../../../packages/contracts/src/herald-room-model.ts";
+import {
+  roomCursor,
+  roomName,
+  workshopRoomName,
+} from "../../../../packages/contracts/src/herald-room-model.ts";
 import { D1EnrollmentStore } from "../enrollment/d1-store.ts";
 import { HeraldRoomController } from "./room-controller.ts";
 import { closeRoomSocket, type RoomSocket } from "./room-core.ts";
 import { roomRefusal } from "./room-http.ts";
+import { liveWorkshopRoomHead, verifyWorkshopRoomTicket } from "./room-ticket.ts";
 import type { HeraldRuntimeEnv } from "./runtime.ts";
 
 const GENERATION_KEY = "public-room-generation-v1";
+const USED_TICKETS_KEY = "workshop-room-used-tickets-v1";
+const MAX_STORED_NONCES = 256;
 /** Explicit provider globals keep the Worker adapter out of the browser/Node
  * type universe. No provider class is imported as a runtime npm dependency. */
 const host = globalThis as unknown as {
@@ -44,11 +51,26 @@ export class HeraldRoom {
                 : { problemBinding: binding.grantedResources.problemBinding }),
             };
       },
+      verifyWorkshopTicket: (ticket, now) =>
+        verifyWorkshopRoomTicket(
+          ticket,
+          {
+            signingKey: env.CHECKPOINT_SIGNING_KEY,
+            verifyKeys: env.CHECKPOINT_VERIFY_KEYS,
+          },
+          now,
+        ),
+      workshopHead: (sponsorId, fellowId, problemId) =>
+        liveWorkshopRoomHead(env.DB, sponsorId, fellowId, problemId),
       refuse: roomRefusal,
       port: {
         owns: (problem) =>
           env.HERALD_ROOMS !== undefined &&
           String(env.HERALD_ROOMS.idFromName(roomName(problem))) === ctx.id.toString(),
+        ownsWorkshop: (fellowId, problemId) =>
+          env.HERALD_ROOMS !== undefined &&
+          String(env.HERALD_ROOMS.idFromName(workshopRoomName(fellowId, problemId))) ===
+            ctx.id.toString(),
         sockets: () => ctx.getWebSockets(),
         accept: (socket, tags) => ctx.acceptWebSocket(socket as WorkerSocket, tags),
         lastPing: (socket) =>
@@ -64,6 +86,30 @@ export class HeraldRoom {
             if (!roomCursor(current)) throw new Error("HERALD_GENERATION_INVALID");
             if (generation > current) await tx.put(GENERATION_KEY, generation);
           });
+        },
+        consumeTicketNonce: async (nonce, expMs, now) => {
+          let accepted = false;
+          await ctx.storage.transaction(async (tx) => {
+            const stored = (await tx.get<Record<string, number>>(USED_TICKETS_KEY)) ?? {};
+            const active: Record<string, number> = {};
+            for (const [key, expiresAt] of Object.entries(stored)) {
+              if (typeof expiresAt === "number" && expiresAt > now) active[key] = expiresAt;
+            }
+            if (Object.hasOwn(active, nonce)) {
+              accepted = false;
+              return;
+            }
+            const keys = Object.keys(active);
+            if (keys.length >= MAX_STORED_NONCES) {
+              // Fail closed rather than evicting unexpired nonces under flood.
+              accepted = false;
+              return;
+            }
+            active[nonce] = expMs;
+            await tx.put(USED_TICKETS_KEY, active);
+            accepted = true;
+          });
+          return accepted;
         },
         pair: () => {
           const pair = new host.WebSocketPair();

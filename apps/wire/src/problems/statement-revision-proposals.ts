@@ -77,6 +77,7 @@ const stale = () =>
       rule: "A5",
       extensions: {
         schema: SCHEMA,
+        suggested_action: "refetch_and_reapply",
         example: { method: "GET", path: "/v1/sponsors/problems/PROBLEM/statement-proposals" },
       },
     }),

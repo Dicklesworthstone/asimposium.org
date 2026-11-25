@@ -109,7 +109,7 @@ export async function outboxFairness({ call, enroll, fixtures, env, userAgent })
     outbox.fetch("https://krater-outbox.internal/drain-now", {
       method: "POST",
       headers: { "content-type": "application/json", "user-agent": userAgent },
-      body: JSON.stringify({ fault_mode: "none" }),
+      body: JSON.stringify({}),
     });
   let response;
   try {

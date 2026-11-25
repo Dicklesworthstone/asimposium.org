@@ -198,4 +198,5 @@ export default {
 // The S-5 harness overrides `main` while retaining infra/wrangler.toml. Keep
 // its module export set compatible with that configuration; the render fixture
 // itself still touches no Durable Object or storage binding.
+export { HeraldRoom } from "../herald/room";
 export { KraterOutboxDrainer } from "../krater/outbox-do";

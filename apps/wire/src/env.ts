@@ -1,15 +1,13 @@
 import type { Ai, D1Database, R2Bucket } from "@cloudflare/workers-types";
+import type { HeraldNamespace } from "./herald/outbox";
 import type { KraterOutboxNamespace } from "./krater/outbox-do";
 
 /**
  * Typed Worker bindings for `apps/wire` (Stoa / Propylon / Symposiarch / Herald).
  *
- * Only bindings this scaffold actually needs are declared. Herald's Durable
- * Object namespace (Fable §11) is deliberately absent: a DO binding without an
- * exported DO class is a deploy-time failure, and the class belongs to W7.
- *
- * The *names* are not this package's to choose. `infra/wrangler.toml` pins them
- * and `infra/validate-scaffold.mjs` asserts them, so that one file stays the
+ * The *names* are not this package's to choose. `infra/wrangler.toml` and
+ * `infra/environments.toml` pin them, and `infra/validate-scaffold.mjs` /
+ * `infra/validate-environments.mjs` assert them, so the topology stays the
  * single place a binding name is decided. These declarations follow it.
  */
 export interface Env {
@@ -26,6 +24,14 @@ export interface Env {
   PUBLIC_ARTIFACTS: R2Bucket;
   /** Durable retry owner for Krater's transactional outbox. */
   KRATER_OUTBOX: KraterOutboxNamespace;
+  /**
+   * Herald's hibernatable Durable Object room namespace (Fable §11).
+   * Exported by `apps/wire/src/index.ts` as `HeraldRoom` and bound in
+   * `infra/wrangler.toml` and all environment deploy configs; kept optional at
+   * the `/health` runtime boundary so room upgrades fail closed cleanly if an
+   * older harness omits the binding.
+   */
+  HERALD_ROOMS?: HeraldNamespace;
   /**
    * Base64url 256-bit enrollment replay binding (wrangler secret). Absent
    * disables enrollment with a typed 503 rather than a fallback.
@@ -98,9 +104,24 @@ export interface Env {
    * public writes while keeping the workshop available (Fable §7.10 / Rule A5).
    */
   SPONSOR_PROMOTION_RATE_LIMIT?: string | number;
+  /**
+   * OPS.7 (asimposiumorg-d5x) optional Resend REST API key (wrangler secret).
+   * Absent disables outbound transactional email cleanly while keeping Agora
+   * Console canonical and outbox rows visibly queued.
+   */
+  RESEND_API_KEY?: string;
+  /** OPS.7 verified sender address (e.g. `ASImposium <notices@asimposium.org>`). */
+  EMAIL_FROM_ADDRESS?: string;
+  /** OPS.7 HMAC-SHA256 secret signing host-only Agora action & unsubscribe links. */
+  EMAIL_ACTION_LINK_SECRET?: string;
+  /** OPS.7 monthly transactional email volume cap (defaults to 3000). */
+  EMAIL_MONTHLY_CAP?: string | number;
 }
 
 export const REQUIRED_BINDINGS = ["DB", "ARTIFACTS", "PUBLIC_ARTIFACTS", "KRATER_OUTBOX"] as const;
+
+/** Exact binding roster declared in `infra/wrangler.toml` (all required bindings plus `HERALD_ROOMS`). */
+export const CONFIGURED_BASE_BINDINGS = [...REQUIRED_BINDINGS, "HERALD_ROOMS"] as const;
 
 export type RequiredBinding = (typeof REQUIRED_BINDINGS)[number];
 

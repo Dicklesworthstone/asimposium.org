@@ -4,13 +4,15 @@ import {
   CommentaryListResponseSchema,
   ProblemDocumentSchema,
   ScreeningPromotionDeniedResponseSchema,
+  ScreeningPromotionHoldResponseSchema,
 } from "@asimposium/contracts";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 
 assert.equal(process.versions.bun, undefined, "This lane requires genuine Node");
 
 await runLocalWorkerJourney(async (context) => {
-  const { call, enroll, sponsorCall, worker, origin, userAgent, env, fixtures } = context;
+  const { call, enroll, sponsorCall, operatorCall, worker, origin, userAgent, env, fixtures } =
+    context;
 
   const sponsorA = "usr_commentary_sponsor_a";
   const authorA = await enroll("commentary-author-a", sponsorA);
@@ -216,18 +218,86 @@ await runLocalWorkerJourney(async (context) => {
   );
   assert.equal(ProblemDocumentSchema.parse(actorConflict).code, "IDEMPOTENCY_CONFLICT");
 
-  // Provider outages and undecodable replies cannot publish under a successful-looking response.
+  // Provider outages, undecodable replies, and quarantine holds fail closed with
+  // durable sponsor-owned screening cases (202 SCREENING_HOLD) and zero public writes.
   const beforeProviderRefusals = await publicState();
-  for (const mode of ["unavailable", "malformed-provider"]) {
+  for (const mode of ["unavailable", "malformed-provider", "quarantine"]) {
     await fixtures.setScreenMode(mode);
-    const refused = await post(
+    const held = await post(
       sponsorA,
-      { body: "Context awaiting a working screening provider" },
+      { body: `Context held under screening mode ${mode}` },
       `provider-${mode}`,
-      503,
+      202,
     );
-    assert.equal(ProblemDocumentSchema.parse(refused).code, "INTERNAL_ERROR");
+    const parsedHold = ScreeningPromotionHoldResponseSchema.parse(held);
+    assert.ok(parsedHold.case_id?.startsWith("QC-"));
   }
+  assert.deepEqual(await publicState(), beforeProviderRefusals);
+  // Verify durable operator release on the quarantined sponsor commentary case publishes with 0 extra AI calls.
+  const heldQuarantineBody = { body: "Context held under screening mode quarantine" };
+  const screensBeforeSealedReplay = await fixtures.screeningCalls();
+  const sealedQuarantineReplay = await post(
+    sponsorA,
+    heldQuarantineBody,
+    "provider-quarantine",
+    202,
+  );
+  const sealedHold = ScreeningPromotionHoldResponseSchema.parse(sealedQuarantineReplay);
+  assert.ok(sealedHold.case_id?.startsWith("QC-"));
+  assert.equal(
+    await fixtures.screeningCalls(),
+    screensBeforeSealedReplay,
+    "sealed replay of held commentary must not re-invoke Workers AI",
+  );
+  await operatorCall(
+    "POST",
+    "/v1/operators/quarantine/decision",
+    "operator.quarantine.decide",
+    {
+      case_id: sealedHold.case_id,
+      decision: "release",
+      reason: "Verified human commentary context in local Workerd test.",
+    },
+    200,
+    "/v1/operators/quarantine/decision",
+    "commentary-hold-release-1",
+  );
+  await fixtures.setScreenMode("pass");
+  const releasedComment = await post(sponsorA, heldQuarantineBody, "provider-quarantine", 201);
+  assert.ok(CommentaryItemSchema.safeParse(releasedComment).success);
+  assert.equal(
+    await fixtures.screeningCalls(),
+    screensBeforeSealedReplay,
+    "operator-released commentary publishes exact bytes without calling AI again",
+  );
+  const releasedProvenance = await env.DB.prepare(
+    `SELECT sp.provenance_json FROM screening_publications sp
+      JOIN problem_commentaries pc ON pc.event_id = sp.event_id
+     WHERE pc.id = ?`,
+  )
+    .bind(releasedComment.commentary_id)
+    .first();
+  assert.ok(
+    releasedProvenance?.provenance_json,
+    "commentary commits screening_publications receipt",
+  );
+
+  // Warning publication attaches screening_notice across JSON, Markdown, and HTML faces.
+  await fixtures.setScreenMode("allow-with-warning");
+  const warnedComment = await post(
+    sponsorA,
+    { body: "Borderline dual-use commentary published with a platform context notice." },
+    "commentary-warning-1",
+    201,
+  );
+  assert.equal(warnedComment.screening_notice?.notice, "screening-warning");
+  assert.equal(warnedComment.screening_notice?.category, "dual-use-boundary");
+  const warnedMd = await (await worker.fetch(`${origin}/p/${problemId}/commentary.md`)).text();
+  assert.match(warnedMd, /\*\*Screening notice:\*\*/);
+  const warnedHtml = await (await worker.fetch(`${origin}/p/${problemId}/commentary.html`)).text();
+  assert.match(warnedHtml, /data-screening-notice="screening-warning"/);
+
+  const beforeRejectRefusals = await publicState();
   await fixtures.setScreenMode("reject");
   const denied = await post(
     sponsorA,
@@ -235,7 +305,8 @@ await runLocalWorkerJourney(async (context) => {
     "provider-denial",
     403,
   );
-  assert.ok(ScreeningPromotionDeniedResponseSchema.safeParse(denied).success);
+  const parsedDenied = ScreeningPromotionDeniedResponseSchema.parse(denied);
+  assert.ok(parsedDenied.case_id?.startsWith("QC-"));
   await fixtures.setScreenMode("pass");
   const screensBeforeLabel = await fixtures.screeningCalls();
   const labelRefusal = await post(
@@ -250,12 +321,13 @@ await runLocalWorkerJourney(async (context) => {
     403,
   );
   assert.equal(labelRefusal.coarse_category, "injection");
+  assert.ok(labelRefusal.case_id?.startsWith("QC-"));
   assert.equal(
     await fixtures.screeningCalls(),
     screensBeforeLabel,
     "L0 also screens public reference labels before paid screening",
   );
-  assert.deepEqual(await publicState(), beforeProviderRefusals);
+  assert.deepEqual(await publicState(), beforeRejectRefusals);
 
   // 5. Idempotency conflict: Different payload with same key returns 409
   const conflictResult = await sponsorCall(
@@ -535,7 +607,7 @@ await runLocalWorkerJourney(async (context) => {
   const jsonData = await jsonResp.json();
   const parsedList = CommentaryListResponseSchema.safeParse(jsonData);
   assert.ok(parsedList.success);
-  assert.equal(parsedList.data.commentaries.length, 2);
+  assert.equal(parsedList.data.commentaries.length, 4);
   const jsonEtag = jsonResp.headers.get("etag");
   assert.ok(jsonEtag);
 

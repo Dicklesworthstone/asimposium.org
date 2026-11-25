@@ -24,6 +24,7 @@ import {
   oldestPendingAgeAlert,
   validateOutboxRow,
 } from "./outbox-do";
+import { TestableKraterOutboxDrainer } from "./outbox-do-testable";
 
 // This is an acceptance contract, deliberately independent of the production
 // retry ceiling. It keeps a five-minute production regression observable here.
@@ -109,6 +110,7 @@ interface FakePreparedStatement {
 
 interface OutboxHarness {
   readonly drainer: KraterOutboxDrainer;
+  readonly productionDrainer: KraterOutboxDrainer;
   readonly deliver: (request: Request) => Promise<Response>;
   readonly restart: () => KraterOutboxDrainer;
   readonly alarmAt: () => number | null;
@@ -627,7 +629,8 @@ function outboxHarness(rows: FakeOutboxRow[], options: OutboxHarnessOptions = {}
     },
   } as unknown as D1Database;
 
-  const restart = () => new KraterOutboxDrainer(durableState, { DB: database });
+  const restart = () => new TestableKraterOutboxDrainer(durableState, { DB: database });
+  const productionDrainer = new KraterOutboxDrainer(durableState, { DB: database });
   const drainer = restart();
   const deliver = async (request: Request): Promise<Response> => {
     while (eventsBlocked) {
@@ -637,6 +640,7 @@ function outboxHarness(rows: FakeOutboxRow[], options: OutboxHarnessOptions = {}
   };
   return {
     drainer,
+    productionDrainer,
     deliver,
     restart,
     alarmAt: () => alarmAt,
@@ -1127,6 +1131,57 @@ describe("Krater outbox Durable Object contracts", () => {
 
     await harness.restart().alarm();
     expect(harness.searchDocuments()).toEqual(expected);
+  });
+
+  test("production KraterOutboxDrainer refuses S-2 fault routes and fault_mode while draining cleanly", async () => {
+    const row = outboxRow(1);
+    const harness = outboxHarness([row]);
+
+    const staleWrap = await harness.productionDrainer.fetch(
+      new Request("https://krater-outbox.internal/__s2/plant-stale-wrap", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ scan_after_id: 1, scan_wrap_through_id: 2 }),
+      }),
+    );
+    expect(staleWrap.status).toBe(404);
+    expect(await staleWrap.json()).toEqual({ code: "KRATER_OUTBOX_ROUTE_NOT_FOUND" });
+
+    for (const pathname of ["/nudge", "/drain-now"] as const) {
+      for (const mode of ["none", "fail-once", "hold-before-ack"] as const) {
+        const refused = await harness.productionDrainer.fetch(
+          new Request(`https://krater-outbox.internal${pathname}`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ fault_mode: mode }),
+          }),
+        );
+        expect(refused.status).toBe(400);
+        expect(await refused.json()).toEqual({ code: "KRATER_OUTBOX_COMMAND_INVALID" });
+      }
+    }
+
+    const nudged = await harness.productionDrainer.fetch(
+      new Request("https://krater-outbox.internal/nudge", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+      }),
+    );
+    expect(nudged.status).toBe(202);
+    expect(await nudged.json()).toEqual({ accepted: true });
+
+    const drained = await harness.productionDrainer.fetch(
+      new Request("https://krater-outbox.internal/drain-now", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+      }),
+    );
+    expect(drained.status).toBe(200);
+    expect(await drained.json()).toEqual({ source: "fetch", delivered: 1, quarantined: 0 });
+    expect(row.state).toBe("delivered");
+    expect(harness.searchDocuments()).toEqual([searchDocumentFor(row)]);
   });
 
   test("the local stale-wrap fixture accepts only a forward bounded cursor interval", async () => {

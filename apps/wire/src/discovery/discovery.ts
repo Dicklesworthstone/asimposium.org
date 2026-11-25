@@ -168,6 +168,7 @@ export const DISCOVERY_UNDISCLOSED_ROUTES: Readonly<Record<string, true>> = Obje
   "GET /v1/fellows/after/:cursor": true,
   "POST /v1/sponsors/workshop": true,
   "POST /v1/sponsors/workshop/cursor": true,
+  "POST /v1/sponsors/workshop/room-ticket": true,
   "POST /v1/sponsors/workshops": true,
   "POST /v1/sponsors/workshop/action": true,
   // Signed sponsor-console reads/preferences are not Fellow capabilities.
@@ -205,6 +206,8 @@ export const DISCOVERY_UNDISCLOSED_ROUTES: Readonly<Record<string, true>> = Obje
   "GET /v1/sponsors/account/suspension": true,
   "GET /v1/sponsors/account/delete-preview": true,
   "POST /v1/sponsors/problems/:id/hide": true,
+  "GET /v1/sponsors/problems/:id/syntheses/drafts": true,
+  "POST /v1/sponsors/problems/:id/syntheses/:synthId/publish": true,
   "GET /v1/sponsors/problems/:id/publication-preview": true,
   "GET /v1/sponsors/problems/:id/statement-proposals": true,
   "GET /v1/sponsors/problems/:id/statement-proposals/after/:after": true,
@@ -242,6 +245,13 @@ export const DISCOVERY_UNDISCLOSED_ROUTES: Readonly<Record<string, true>> = Obje
   "POST /v1/operators/problems/:problemId/projections/repair": true,
   "GET /v1/operators/problems/:problemId/search-index": true,
   "POST /v1/operators/problems/:problemId/search-index/rebuild": true,
+  "GET /v1/operators/problems/:id/external-expert-reviews": true,
+  "POST /v1/operators/problems/:id/external-expert-reviews": true,
+  // OPS.7 minimal transactional email sponsor/operator/human-unsubscribe surface.
+  "GET /v1/sponsors/email-preferences": true,
+  "POST /v1/sponsors/email-preferences": true,
+  "GET /v1/operators/email-outbox/health": true,
+  "POST /v1/email/unsubscribe": true,
   // These handlers explicitly refuse uncontracted per-problem spellings.
   "GET /p/:id/*": true,
   // Schema slices are reached only through concrete links in refusals and

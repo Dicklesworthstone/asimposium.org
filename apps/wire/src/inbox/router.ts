@@ -1,18 +1,21 @@
 import {
-  type InboxAckRequest,
   InboxAckRequestSchema,
   type InboxAckResponse,
   type InboxQuery,
-  InboxQuerySchema,
   type InboxResponse,
   InboxResponseSchema,
-  type ProblemFollowResponse,
   ProblemFollowResponseSchema,
   ProblemIdSchema,
 } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
 import { type Context, Hono } from "hono";
-import { parseExactJsonBytes, readBoundedRequestBody } from "../auth/http.ts";
+import {
+  cancelUnconsumedRequestBody,
+  parseExactJsonBytes,
+  readBoundedRequestBody,
+  SERVICE_ENVELOPE_HEADER,
+} from "../auth/http.ts";
+import { wrongPrincipalProblem } from "../auth/refusal.ts";
 import { createActiveDirectiveRouter } from "../directives/active-router.ts";
 import type { DirectiveRouterOptions } from "../directives/router.ts";
 import type { EnrollmentService, FellowCredentialBinding } from "../enrollment/service.ts";
@@ -102,6 +105,10 @@ export function createInboxRouter(options: InboxRouterOptions): Hono<{ Bindings:
   );
 
   async function authenticateFellow(request: Request): Promise<FellowCredentialBinding | Response> {
+    if (request.headers.get(SERVICE_ENVELOPE_HEADER) !== null) {
+      cancelUnconsumedRequestBody(request);
+      return wrongPrincipalProblem();
+    }
     const token = bearerToken(request);
     if (token === undefined) {
       return problem({
@@ -136,6 +143,10 @@ export function createInboxRouter(options: InboxRouterOptions): Hono<{ Bindings:
   async function authenticatePrincipal(
     request: Request,
   ): Promise<{ principalId: string } | Response> {
+    if (request.headers.get(SERVICE_ENVELOPE_HEADER) !== null) {
+      cancelUnconsumedRequestBody(request);
+      return wrongPrincipalProblem();
+    }
     const principalId = await authenticatedFollowPrincipal(request, options.service);
     if (principalId !== undefined) return { principalId };
 

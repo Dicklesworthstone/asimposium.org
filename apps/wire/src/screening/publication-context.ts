@@ -274,6 +274,40 @@ interface ProblemRow {
   source_version: number | null;
 }
 
+const SPONSOR_CONTEXT_ACTOR_PREFIX = "sponsor:";
+const SPONSOR_SCOPED_CANDIDATE_KINDS = new Set([
+  "commentary",
+  "problem-lifecycle",
+  "problem-proposal",
+  "problem-statement-revision",
+]);
+
+function sponsorContextActorId(fellowId: string): string | null {
+  if (!fellowId.startsWith(SPONSOR_CONTEXT_ACTOR_PREFIX)) return null;
+  const sponsorId = fellowId.slice(SPONSOR_CONTEXT_ACTOR_PREFIX.length);
+  return sponsorId.length > 0 ? sponsorId : null;
+}
+
+function actorScopePredicate(sponsorId: string | null): {
+  readonly headWhere: string;
+  readonly historyWhere: string;
+  readonly actorBinding: string;
+} {
+  if (sponsorId !== null) {
+    return {
+      headWhere: "e.actor_fellow_id IS NULL AND e.actor_sponsor_id = ?",
+      historyWhere:
+        "e.actor_fellow_id IS NULL AND e.actor_sponsor_id = ? AND (e.object_kind <> 'commentary' OR (e.type IN ('commentary.posted', 'commentary.superseded') AND EXISTS (SELECT 1 FROM problem_commentaries pc WHERE pc.event_id = e.id AND pc.problem_id = e.problem_id AND pc.tombstoned = 0)))",
+      actorBinding: sponsorId,
+    };
+  }
+  return {
+    headWhere: "e.actor_fellow_id = ?",
+    historyWhere: "e.actor_fellow_id = ?",
+    actorBinding: "",
+  };
+}
+
 /**
  * D1 executes this read batch in one transaction. The cut is this author's
  * public head and the immutable current problem statement, not unrelated
@@ -285,6 +319,11 @@ export async function readPublicationContext(
   input: { readonly problemId: string; readonly fellowId: string; readonly kind: string },
 ): Promise<PublicationContextSnapshot> {
   const { problemId, fellowId } = input;
+  const sponsorActorId = sponsorContextActorId(fellowId);
+  if (sponsorActorId !== null && !SPONSOR_SCOPED_CANDIDATE_KINDS.has(input.kind))
+    throw new PublicationContextUnavailableError();
+  const actorScope = actorScopePredicate(sponsorActorId);
+  const actorBinding = sponsorActorId ?? fellowId;
   const results = await db.batch([
     db
       .prepare(`SELECT p.id, p.status, p.public_seq,
@@ -312,19 +351,19 @@ export async function readPublicationContext(
     db
       .prepare(`SELECT e.id, e.seq, e.payload_sha256 FROM events e
       JOIN problems p ON p.id = e.problem_id
-      WHERE e.problem_id = ? AND e.actor_fellow_id = ?
+      WHERE e.problem_id = ? AND ${actorScope.headWhere}
         AND p.status <> 'private-draft' AND e.seq <= p.public_seq ORDER BY e.seq DESC LIMIT 1`)
-      .bind(problemId, fellowId),
+      .bind(problemId, actorBinding),
     db
       .prepare(`SELECT e.id, e.seq, e.payload_sha256,
       CASE WHEN length(CAST(c.payload_json AS BLOB)) <= ? THEN c.payload_json END AS payload_json
-      ${historyFrom} WHERE e.problem_id = ? AND e.actor_fellow_id = ?
+      ${historyFrom} WHERE e.problem_id = ? AND ${actorScope.historyWhere}
       AND ${visibleHistoryWhere("p.public_seq")} ORDER BY e.seq DESC LIMIT ?`)
-      .bind(MAX_PUBLICATION_HISTORY_BODY_BYTES, problemId, fellowId, MAX_PUBLICATION_HISTORY),
+      .bind(MAX_PUBLICATION_HISTORY_BODY_BYTES, problemId, actorBinding, MAX_PUBLICATION_HISTORY),
     db
       .prepare(`SELECT COUNT(*) AS count ${historyFrom}
-      WHERE e.problem_id = ? AND e.actor_fellow_id = ? AND ${visibleHistoryWhere("p.public_seq")}`)
-      .bind(problemId, fellowId),
+      WHERE e.problem_id = ? AND ${actorScope.historyWhere} AND ${visibleHistoryWhere("p.public_seq")}`)
+      .bind(problemId, actorBinding),
   ]);
   if (results.some((result) => !result.success)) throw new PublicationContextUnavailableError();
   const problem = results[0]?.results[0] as ProblemRow | undefined;
@@ -562,22 +601,25 @@ export function publicationContextGuardSql(
     );
   }
   const headSeq = snapshot.sameFellowHead?.seq ?? 0;
+  const sponsorActorId = sponsorContextActorId(snapshot.fellowId);
+  const actorScope = actorScopePredicate(sponsorActorId);
+  const actorBinding = sponsorActorId ?? snapshot.fellowId;
   if (snapshot.sameFellowHead)
     add(
       `EXISTS (SELECT 1 FROM events e WHERE e.id = ?
-    AND e.problem_id = ? AND e.actor_fellow_id = ? AND e.seq = ? AND e.payload_sha256 = ?)`,
+    AND e.problem_id = ? AND ${actorScope.headWhere} AND e.seq = ? AND e.payload_sha256 = ?)`,
       snapshot.sameFellowHead.eventId,
       snapshot.problemId,
-      snapshot.fellowId,
+      actorBinding,
       headSeq,
       snapshot.sameFellowHead.payloadDigest,
     );
   add(
-    `NOT EXISTS (SELECT 1 FROM events e WHERE e.problem_id = ? AND e.actor_fellow_id = ?
+    `NOT EXISTS (SELECT 1 FROM events e WHERE e.problem_id = ? AND ${actorScope.headWhere}
     AND e.seq > ? AND e.seq < (SELECT seq FROM events WHERE id = ?)
     AND e.id NOT IN (SELECT json_extract(value, '$.eventId') FROM json_each(?)))`,
     snapshot.problemId,
-    snapshot.fellowId,
+    actorBinding,
     headSeq,
     eventId,
     JSON.stringify(guard.precedingCandidates),
@@ -586,10 +628,10 @@ export function publicationContextGuardSql(
   add(
     `(SELECT json_group_array(json_array(id, seq, payload_sha256)) FROM (
     SELECT e.id, e.seq, e.payload_sha256 ${historyFrom}
-    WHERE e.problem_id = ? AND e.actor_fellow_id = ? AND ${visibleHistoryWhere("?")}
+    WHERE e.problem_id = ? AND ${actorScope.historyWhere} AND ${visibleHistoryWhere("?")}
     ORDER BY e.seq DESC LIMIT ?)) = ?`,
     snapshot.problemId,
-    snapshot.fellowId,
+    actorBinding,
     headSeq,
     MAX_PUBLICATION_HISTORY,
     JSON.stringify(
@@ -597,10 +639,10 @@ export function publicationContextGuardSql(
     ),
   );
   add(
-    `(SELECT COUNT(*) ${historyFrom} WHERE e.problem_id = ? AND e.actor_fellow_id = ?
+    `(SELECT COUNT(*) ${historyFrom} WHERE e.problem_id = ? AND ${actorScope.historyWhere}
     AND ${visibleHistoryWhere("?")}) = ?`,
     snapshot.problemId,
-    snapshot.fellowId,
+    actorBinding,
     headSeq,
     snapshot.visiblePublicationCount,
   );
@@ -608,12 +650,12 @@ export function publicationContextGuardSql(
     `NOT EXISTS (SELECT 1 FROM json_each(?) pending WHERE NOT EXISTS (
     SELECT 1 FROM events e JOIN screening_publications screening ON screening.event_id = e.id
     WHERE e.id = json_extract(pending.value, '$.eventId') AND e.problem_id = ?
-      AND e.actor_fellow_id = ? AND e.seq > ? AND e.seq < (SELECT seq FROM events WHERE id = ?)
+      AND ${actorScope.headWhere} AND e.seq > ? AND e.seq < (SELECT seq FROM events WHERE id = ?)
       AND json_extract(screening.provenance_json, '$.candidate_digest') = json_extract(pending.value, '$.candidateDigest')
       AND json_extract(screening.provenance_json, '$.scope') = 'candidate-and-public-context'))`,
     JSON.stringify(guard.precedingCandidates),
     snapshot.problemId,
-    snapshot.fellowId,
+    actorBinding,
     headSeq,
     eventId,
   );
@@ -677,21 +719,26 @@ export async function storedPublicationContextIsVisible(
     // At most six direct source checks share this D1 read transaction. Keep
     // the public predicate flat: wrapping its target checks in two more
     // anti-joins exceeds Workerd SQLite's expression-depth ceiling of 100.
-    ...context.recent_same_fellow_publications.map((expected) =>
-      db
-        .prepare(`SELECT 1 AS available ${historyFrom}
-        WHERE e.id = ? AND e.problem_id = ? AND e.actor_fellow_id = ?
+    ...(() => {
+      const sponsorActorId = sponsorContextActorId(context.fellow_id);
+      const actorScope = actorScopePredicate(sponsorActorId);
+      const actorBinding = sponsorActorId ?? context.fellow_id;
+      return context.recent_same_fellow_publications.map((expected) =>
+        db
+          .prepare(`SELECT 1 AS available ${historyFrom}
+        WHERE e.id = ? AND e.problem_id = ? AND ${actorScope.historyWhere}
           AND e.seq = ? AND e.payload_sha256 = ? AND c.payload_json = ?
           AND ${visibleHistoryWhere("p.public_seq")}`)
-        .bind(
-          expected.event_id,
-          context.problem_id,
-          context.fellow_id,
-          expected.seq,
-          expected.payload_digest,
-          expected.payload_json,
-        ),
-    ),
+          .bind(
+            expected.event_id,
+            context.problem_id,
+            actorBinding,
+            expected.seq,
+            expected.payload_digest,
+            expected.payload_json,
+          ),
+      );
+    })(),
   ]);
   if (
     !results.every(

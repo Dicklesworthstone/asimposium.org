@@ -800,3 +800,110 @@ test("named move representations revalidate formulation withdrawal before condit
   expect(hidden.status).toBe(404);
   expect(await hidden.json()).toMatchObject({ code: "PROBLEM_NOT_FOUND" });
 });
+
+test("public /moves exposes expanded public-eligible move selectors and never leaks session-private idle-close (5ujc)", async () => {
+  const f = fixture();
+  f.problem("P-EXPANDED", { claim: "C-1" });
+  f.event("P-EXPANDED", 3, "C-2", "claim", "claim.created");
+  f.event("P-EXPANDED", 4, "DE-01TESTDEAD001", "dead_end", "dead_end.recorded");
+  f.event("P-EXPANDED", 5, "E-01TESTEVDNC001", "evidence", "evidence.created");
+
+  const conflictMove: NextMoveCandidate = {
+    move: "normalize-conflict",
+    why: "Published contradiction assertion between C-1@1 and C-2@1.",
+    refs: ["P-EXPANDED", "C-1@1", "C-2@1"],
+    contract: {
+      ...getMoveTemplate("normalize-conflict"),
+      preparation: { problem_id: "P-EXPANDED", captured_cursor: 20 },
+    },
+  };
+  const duplicateMove: NextMoveCandidate = {
+    move: "collapse-duplicate",
+    why: "C-1@1 and C-2@1 share normalized statement text.",
+    refs: ["P-EXPANDED", "C-1@1", "C-2@1"],
+    contract: {
+      ...getMoveTemplate("collapse-duplicate"),
+      preparation: { problem_id: "P-EXPANDED", captured_cursor: 20 },
+    },
+  };
+  const deadEndMove: NextMoveCandidate = {
+    move: "record-dead-end",
+    why: "Three assertion-class reports on C-1@1.",
+    refs: ["P-EXPANDED", "C-1@1", "E-01TESTEVDNC001"],
+    contract: {
+      ...getMoveTemplate("record-dead-end"),
+      preparation: { problem_id: "P-EXPANDED", captured_cursor: 20 },
+    },
+  };
+  const synthMove: NextMoveCandidate = {
+    move: "synthesize",
+    why: "200+ events since last synthesis.",
+    refs: ["P-EXPANDED"],
+    contract: {
+      ...getMoveTemplate("synthesize"),
+      preparation: { problem_id: "P-EXPANDED", captured_cursor: 20 },
+    },
+  };
+
+  f.selectors.conflicts = async () => ({ move: conflictMove, degraded: false });
+  f.selectors.duplicates = async () => ({ move: duplicateMove, degraded: false });
+  f.selectors.deadEnds = async () => ({ move: deadEndMove, degraded: false });
+  f.selectors.synthesize = async () => ({ move: synthMove, degraded: false });
+
+  const direct = await loadPublicProblemMoves(f.db, "P-EXPANDED", { selectors: f.selectors });
+  expect(direct).not.toBeNull();
+  // Four public-eligible moves are offered; top 3 are returned with explicit selection_limit omission.
+  expect(direct?.omitted.some((o) => o.reason === "selection_limit")).toBe(true);
+  expect(direct?.primary_move?.move).toBe("normalize-conflict");
+  expect(direct?.alternatives.map((m) => m.move)).toEqual([
+    "collapse-duplicate",
+    "record-dead-end",
+  ]);
+  expect(direct?.selection_boundary).toContain("idle-close remains authenticated-only");
+
+  // With 3 moves, selection is complete and non-degraded.
+  f.selectors.synthesize = async () => ({ move: null, degraded: false });
+  const complete = await loadPublicProblemMoves(f.db, "P-EXPANDED", { selectors: f.selectors });
+  expect(complete?.degraded).toBe(false);
+
+  // Even when a global scan runs, session-private idle-close is never present in public moves.
+  const global = await loadPublicMoves(f.db, {}, { selectors: f.selectors });
+  const emittedKinds = global.discovery.problems.flatMap((p) => [
+    ...(p.primary_move ? [p.primary_move.move] : []),
+    ...p.alternatives.map((m) => m.move),
+  ]);
+  expect(emittedKinds).toContain("normalize-conflict");
+  expect(emittedKinds).not.toContain("idle-close");
+});
+
+test("public problem moves passes explicit public CeremonyMoveContext into back-to-the-object", async () => {
+  const f = fixture();
+  f.problem("P-CEREMONY", { claim: "C-1" });
+  const receivedContexts: unknown[] = [];
+  f.selectors.backToObject = async (_db, problemId, cursor, _status, context) => {
+    receivedContexts.push(context);
+    if (!context || context.mode !== "public") return { move: null, degraded: true };
+    return {
+      move: {
+        move: "back-to-the-object",
+        why: "25 recent events contain no object-level increment.",
+        refs: [problemId, "C-1@1"],
+        contract: {
+          ...getMoveTemplate("back-to-the-object"),
+          preparation: { problem_id: problemId, captured_cursor: cursor },
+        },
+      },
+      degraded: false,
+    };
+  };
+
+  const direct = await loadPublicProblemMoves(f.db, "P-CEREMONY", {
+    now: 1_700_000_000_000,
+    selectors: f.selectors,
+  });
+  expect(direct?.degraded).toBe(false);
+  expect(direct?.primary_move?.move).toBe("back-to-the-object");
+  expect(receivedContexts).toEqual([
+    { mode: "public", now: 1_700_000_000_000, includeUnlisted: false, excludeOffScope: false },
+  ]);
+});
