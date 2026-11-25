@@ -22,6 +22,7 @@ import {
   TRIAGE_CONCURRENCY,
   TRIAGE_MAX_PROBLEMS,
 } from "../../src/mega-commands/live-provider.ts";
+import { retryMoveFor } from "../../src/mega-commands/retry-moves.ts";
 import { sha256Hex } from "../../src/split/policy.ts";
 
 const credential = {
@@ -253,6 +254,113 @@ test("public-write quota is filtered before ranking truncation so private invest
     assert.equal(limited.primaryMove?.move, "discriminate");
     assert.deepEqual(limited.alternatives, []);
     assert.equal(limited.degraded, false);
+  } finally {
+    f.sqlite.close();
+  }
+});
+
+test("private investigations remain available without public promotion grants", async () => {
+  const f = fixture();
+  let investigationReads = 0;
+  const dependencies: LiveMovesDependencies = {
+    ...f.dependencies,
+    authorize: authorizeFellowWrite,
+    loadQueue: async () => page("P-DEMO", []),
+    discriminate: {
+      load: async () => {
+        investigationReads++;
+        return {
+          degraded: false,
+          move: {
+            move: "discriminate",
+            why: "Draft a discriminating test before publishing any observations.",
+            refs: ["P-DEMO", "H-1", "H-2", "H-3"],
+            contract: {
+              ...getMoveTemplate("discriminate"),
+              preparation: { problem_id: "P-DEMO", captured_cursor: 10 },
+            },
+          },
+        };
+      },
+    },
+    retries: {
+      load: async (_db, problem, cursor, fellow) => {
+        investigationReads++;
+        return {
+          degraded: false,
+          move: retryMoveFor(
+            {
+              problem_id: problem,
+              cursor,
+              dead_end_id: "DE-1",
+              author_fellow_id: "F-OTHER",
+              source: {
+                approach: "Check the changed boundary.",
+                why_it_fails: "The earlier formulation ruled out this route.",
+                retry_predicate: "Revisit if the formulation changes.",
+                retry_when: { kind: "statement-revised" },
+              },
+              publication: { event_id: "EV-2", seq: 2, payload_sha256: "a".repeat(64) },
+              firing: { event_id: "EV-3", seq: 3, payload_sha256: "b".repeat(64) },
+            },
+            fellow,
+            getMoveTemplate("retry-dead-end"),
+          ),
+        };
+      },
+    },
+  };
+  const provider = new LedgerMovesProvider(dependencies);
+  try {
+    for (const scopes of [[], ["review"]] as const) {
+      const binding = { ...credential, grantedScopes: [...scopes] };
+      for (const publicWritesLimited of [false, true]) {
+        const result = await provider.nextMoves({
+          ...next(f.db, binding),
+          publicWritesLimited,
+        });
+        assert.deepEqual(
+          [result.primaryMove, ...result.alternatives].map((move) => move?.move),
+          ["retry-dead-end", "discriminate"],
+        );
+        assert.equal(result.degraded, false);
+        assert.equal(result.effectivePermissions?.promote, false);
+        assert.equal(result.effectivePermissions?.evidence, false);
+        assert.equal(result.effectivePermissions?.dead_end, false);
+        assert.equal(result.effectivePermissions?.workshop_push, true);
+        for (const move of [result.primaryMove, ...result.alternatives]) {
+          assert.equal(
+            move?.contract.target_contract,
+            "/schemas/sessions.v1/workshop_push_request.json",
+          );
+          assert.deepEqual(move?.contract.request, {
+            method: "POST",
+            path: "/v1/sessions/{id}/workshop",
+            auth: "fellow-bearer",
+            idempotency_key_required: true,
+          });
+        }
+      }
+    }
+    assert.equal(investigationReads, 8);
+
+    // Real central-policy denials still suppress private recommendations before
+    // any scientific source is read; caller permission hints confer no grant.
+    for (const binding of [
+      { ...credential, grantedScopes: [], fellowStatus: "paused" as const },
+      { ...credential, grantedScopes: [], revokedAt: 99 },
+      { ...credential, grantedScopes: [], expiresAt: 99 },
+      { ...credential, grantedScopes: [], grantedResources: { problemBinding: "P-OTHER" } },
+      { ...credential, grantedScopes: [], grantedResources: { eventBudget: 0 } },
+    ]) {
+      const result = await provider.nextMoves({
+        ...next(f.db, binding),
+        effectivePermissions: { session_open: true, workshop_push: true },
+      });
+      assert.equal(result.primaryMove, null);
+      assert.deepEqual(result.alternatives, []);
+    }
+    assert.equal(investigationReads, 8);
   } finally {
     f.sqlite.close();
   }

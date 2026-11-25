@@ -498,7 +498,11 @@ export class LedgerMovesProvider implements MegaCommandsMoveProvider {
       });
     }
 
-    if (discriminate?.load && effectivePermissions.session_open && effectivePermissions.evidence)
+    if (
+      discriminate?.load &&
+      effectivePermissions.session_open &&
+      effectivePermissions.workshop_push
+    )
       append(() => discriminate.load(db, problemId, row.cursor));
 
     if (killOrStand?.load && effectivePermissions.session_open && effectivePermissions.promote)
@@ -523,12 +527,7 @@ export class LedgerMovesProvider implements MegaCommandsMoveProvider {
     }
 
     // 7. Retries (retry-dead-end)
-    if (
-      retries?.load &&
-      effectivePermissions.session_open &&
-      effectivePermissions.dead_end &&
-      effectivePermissions.workshop_push
-    ) {
+    if (retries?.load && effectivePermissions.session_open && effectivePermissions.workshop_push) {
       reads.push({
         read: async () => {
           const extra = await retries.load(db, problemId, row.cursor, fellowBinding.fellowId);

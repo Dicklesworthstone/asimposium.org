@@ -156,8 +156,7 @@ export async function withRetryMove(
   selected: { moves: NextMoveCandidate[]; degraded: boolean },
   source?: RetryMoveSource,
 ) {
-  if (!source || !permissions.session_open || !permissions.dead_end || !permissions.workshop_push)
-    return selected;
+  if (!source || !permissions.session_open || !permissions.workshop_push) return selected;
   try {
     const extra = await source.load(db, problem, cursor, fellow);
     const frontier = selected.moves.findIndex(

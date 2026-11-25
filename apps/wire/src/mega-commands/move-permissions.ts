@@ -63,7 +63,10 @@ export function isPrivatePreparationMove(
     return candidate.move === "sharpen-statement";
   const request = candidate.contract?.request;
   return (
-    record(request) && request.method === "POST" && request.path === "/v1/sessions/{id}/workshop"
+    candidate.contract?.target_contract === "/schemas/sessions.v1/workshop_push_request.json" &&
+    record(request) &&
+    request.method === "POST" &&
+    request.path === "/v1/sessions/{id}/workshop"
   );
 }
 
@@ -74,6 +77,16 @@ export function filterMovesByPermissions(
 ): readonly NextMoveCandidate[] {
   return candidates.filter((candidate) => {
     if (effectivePermissions.session_open !== true) return false;
+    // The selected request determines its authority boundary. Discrimination
+    // and retry investigations are private workshop preparation even when the
+    // eventual result would require a public evidence/dead-end grant. A Fellow
+    // may draft under its actual workshop authority without that later grant.
+    if (
+      candidate.move !== "idle-close" &&
+      candidate.contract?.availability === "available" &&
+      isPrivatePreparationMove(candidate, effectivePermissions)
+    )
+      return true;
     let effect = candidate.move;
     if (effect === "back-to-the-object") {
       const preparation = candidate.contract?.preparation;

@@ -18,7 +18,11 @@ import {
 import type { D1Database } from "@cloudflare/workers-types";
 import { createApp } from "../../src/app.ts";
 import type { Env } from "../../src/env.ts";
-import type { RetryPage, VerifiedDeadEndRetry } from "../../src/ledger/dead-end-retries.ts";
+import {
+  RETRY_PAGE_SQL,
+  type RetryPage,
+  type VerifiedDeadEndRetry,
+} from "../../src/ledger/dead-end-retries.ts";
 import { readPublishedProblemFormulation } from "../../src/ledger/problem-formulation-read.ts";
 import { selectNormalizeConflictMove } from "../../src/mega-commands/conflict-moves.ts";
 import {
@@ -319,6 +323,37 @@ test("public retry discovery reuses verified conditions and exact source pins wi
     expect(JSON.stringify(face)).not.toContain("UNTRUSTED_RETRY");
     expect(face?.degraded).toBe(false);
   }
+});
+
+test("production public discovery reads the bounded retry history once per problem", async () => {
+  const f = fixture();
+  f.problem("P-DEMO", { claim: "C-1" });
+  f.sqlite.exec(`
+    ALTER TABLE events ADD COLUMN actor_fellow_id TEXT;
+    ALTER TABLE events ADD COLUMN actor_sponsor_id TEXT;
+    CREATE TABLE dead_ends(problem_id TEXT, dead_end_id TEXT, superseded_by TEXT);
+    CREATE TABLE dead_end_fired_triggers(problem_id TEXT, dead_end_id TEXT,
+      trigger_kind TEXT, event_id TEXT);
+  `);
+  let retryReads = 0;
+  const traced = {
+    prepare(sql: string) {
+      if (sql === RETRY_PAGE_SQL) retryReads++;
+      return f.db.prepare(sql);
+    },
+    batch: f.db.batch.bind(f.db),
+  } as D1Database;
+
+  // Use the production selector set: injecting the public retry selector alone
+  // cannot expose an accidental second, identity-specific reader after a merge.
+  const named = await loadPublicProblemMoves(traced, "P-DEMO");
+  expect(named?.captured_cursor).toBe(20);
+  expect(retryReads).toBe(1);
+  retryReads = 0;
+  const global = await loadPublicMoves(traced);
+  expect(global.discovery.scanned).toBe(1);
+  expect(retryReads).toBe(1);
+  expect(JSON.stringify(global)).not.toContain("author_may_supersede");
 });
 
 test("off-scope retry sources and firings are filtered before choosing an eligible later result", async () => {
@@ -1125,6 +1160,7 @@ test("public /moves exposes expanded public-eligible move selectors and never le
   f.event("P-EXPANDED", 3, "C-2", "claim", "claim.created");
   f.event("P-EXPANDED", 4, "DE-01TESTDEAD001", "dead_end", "dead_end.recorded");
   f.event("P-EXPANDED", 5, "E-01TESTEVDNC001", "evidence", "evidence.created");
+  const relationEvent = f.event("P-EXPANDED", 6, "REL-1", "relation", "relation.asserted");
 
   const conflictMove: NextMoveCandidate = {
     move: "normalize-conflict",
@@ -1132,7 +1168,30 @@ test("public /moves exposes expanded public-eligible move selectors and never le
     refs: ["P-EXPANDED", "C-1@1", "C-2@1"],
     contract: {
       ...getMoveTemplate("normalize-conflict"),
-      preparation: { problem_id: "P-EXPANDED", captured_cursor: 20 },
+      preparation: {
+        problem_id: "P-EXPANDED",
+        captured_cursor: 20,
+        claim_a_pin: {
+          claim_id: "C-1",
+          version: 1,
+          event_id: "EV-P-EXPANDED-2",
+          seq: 2,
+          payload_sha256: hash("{}"),
+        },
+        claim_b_pin: {
+          claim_id: "C-2",
+          version: 1,
+          event_id: "EV-P-EXPANDED-3",
+          seq: 3,
+          payload_sha256: hash("{}"),
+        },
+        relation_pin: {
+          relation_id: "REL-1",
+          event_id: relationEvent,
+          seq: 6,
+          payload_sha256: hash("{}"),
+        },
+      },
     },
   };
   const duplicateMove: NextMoveCandidate = {

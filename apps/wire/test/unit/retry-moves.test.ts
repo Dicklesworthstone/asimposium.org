@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { getMoveTemplate, MoveTemplateSchema, type NextMoveCandidate } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
 import type { VerifiedDeadEndRetry } from "../../src/ledger/dead-end-retries.ts";
+import { filterMovesByPermissions } from "../../src/mega-commands/move-permissions.ts";
 import { loadRetryMove, retryMoveFor, withRetryMove } from "../../src/mega-commands/retry-moves.ts";
 
 const db = {} as D1Database;
@@ -78,6 +79,34 @@ test("another Fellow receives investigation, not authority to supersede someone 
   };
   assert.equal(contract.preparation.author_may_supersede, false);
   assert.equal(contract.prefilled_hints.supersedes_dead_end_id, undefined);
+});
+
+test("private retry preparation needs workshop authority, while public negative results still need a grant", () => {
+  const privateMove = retryMoveFor(item, "F-2", template);
+  assert.ok(privateMove);
+  const workshopOnly = {
+    session_open: true,
+    workshop_push: true,
+    promote: false,
+    dead_end: false,
+    evidence: false,
+    review: false,
+  };
+  const publicMove = { ...privateMove, contract: retryTemplate };
+  for (const publicWritesLimited of [false, true]) {
+    assert.deepEqual(
+      filterMovesByPermissions([privateMove, publicMove], workshopOnly, publicWritesLimited),
+      [privateMove],
+    );
+    assert.deepEqual(
+      filterMovesByPermissions(
+        [privateMove],
+        { ...workshopOnly, workshop_push: false },
+        publicWritesLimited,
+      ),
+      [],
+    );
+  }
 });
 
 test("typed condition reads distinguish exact gap, claim and current statement", () => {
@@ -186,7 +215,7 @@ test("review and gap work precede retries; retries precede new exploration", asy
     ["review", "close-gap", "retry-dead-end", "third-alternative", "state-claim"],
   );
 });
-for (const denied of ["session_open", "dead_end", "workshop_push"])
+for (const denied of ["session_open", "workshop_push"])
   test(`missing ${denied} skips retry source entirely`, async () => {
     const selected = { moves: [fake("review")], degraded: false };
     const result = await withRetryMove(

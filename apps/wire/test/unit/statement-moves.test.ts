@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { NextMoveCandidateSchema, ProblemGovernanceEventSchema } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
+import { claimContentDigest } from "../../src/krater/claim-version.ts";
 import {
   filterMovesByPermissions,
   isStatementReviewMove,
@@ -116,8 +117,9 @@ function fixture() {
       .run(PROBLEM, version);
     return eid;
   };
-  const claim = (seq = 2, id = "C-1", version = 1, editor = AUTHOR) => {
+  const claim = async (seq = 2, id = "C-1", version = 1, editor = AUTHOR) => {
     const statement = `Claim ${id} version ${version}: ${CANARY}`;
+    const falsifier = "A direct computation that violates the stated predicate.";
     const eid = event(
       seq,
       version === 1 ? "claim.created" : "claim.revised",
@@ -128,7 +130,7 @@ function fixture() {
         claim_id: id,
         kind: "conjecture",
         statement,
-        falsifier: "A direct computation that violates the stated predicate.",
+        falsifier,
         ...(version > 1 ? { base_version: version - 1 } : {}),
       },
       editor,
@@ -150,7 +152,16 @@ function fixture() {
         .run(statement, sv, seq, digest, PROBLEM, id);
     sql
       .query("INSERT INTO claim_versions VALUES (?,?,?,?,?,?)")
-      .run(PROBLEM, id, version, editor, `sha256:${digest}`, statement);
+      .run(
+        PROBLEM,
+        id,
+        version,
+        editor,
+        await claimContentDigest({ kind: "conjecture", statement, falsifier }, async (raw) =>
+          sha(raw),
+        ),
+        statement,
+      );
     return eid;
   };
   const reanchor = (seq: number, statementVersion: number, version = 1, id = "C-1") => {
@@ -227,7 +238,7 @@ async function run(work: (f: ReturnType<typeof fixture>) => Promise<void>) {
   const f = fixture();
   try {
     f.formulation(1, 1);
-    f.claim();
+    await f.claim();
     f.formulation(3, 2);
     await work(f);
   } finally {
@@ -319,7 +330,7 @@ test("withdrawn claim heads are not candidates even when their drift projection 
 
 test("claim revision resets its anchor and never falls back to an older drifting version", () =>
   run(async (f) => {
-    f.claim(4, "C-1", 2);
+    await f.claim(4, "C-1", 2);
     assert.equal((await f.next()).move, null);
     f.control("C-1@2");
     assert.equal((await f.next()).move, null);
@@ -330,7 +341,7 @@ test("claim revision resets its anchor and never falls back to an older drifting
 
 test("re-anchor ownership is the immutable original author, not the latest editor", () =>
   run(async (f) => {
-    f.claim(4, "C-1", 2, "F-EDITOR");
+    await f.claim(4, "C-1", 2, "F-EDITOR");
     f.formulation(5, 3);
     assert.deepEqual((await f.next()).move?.refs, [PROBLEM, "C-1@2", "S@3"]);
     assert.equal((await f.next(f.cursor(), "F-EDITOR")).move, null);
@@ -640,7 +651,7 @@ test("an unlisted authorized problem remains addressable without joining public 
 
 test("an unavailable early claim does not erase the next usable candidate", () =>
   run(async (f) => {
-    f.claim(4, "C-2");
+    await f.claim(4, "C-2");
     f.formulation(5, 3);
     f.control("C-1");
     const result = await f.next();
@@ -655,7 +666,7 @@ test("an unavailable early claim does not erase the next usable candidate", () =
 
 test("bounded selection discloses omitted candidates and does not scan past its limit", () =>
   run(async (f) => {
-    for (let i = 2; i <= REANCHOR_CANDIDATE_LIMIT + 1; i++) f.claim(i + 2, `C-${i}`);
+    for (let i = 2; i <= REANCHOR_CANDIDATE_LIMIT + 1; i++) await f.claim(i + 2, `C-${i}`);
     f.formulation(REANCHOR_CANDIDATE_LIMIT + 4, 3);
     const result = await f.next();
     assert.equal(result.move?.refs[1], "C-1@1");

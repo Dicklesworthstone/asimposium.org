@@ -40,7 +40,6 @@ import { firstClaimMove, loadLedgerMoveQueue, selectPublicLedgerMoves } from "./
 import { compareMovePriority, selectTriageMove, uniqueMoves } from "./move-selection.ts";
 import { loadPublicRetryMove, type PublicRetryReference } from "./public-retry-moves.ts";
 import { selectReanchorMove } from "./reanchor-moves.ts";
-import { loadDeadEndRetryMove } from "./retry-moves-service.ts";
 import { selectSharpenStatementMove } from "./sharpen-moves.ts";
 import { selectSynthesizeMove } from "./synthesize-moves.ts";
 
@@ -192,7 +191,6 @@ export interface PublicMoveSelectors {
   duplicates?: typeof selectCollapseDuplicateMove;
   deadEnds?: typeof selectRecordDeadEndMove;
   synthesize: typeof selectSynthesizeMove;
-  retries?: typeof loadDeadEndRetryMove;
   retry: typeof loadPublicRetryMove;
   reanchor?: typeof selectReanchorMove;
   backToObject?: typeof selectBackToObjectMove;
@@ -210,7 +208,6 @@ const production: PublicMoveSelectors = {
   duplicates: selectCollapseDuplicateMove,
   deadEnds: selectRecordDeadEndMove,
   synthesize: selectSynthesizeMove,
-  retries: loadDeadEndRetryMove,
   retry: loadPublicRetryMove,
   reanchor: selectReanchorMove,
   backToObject: selectBackToObjectMove,
@@ -422,8 +419,6 @@ async function selectProblem(
         if (result.move) retryPins.set(result.move, result.references);
         return result;
       });
-    if (selectors.retries)
-      await attempt("Dead-end retry", () => selectors.retries!(db, head.id, head.cursor, ""));
     await attempt("Synthesis", () => selectors.synthesize(db, head.id, head.cursor));
     if (selectors.backToObject)
       await attempt("Back-to-the-object ceremony breaker", () =>
