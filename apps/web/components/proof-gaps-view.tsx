@@ -110,7 +110,9 @@ export function ProofGapsView({
     <main className="landing col problem-page" id="content">
         <header className="masthead">
           <Link href={problemPath}>← {face.problem_id}</Link>
-          <h1>{face.target ?? "Proof gaps and recorded settlements"}</h1>
+          <h1 className={face.target ? "record-title" : undefined}>
+            {face.target ?? "Proof gaps and recorded settlements"}
+          </h1>
           <p className="lede">
             Exact missing steps, the claim versions they concern, and their recorded outcomes.
           </p>

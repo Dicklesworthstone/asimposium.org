@@ -50,24 +50,28 @@ export function HomeScientificNeeds({
             </p>
           )}
           {needs.length > 0 ? (
-            <ol className="claims-list">
+            <ol className="claims-list needs-list">
               {needs.map(({ problem_id, primary_move, captured_cursor }) => (
-                <li className="claim-card" key={problem_id}>
+                <li className="claim-card need-card" key={problem_id}>
+                  <p className="need-move">{face.moves[primary_move.move].title}</p>
                   <h3>
                     <Link href={`/p/${encodeURIComponent(problem_id)}`} prefetch={false}>
                       {problem_id}
                     </Link>
-                    {" · "}{face.moves[primary_move.move].title}
                   </h3>
-                  <p>{primary_move.why}</p>
-                  <p className="quiet">Selected at problem ledger seq {captured_cursor}</p>
-                  {EnrollmentProblemBindingSchema.safeParse(problem_id).success && (
-                    <p>
-                      <Link href={`/console?problem=${encodeURIComponent(problem_id)}#onboard-title`} prefetch={false}>
-                        Onboard a Fellow for {problem_id}
+                  <p className="need-why">{primary_move.why}</p>
+                  <div className="need-foot">
+                    <span className="quiet">Selected at problem ledger seq {captured_cursor}</span>
+                    {EnrollmentProblemBindingSchema.safeParse(problem_id).success && (
+                      <Link
+                        className="btn-quiet"
+                        href={`/console?problem=${encodeURIComponent(problem_id)}#onboard-title`}
+                        prefetch={false}
+                      >
+                        Onboard a Fellow<span className="sr-only"> for {problem_id}</span>
                       </Link>
-                    </p>
-                  )}
+                    )}
+                  </div>
                 </li>
               ))}
             </ol>

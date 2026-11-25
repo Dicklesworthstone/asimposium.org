@@ -72,10 +72,10 @@
  */
 :root {
   color-scheme: light dark;
-  /* Aliases older components reach for; they now follow the theme. */
-  --color-accent: var(--color-clay);
-  --color-text: var(--color-ink);
-  --color-text-quiet: var(--color-muted);
+  /* Aliases components reach for; they follow the theme. The directive card
+     colours its outcome lines with success/error. */
+  --color-success: var(--color-olive);
+  --color-error: var(--color-danger);
   --radius: 4px;
   --radius-lg: 8px;
   --measure: 44rem;
@@ -86,6 +86,18 @@
   --shadow-2: 0 1px 2px rgb(60 40 20 / 0.06), 0 12px 28px -12px rgb(60 40 20 / 0.28);
   --wash: color-mix(in srgb, var(--color-clay) 8%, var(--color-paper));
   --wash-card: color-mix(in srgb, var(--color-clay) 6%, var(--color-card));
+  /*
+   * Black-glaze bands: the fired black zone of a vase, with terracotta
+   * figures and cream inscriptions. Used for the painted frieze (the session
+   * loop) and the footer, the vase's foot. Every pair clears WCAG AA:
+   * ink 14.5:1, muted 8.7:1, clay 6.9:1 on --glaze.
+   */
+  --glaze: #1d1713;
+  --glaze-2: #2a211b;
+  --glaze-ink: #f1e7d6;
+  --glaze-muted: #c4b49c;
+  --glaze-clay: #e58a5c;
+  --glaze-line: #43362c;
 }
 :root[data-theme="light"] {
   color-scheme: light;
@@ -108,6 +120,13 @@
   --color-olive: #b4cb88;
   --shadow-1: 0 1px 1px rgb(0 0 0 / 0.3), 0 2px 12px -4px rgb(0 0 0 / 0.5);
   --shadow-2: 0 1px 2px rgb(0 0 0 / 0.4), 0 14px 30px -12px rgb(0 0 0 / 0.7);
+  /* On a dark page the band is a warmer, deeper fired ground. */
+  --glaze: #231812;
+  --glaze-2: #2e2018;
+  --glaze-ink: #efe5d4;
+  --glaze-muted: #c2b29a;
+  --glaze-clay: #ec9a70;
+  --glaze-line: #4a382c;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -128,6 +147,12 @@
     --color-olive: #b4cb88;
     --shadow-1: 0 1px 1px rgb(0 0 0 / 0.3), 0 2px 12px -4px rgb(0 0 0 / 0.5);
     --shadow-2: 0 1px 2px rgb(0 0 0 / 0.4), 0 14px 30px -12px rgb(0 0 0 / 0.7);
+    --glaze: #231812;
+    --glaze-2: #2e2018;
+    --glaze-ink: #efe5d4;
+    --glaze-muted: #c2b29a;
+    --glaze-clay: #ec9a70;
+    --glaze-line: #4a382c;
   }
 }
 
@@ -216,13 +241,21 @@ body > .loading-frame {
     --color-danger: CanvasText;
     --color-info: CanvasText;
     --color-olive: CanvasText;
+    --glaze: Canvas;
+    --glaze-2: Canvas;
+    --glaze-ink: CanvasText;
+    --glaze-muted: CanvasText;
+    --glaze-clay: CanvasText;
+    --glaze-line: CanvasText;
   }
   .claim-card,
   .participant-card,
+  .home .home-loop,
+  .record-actions,
+  .rule-item,
   .status-badge,
   [data-tone],
   .badge,
-  .table-graph,
   button,
   input,
   select,
@@ -437,6 +470,29 @@ body > a.sr-only.focus\:not-sr-only:focus {
   height: 10px;
   opacity: 0.4;
 }
+/*
+ * On wide, tall screens the header stays with the reader: one row, so it
+ * costs about 4.5rem. Phones keep it in the flow, where the two-row section
+ * grid would take too much of a short viewport. In-page anchors land below
+ * it rather than under it.
+ */
+@media (min-width: 64.01rem) and (min-height: 40rem) {
+  html {
+    scroll-padding-top: 5.5rem;
+  }
+  .site-header {
+    position: sticky;
+    top: 0;
+    box-shadow: 0 1px 0 var(--color-line);
+  }
+  @supports ((-webkit-backdrop-filter: blur(1px)) or (backdrop-filter: blur(1px))) {
+    .site-header {
+      background: color-mix(in srgb, var(--color-card) 78%, transparent);
+      -webkit-backdrop-filter: saturate(1.3) blur(12px);
+      backdrop-filter: saturate(1.3) blur(12px);
+    }
+  }
+}
 
 .theme-toggle-icon {
   display: inline-flex;
@@ -556,14 +612,33 @@ body > a.sr-only.focus\:not-sr-only:focus {
 }
 
 /* ── Site chrome: footer ────────────────────────────────── */
+/*
+ * The footer is the vase's foot: the black-glaze ground in both schemes,
+ * with a terracotta key along its rim and cream inscriptions.
+ */
 .site-footer {
   margin-top: 4.5rem;
-  background: var(--color-sunk);
-  color: var(--color-ink2);
+  background: var(--glaze);
+  color: var(--glaze-muted);
   font-size: 0.95rem;
 }
 .site-footer .frieze {
-  opacity: 0.45;
+  height: 12px;
+  margin-top: 10px;
+  background-color: var(--glaze-clay);
+  opacity: 0.75;
+}
+.site-footer .site-brand {
+  color: var(--glaze-ink);
+}
+.site-footer .site-emblem {
+  color: var(--glaze-clay);
+}
+.site-footer .site-emblem .band {
+  stroke: var(--glaze);
+}
+.site-footer .site-brand:hover .site-wordmark-name {
+  color: var(--glaze-clay);
 }
 .site-footer-inner {
   max-width: calc(var(--page) + 2 * var(--gutter));
@@ -580,7 +655,7 @@ body > a.sr-only.focus\:not-sr-only:focus {
   margin: 0;
   max-width: 24rem;
   font-style: italic;
-  color: var(--color-ink2);
+  color: var(--glaze-ink);
   line-height: 1.5;
 }
 .site-footer h2 {
@@ -589,7 +664,7 @@ body > a.sr-only.focus\:not-sr-only:focus {
   font-size: 0.78rem;
   font-weight: 600;
   letter-spacing: 0.16em;
-  color: var(--color-muted);
+  color: var(--glaze-clay);
 }
 .site-footer ul {
   list-style: none;
@@ -602,21 +677,24 @@ body > a.sr-only.focus\:not-sr-only:focus {
   display: inline-flex;
   align-items: center;
   min-height: 32px;
-  color: var(--color-ink2);
+  color: var(--glaze-ink);
   text-decoration: none;
 }
 .site-footer a:hover {
-  color: var(--color-clay);
+  color: var(--glaze-clay);
   text-decoration: underline;
   text-underline-offset: 3px;
+}
+.site-footer :focus-visible {
+  outline-color: var(--glaze-clay);
 }
 .site-footer-legal {
   grid-column: 1 / -1;
   margin: 0.4rem 0 0;
   padding-top: 1.2rem;
-  border-top: 1px solid var(--color-line);
+  border-top: 1px solid var(--glaze-line);
   font-size: 0.86rem;
-  color: var(--color-muted);
+  color: var(--glaze-muted);
   display: flex;
   flex-wrap: wrap;
   justify-content: space-between;
@@ -717,23 +795,6 @@ body > a.sr-only.focus\:not-sr-only:focus {
   font-size: 0.9rem;
   letter-spacing: 0.22em;
 }
-.landing .ornament {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 0.9rem;
-  margin: 1.15rem 0 1.1rem;
-  color: var(--color-clay);
-  font-size: 1.05rem;
-  line-height: 1;
-}
-.landing .ornament::before,
-.landing .ornament::after {
-  content: "";
-  height: 1px;
-  background: var(--color-rule);
-  flex: 0 1 4.5rem;
-}
 .landing .status {
   display: inline-block;
   max-width: 100%;
@@ -760,16 +821,33 @@ body > a.sr-only.focus\:not-sr-only:focus {
   border-bottom: 1px solid var(--color-line);
   text-wrap: balance;
 }
+/* The section letter is struck like a small coin beside the inscription.
+   The heading becomes a row so a long title wraps beside the coin, not
+   under it, on a phone. */
+.landing h2:has(> .gr) {
+  display: flex;
+  align-items: center;
+  gap: 0.65em;
+}
 .landing h2 .gr {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  width: 1.85em;
+  height: 1.85em;
+  border: 1px solid color-mix(in srgb, var(--color-clay) 50%, transparent);
+  border-radius: 50%;
+  background: var(--wash-card);
+  box-shadow: inset 0 0 0 2px var(--color-card);
   font-family: var(--font-serif);
   font-style: italic;
   font-weight: 500;
-  font-size: 1.35em;
+  font-size: 1.15em;
   line-height: 1;
   color: var(--color-clay);
   letter-spacing: 0;
-  margin-right: 0.4em;
-  vertical-align: -0.04em;
+  vertical-align: -0.45em;
 }
 .landing h3 {
   font-size: 1.12rem;
@@ -780,6 +858,41 @@ body > a.sr-only.focus\:not-sr-only:focus {
 .landing h4 {
   font-weight: 600;
   margin: 1.2rem 0 0.4rem;
+}
+/* Rendered Markdown demotes headings two levels below the page (# → h3,
+   ### → h5), so canonical documents and scientific bodies reach h5 and h6;
+   without these rules preflight left them as plain body text. */
+.landing h5 {
+  margin: 1.3rem 0 0.35rem;
+  font-size: 1.05rem;
+  font-weight: 600;
+  font-variant-caps: all-small-caps;
+  letter-spacing: 0.07em;
+  color: var(--color-ink2);
+}
+.landing h6 {
+  margin: 1.1rem 0 0.3rem;
+  font-size: 1rem;
+  font-weight: 600;
+  font-style: italic;
+}
+.landing .canonical-markdown-body > h3 {
+  margin: 2.2rem 0 0.7rem;
+  font-family: var(--font-display);
+  font-size: 1.25rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+}
+.landing .canonical-markdown-body > h4 {
+  margin: 2.2rem 0 0.6rem;
+  padding-bottom: 0.35rem;
+  border-bottom: 1px solid var(--color-line);
+  font-size: 1.22rem;
+}
+.landing .canonical-markdown-body > h5 {
+  margin-top: 1.6rem;
+  font-size: 1.1rem;
+  color: var(--color-clay);
 }
 .landing p {
   margin: 0.85rem 0;
@@ -1233,6 +1346,129 @@ body > a.sr-only.focus\:not-sr-only:focus {
   text-decoration: none;
 }
 
+/*
+ * Control buttons. Console, admin and form components name their buttons by
+ * role (`btn`, `btn-action`, `btn-primary`, `btn-reject`, `btn-active`,
+ * `btn-pagination`); without these rules Tailwind's preflight left them as
+ * bare text, so "Promote", "Record decision" and "Delete account" did not
+ * read as buttons at all. One shape for all of them: the quiet button's
+ * outline and radius, with the role carried by ink, never by colour alone
+ * (the label always names the act).
+ */
+:is(.btn, .btn-action, .btn-primary, .btn-reject, .btn-active, .btn-pagination) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  font: inherit;
+  font-size: 0.95rem;
+  font-weight: 600;
+  line-height: 1.3;
+  cursor: pointer;
+  border: 1px solid var(--color-rule);
+  border-radius: var(--radius);
+  background: var(--color-card);
+  color: var(--color-ink);
+  padding: 0.4rem 1rem;
+  text-decoration: none;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+  transition:
+    color 0.15s ease,
+    border-color 0.15s ease,
+    background-color 0.15s ease,
+    box-shadow 0.15s ease;
+}
+:is(.btn, .btn-action, .btn-pagination):hover:not(:disabled) {
+  color: var(--color-clay);
+  border-color: var(--color-clay);
+  background: var(--wash-card);
+}
+.btn-action {
+  border-color: color-mix(in srgb, var(--color-clay) 60%, var(--color-rule));
+  color: var(--color-clay);
+}
+/* The committing act of a form: filled, like the sign-in and console calls. */
+.btn-primary,
+.btn-action.btn-primary {
+  border-color: var(--color-clay);
+  background: var(--color-clay);
+  color: var(--color-paper);
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.14),
+    0 1px 2px rgb(60 30 10 / 0.18);
+}
+.btn-primary:hover:not(:disabled),
+.btn-action.btn-primary:hover:not(:disabled) {
+  color: var(--color-paper);
+  border-color: var(--color-clay);
+  background: color-mix(in srgb, var(--color-clay) 86%, var(--color-ink));
+}
+/* Irreversible acts (deletion, suspension): the danger ink, filled on hover. */
+.btn-reject,
+.btn-action.btn-reject {
+  border-color: var(--color-danger);
+  background: transparent;
+  color: var(--color-danger);
+}
+.btn-reject:hover:not(:disabled),
+.btn-action.btn-reject:hover:not(:disabled) {
+  border-color: var(--color-danger);
+  background: var(--color-danger);
+  color: var(--color-paper);
+}
+/* The selected half of a segmented choice (aria state lives on the page). */
+.btn-active {
+  border-color: var(--color-clay);
+  background: var(--wash-card);
+  color: var(--color-clay);
+  box-shadow: inset 0 0 0 1px var(--color-clay);
+}
+.landing a:is(.btn, .btn-action, .btn-primary, .btn-pagination) {
+  text-decoration: none;
+}
+.landing a.btn-pagination {
+  color: var(--color-ink2);
+  font-weight: 500;
+}
+:is(.btn, .btn-action, .btn-primary, .btn-reject, .btn-active):disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+  box-shadow: none;
+}
+:is(.btn, .btn-action, .btn-primary, .btn-reject):active:not(:disabled) {
+  transform: translateY(1px);
+}
+/* A row of form actions wraps instead of overflowing on a phone. */
+.btn-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 0.75rem;
+  margin: 0.75rem 0;
+}
+/* A vertical form: label, field, help and actions on their own lines. */
+.stack {
+  display: grid;
+  gap: 0.75rem;
+  justify-items: start;
+}
+.stack > :is(label, textarea, input, select, fieldset) {
+  width: 100%;
+}
+/* Same contract as .sr-only; some components use the longer name. */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border-width: 0;
+}
+
 /* ── home: hero, loop frieze, sections ──────────────────── */
 .landing.col.home {
   max-width: calc(var(--page) + 2 * var(--gutter));
@@ -1308,6 +1544,23 @@ body > a.sr-only.focus\:not-sr-only:focus {
   flex-basis: 100%;
   margin: 0.2rem 0 0;
 }
+/* The agent plane's front door, stated once in the hero for the readers the
+   site is built for. */
+.home .hero-agents {
+  margin: 1.1rem 0 0;
+  padding-top: 0.9rem;
+  border-top: 1px solid var(--color-line);
+  max-width: 36rem;
+  font-size: 0.95rem;
+  color: var(--color-ink2);
+}
+.home .hero-agents-label {
+  margin-right: 0.35rem;
+  font-variant-caps: all-small-caps;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  color: var(--color-clay);
+}
 .home .hero-figure {
   margin: 0;
   max-width: none;
@@ -1338,23 +1591,54 @@ body > a.sr-only.focus\:not-sr-only:focus {
 .home .hero-figure figcaption {
   margin-top: 0.8rem;
 }
+/*
+ * The session loop is the page's painted frieze: a black-glaze band with a
+ * Greek key above and below, five panels with terracotta numerals, and a
+ * small chevron between panels for the direction of work. "promote" is the
+ * one act that reaches the public record, so its panel is the fired-clay one.
+ */
 .home .home-loop {
+  --key-band: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='18' height='12' viewBox='0 0 18 12'%3E%3Cpath d='M0 11h18M0 1h18M2 11V3.5h10v5.5H6.5V6h3' fill='none' stroke='%23000' stroke-width='1.5'/%3E%3C/svg%3E");
+  position: relative;
   margin: 0 0 1rem;
-  padding: 0;
+  padding: 22px 0;
   list-style: none;
   display: grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));
-  border: 1px solid var(--color-line);
   border-radius: var(--radius-lg);
-  background: var(--color-card);
-  box-shadow: var(--shadow-1);
-  overflow: hidden;
+  background: var(--glaze);
+  color: var(--glaze-ink);
+  box-shadow: var(--shadow-2);
+}
+.home .home-loop::before,
+.home .home-loop::after {
+  content: "";
+  position: absolute;
+  left: 14px;
+  right: 14px;
+  height: 10px;
+  background-color: var(--glaze-clay);
+  -webkit-mask-image: var(--key-band);
+  mask-image: var(--key-band);
+  -webkit-mask-repeat: repeat-x;
+  mask-repeat: repeat-x;
+  -webkit-mask-size: auto 10px;
+  mask-size: auto 10px;
+  opacity: 0.7;
+  pointer-events: none;
+}
+.home .home-loop::before {
+  top: 7px;
+}
+.home .home-loop::after {
+  bottom: 7px;
+  transform: scaleY(-1);
 }
 .home .home-loop li {
   position: relative;
   margin: 0;
-  padding: 1.1rem 1.1rem 1.15rem;
-  border-left: 1px solid var(--color-line);
+  padding: 1.15rem 1.2rem 1.2rem;
+  border-left: 1px solid var(--glaze-line);
 }
 .home .home-loop li:first-child {
   border-left: 0;
@@ -1362,33 +1646,50 @@ body > a.sr-only.focus\:not-sr-only:focus {
 .home .home-loop li::marker {
   content: none;
 }
+/* Direction of work: a chevron seated on the rule between two panels. */
+.home .home-loop li + li::before {
+  content: "";
+  position: absolute;
+  left: -6px;
+  top: 50%;
+  width: 11px;
+  height: 11px;
+  margin-top: -6px;
+  border-top: 1.5px solid var(--glaze-clay);
+  border-right: 1.5px solid var(--glaze-clay);
+  background: var(--glaze);
+  transform: rotate(45deg);
+}
 .home .home-loop .step-numeral {
   display: block;
   font-style: italic;
-  color: var(--color-clay);
-  font-size: 1.3rem;
+  color: var(--glaze-clay);
+  font-size: 1.7rem;
   line-height: 1;
 }
 .home .home-loop .step-name {
   display: block;
-  margin: 0.4rem 0 0.25rem;
+  margin: 0.5rem 0 0.3rem;
   font-family: var(--font-mono);
-  font-size: 0.88rem;
+  font-size: 0.9rem;
   font-weight: 600;
-  letter-spacing: 0.02em;
-  color: var(--color-ink);
+  letter-spacing: 0.03em;
+  color: var(--glaze-ink);
 }
 .home .home-loop .step-note {
   display: block;
-  font-size: 0.9rem;
+  font-size: 0.92rem;
   line-height: 1.45;
-  color: var(--color-muted);
+  color: var(--glaze-muted);
 }
 .home .home-loop li.is-key {
-  background: var(--wash-card);
+  background: color-mix(in srgb, var(--glaze-clay) 16%, var(--glaze));
+}
+.home .home-loop li.is-key + li::before {
+  background: color-mix(in srgb, var(--glaze-clay) 16%, var(--glaze));
 }
 .home .home-loop li.is-key .step-name {
-  color: var(--color-clay);
+  color: var(--glaze-clay);
 }
 .home .home-grid {
   display: grid;
@@ -1430,6 +1731,11 @@ body > a.sr-only.focus\:not-sr-only:focus {
   border-radius: var(--radius-lg);
   background: var(--color-card);
   box-shadow: var(--shadow-1);
+}
+/* The guarantees are the record's standing rules: set like steles, with a
+   clay cap, distinct from the numbered sponsor steps beside them. */
+.home ul.card-grid > .feature-card {
+  border-top: 3px solid var(--color-clay);
 }
 .home .feature-card .feature-numeral {
   display: inline-flex;
@@ -1487,6 +1793,67 @@ body > a.sr-only.focus\:not-sr-only:focus {
 .home section > p {
   max-width: var(--measure);
 }
+
+/* Problems needing help: one stele per problem, its move named on top. */
+/* Compound selectors: the shared list and card rules come later in the
+   sheet with the same single-class weight. */
+.home .claims-list.needs-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(18rem, 100%), 1fr));
+  gap: 1rem;
+}
+.landing .claim-card.need-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  border-top: 3px solid var(--color-clay);
+}
+.landing .need-card > * {
+  margin: 0;
+}
+.landing .need-move {
+  font-variant-caps: all-small-caps;
+  font-weight: 600;
+  font-size: 1.02rem;
+  letter-spacing: 0.08em;
+  color: var(--color-clay);
+}
+.landing .need-card h3 a {
+  color: var(--color-ink);
+  text-decoration: none;
+  overflow-wrap: anywhere;
+}
+.landing .need-card h3 a:hover {
+  color: var(--color-clay);
+  text-decoration: underline;
+}
+.landing .need-why {
+  color: var(--color-ink2);
+  font-size: 0.98rem;
+  line-height: 1.5;
+}
+.landing .need-foot {
+  margin-top: auto;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--color-line);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem 0.75rem;
+}
+.landing .need-foot .quiet {
+  font-size: 0.86rem;
+}
+
+/* The home Now preview: a short chronicle, the problem named underneath. */
+.home .events-list .event-summary {
+  margin: 0;
+}
+.home .events-list .event-problem {
+  margin: 0.25rem 0 0;
+  font-size: 0.86rem;
+}
 @media (max-width: 60rem) {
   .home .hero {
     grid-template-columns: minmax(0, 1fr);
@@ -1502,15 +1869,25 @@ body > a.sr-only.focus\:not-sr-only:focus {
   }
   .home .home-loop li {
     border-left: 0;
-    border-top: 1px solid var(--color-line);
+    border-top: 1px solid var(--glaze-line);
     display: grid;
     grid-template-columns: 2rem minmax(0, 6.5rem) minmax(0, 1fr);
     align-items: baseline;
     gap: 0 0.6rem;
-    padding: 0.75rem 1rem;
+    padding: 0.85rem 1.1rem;
   }
   .home .home-loop li:first-child {
     border-top: 0;
+  }
+  /* Stacked panels: the chevron points down the rail of numerals. */
+  .home .home-loop li + li::before {
+    left: 1.55rem;
+    top: -6px;
+    margin-top: 0;
+    transform: rotate(135deg);
+  }
+  .home .home-loop .step-numeral {
+    font-size: 1.4rem;
   }
   .home .home-loop .step-name {
     margin: 0;
@@ -1952,6 +2329,7 @@ body > a.sr-only.focus\:not-sr-only:focus {
   .btn-google,
   .btn-quiet,
   .btn-console,
+  :is(.btn, .btn-action, .btn-primary, .btn-reject, .btn-active, .btn-pagination),
   .search-page .search-btn,
   .public-ledger-live button,
   .landing button:not([class]) {
@@ -2010,11 +2388,10 @@ body > a.sr-only.focus\:not-sr-only:focus {
  * one border, one radius, one shadow. Interactive records (the ones that are
  * mostly a link) lift a little further under a fine pointer.
  */
-.explore-page .problem-card,
-.home .problem-card,
-.problem-page .claim-card,
-.search-page .result-card,
-.results-page .result-card,
+.landing .problem-card,
+.landing .claim-card,
+.landing .participant-card,
+.landing .commentary-card,
 .result-card,
 .event-card,
 .contribution-card,
@@ -2087,9 +2464,8 @@ body > a.sr-only.focus\:not-sr-only:focus {
 }
 
 @media (hover: hover) and (pointer: fine) {
-  .explore-page .problem-card,
-  .home .problem-card,
-  .problem-page .claim-card,
+  .landing .problem-card,
+  .landing .claim-card,
   .result-card,
   .area-taxonomy-card {
     transition:
@@ -2097,25 +2473,29 @@ body > a.sr-only.focus\:not-sr-only:focus {
       box-shadow 0.2s ease,
       transform 0.2s var(--ease);
   }
-  .explore-page .problem-card:hover,
-  .home .problem-card:hover,
-  .problem-page .claim-card:hover,
+  .landing .problem-card:hover,
+  .landing .claim-card:hover,
   .result-card:hover,
   .area-taxonomy-card:hover {
     border-color: color-mix(in srgb, var(--color-clay) 45%, var(--color-line));
     box-shadow: var(--shadow-2);
   }
-  .home .problem-card:hover,
-  .area-taxonomy-card:hover,
-  .explore-page .problem-card:hover {
+  /* Only the cards that are mostly a link lift; a claim card is a record
+     to read, so it brightens its edge without moving. */
+  .landing .problem-card:hover,
+  .area-taxonomy-card:hover {
     transform: translateY(-2px);
   }
 }
 
-/* ── Explore & Problem public ledger pages ─────────────── */
-.explore-page .problems-list,
-.problem-page .claims-list,
-.problem-page .participants-list {
+/* ── Public ledger lists and record cards ──────────────── */
+/*
+ * Page-agnostic on purpose: the same list and card classes appear on the
+ * home page, /problems, /explore, /areas, /area/:slug, the problem boards
+ * and the console's revision pages. Scoping them to one page class left the
+ * others rendering bare text.
+ */
+.landing :is(.problems-list, .claims-list, .participants-list) {
   list-style: none;
   margin: 1rem 0;
   padding: 0;
@@ -2123,88 +2503,221 @@ body > a.sr-only.focus\:not-sr-only:focus {
   flex-direction: column;
   gap: 1rem;
 }
-
-.explore-page .problem-card,
-.problem-page .claim-card {
-  border: 1px solid var(--color-line);
-  background: var(--color-card);
-  padding: 1.1rem 1.3rem;
-  transition: border-color 0.15s ease;
+.landing :is(.problems-list, .claims-list, .participants-list) > li {
+  margin: 0;
 }
 
-.home .problem-card {
-  padding: 1.1rem 1.3rem;
+.landing :is(.problem-card, .claim-card) {
+  padding: 1.15rem 1.35rem;
 }
-
-.problem-page .participant-card {
-  border: 1px solid var(--color-line);
-  background: var(--color-card);
+/* Record cards placed directly in a section (no list with its own gap), such
+   as a problem's formulation, would otherwise touch edge to edge. */
+.landing section > article.claim-card + article.claim-card {
+  margin-top: 0.9rem;
+}
+.landing .participant-card {
   padding: 1.05rem 1.25rem;
-  transition: border-color 0.15s ease;
 }
 
-.explore-page .problem-card:hover,
-.problem-page .claim-card:hover {
-  border-color: var(--color-clay);
-}
-
-.explore-page .problem-card header,
-.home .problem-card header,
-.problem-page .claim-card-header {
+/* A problem card's header: the title link, then its metadata lines. */
+.landing .problem-card > header,
+.landing .claim-card-header {
   display: flex;
   align-items: baseline;
   flex-wrap: wrap;
-  gap: 0.4rem;
+  gap: 0.25rem 0.5rem;
   margin-bottom: 0.4rem;
 }
+.landing .problem-card > header > p {
+  flex-basis: 100%;
+  margin: 0;
+}
+.landing .problem-card > header > p + p {
+  font-size: 0.84rem;
+}
 
-.explore-page .problem-link,
-.home .problem-link {
+.landing .problem-link {
   font-weight: 600;
-  font-size: 1.05rem;
+  font-size: 1.12rem;
+  line-height: 1.35;
   color: var(--color-clay);
   text-decoration: none;
 }
-
-.explore-page .problem-link:hover,
-.home .problem-link:hover {
+.landing .problem-link:hover {
   text-decoration: underline;
 }
+.landing .problem-card-title {
+  margin: 0.2rem 0 0.35rem;
+  font-size: 1.08rem;
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--color-ink);
+}
+.landing .problem-card-preamble {
+  margin: 0.3rem 0 0;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  overflow: hidden;
+}
 
-.explore-page .empty-state {
-  padding: 1.25rem;
+/* The action and pagination row at the foot of a card or list. */
+.landing .card-footer-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem 1rem;
+  margin-top: 0.85rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--color-line);
+}
+.landing .card-footer-row > .need-chips-row {
+  margin: 0;
+}
+/* Pagination under a list is a row of its own, not a card foot. */
+.landing nav.card-footer-row {
+  justify-content: flex-start;
+  border-top: 0;
+  padding-top: 0;
+}
+
+.landing .empty-state {
   margin: 1.2rem 0;
 }
 
-.explore-page .areas-grid {
-  list-style: none;
-  margin: 1rem 0 0;
-  padding: 0;
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(min(11rem, 100%), 1fr));
-  gap: 0.6rem;
+/*
+ * Index pages hold lists of cards rather than one column of prose, so they
+ * take a wider page on large screens; their own introductory prose keeps the
+ * reading measure.
+ */
+.landing.col:is(
+    .problems-page,
+    .explore-page,
+    .areas-index-page,
+    .area-detail-page,
+    .now-page,
+    .results-page,
+    .search-page
+  ) {
+  max-width: calc(62rem + 2 * var(--gutter));
+}
+.landing.col:is(
+    .problems-page,
+    .explore-page,
+    .areas-index-page,
+    .area-detail-page,
+    .now-page,
+    .results-page,
+    .search-page
+  )
+  :is(.masthead > p, section > p, section > ul:not([class]), .loop) {
+  max-width: var(--measure);
+}
+@media (min-width: 52rem) {
+  .landing.col:is(.problems-page, .area-detail-page) .problems-list {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .landing.col:is(.problems-page, .area-detail-page) .problem-card {
+    display: flex;
+    flex-direction: column;
+  }
+  .landing.col:is(.problems-page, .area-detail-page) .problem-card > .card-footer-row {
+    margin-top: auto;
+  }
+  .landing.col:is(.problems-page, .area-detail-page) .problem-card > p:last-of-type {
+    margin-bottom: 0.85rem;
+  }
 }
 
-.explore-page .area-chip {
-  border: 1px solid var(--color-line);
-  background: var(--color-card);
-  padding: 0.45rem 0.75rem;
-  border-radius: 999px;
-  text-align: center;
-  font-size: 0.92rem;
-}
-
-.explore-page .area-chip code {
+/*
+ * Titles that are records (a problem's own title, a claim identifier) are
+ * set in the reading face: Cinzel's capitals suit the site's inscriptions,
+ * but a long Fellow-supplied title in capitals is hard to read.
+ */
+/* A claim's computed disposition is the line a reader came for; it is set
+   larger, in ink (the badge row above already carries its symbol). */
+.problem-page p[data-disposition] {
+  margin: 0.4rem 0 0.7rem;
+  font-size: 1.5rem;
+  font-weight: 600;
+  line-height: 1.25;
   color: var(--color-ink);
-  font-family: inherit;
-  background: none;
+}
+
+.landing h1.record-title {
+  font-family: var(--font-serif);
+  font-weight: 600;
+  letter-spacing: 0.005em;
+  font-variant-numeric: lining-nums;
+  overflow-wrap: anywhere;
+}
+
+/*
+ * Next reads and acts on a record: one ruled list, each row a full-width
+ * link with a chevron, so a reader scans the set instead of a stack of
+ * underlined paragraphs.
+ */
+.landing .record-actions {
+  list-style: none;
+  margin: 1.1rem 0;
   padding: 0;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-lg);
+  background: var(--color-card);
+  box-shadow: var(--shadow-1);
+  overflow: hidden;
+}
+.landing .record-actions > li {
+  position: relative;
+  margin: 0;
+  padding: 0.6rem 2.4rem 0.6rem 1rem;
+  border-top: 1px solid var(--color-line);
+  line-height: 1.4;
+}
+.landing .record-actions > li:first-child {
+  border-top: 0;
+}
+.landing .record-actions > li::after {
+  content: "";
+  position: absolute;
+  right: 1.05rem;
+  top: 50%;
+  width: 7px;
+  height: 7px;
+  margin-top: -4px;
+  border-top: 1.5px solid var(--color-clay);
+  border-right: 1.5px solid var(--color-clay);
+  transform: rotate(45deg);
+  pointer-events: none;
+}
+/* A row that is only a link is a block target; the row, its chevron and
+   hover wash mark it, so its underline can rest. A row that mixes links with
+   text keeps underlines (WCAG 1.4.1). */
+.landing .record-actions > li:has(> a:only-child) {
+  padding: 0;
+}
+.landing .record-actions > li > a:only-child {
+  display: block;
+  padding: 0.6rem 2.4rem 0.6rem 1rem;
+  text-decoration-color: transparent;
+}
+.landing .record-actions > li > a:only-child:hover {
+  text-decoration-color: currentColor;
+}
+.landing .record-actions > li:has(> a:only-child):hover {
+  background: var(--wash-card);
 }
 
 .problem-page .problem-title {
-  font-size: clamp(1.85rem, 1.25rem + 2.4vw, 2.85rem);
+  font-family: var(--font-serif);
+  font-weight: 600;
+  letter-spacing: 0;
+  font-size: clamp(2rem, 1.3rem + 2.6vw, 3.1rem);
   margin: 0.3rem 0 0.8rem;
-  line-height: 1.12;
+  line-height: 1.1;
 }
 
 .problem-page .problem-id-chip {
@@ -2220,7 +2733,7 @@ body > a.sr-only.focus\:not-sr-only:focus {
   background-clip: padding-box;
 }
 
-.problem-page .claim-card pre {
+.landing .claim-card pre {
   margin: 0.6rem 0;
   padding: 0.8rem;
   background: var(--color-sunk);
@@ -2234,7 +2747,7 @@ body > a.sr-only.focus\:not-sr-only:focus {
   overflow-wrap: anywhere;
 }
 
-.problem-page .claim-card-footer {
+.landing .claim-card-footer {
   margin-top: 0.6rem;
   border-top: 1px solid var(--color-line);
   padding-top: 0.5rem;
@@ -2291,8 +2804,7 @@ body > a.sr-only.focus\:not-sr-only:focus {
   color: var(--color-danger);
 }
 
-.badge-machine-checked,
-.badge-clean-edge {
+.badge-machine-checked {
   border-color: color-mix(in srgb, var(--color-info) 55%, transparent);
   background: color-mix(in srgb, var(--color-info) 7%, var(--color-card));
   color: var(--color-info);
@@ -2887,9 +3399,11 @@ body > a.sr-only.focus\:not-sr-only:focus {
 
 .problem-count-badge {
   display: inline-block;
-  font-size: 0.8rem;
-  font-family: var(--font-mono);
-  padding: 0.12rem 0.55rem;
+  /* Plain case: in small caps a zero reads as the letter O. */
+  font-size: 0.84rem;
+  font-variant-numeric: lining-nums tabular-nums;
+  line-height: 1.4;
+  padding: 0.08rem 0.6rem;
   border: 1px solid var(--color-line);
   background: var(--color-paper);
   border-radius: 999px;
@@ -3039,6 +3553,61 @@ body > a.sr-only.focus\:not-sr-only:focus {
   padding: 1rem 1.15rem;
 }
 
+/*
+ * Event streams read as a chronicle: one rule down the left edge, a clay
+ * node beside each entry. The log is append-only, so the line is unbroken.
+ */
+.landing .events-list {
+  position: relative;
+  padding-left: 1.6rem;
+}
+.landing .events-list::before {
+  content: "";
+  position: absolute;
+  left: 0.42rem;
+  top: 0.6rem;
+  bottom: 0.6rem;
+  width: 1px;
+  background: linear-gradient(
+    var(--color-rule),
+    var(--color-rule) 85%,
+    transparent
+  );
+}
+.landing .events-list > .event-card {
+  position: relative;
+  margin: 0;
+}
+.landing .events-list > .event-card::before {
+  content: "";
+  position: absolute;
+  left: calc(-1.6rem + 0.42rem - 4px);
+  top: 1.25rem;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--color-paper);
+  border: 2px solid var(--color-clay);
+}
+.landing .event-summary {
+  color: var(--color-ink);
+}
+/* A card's own footer, not the page footer: the page-level `.landing footer`
+   rule (3.4rem above) would otherwise win on specificity. Its links and
+   " · " separators flow as one line of text instead of being spread across
+   the card as flex items. */
+.landing :is(.event-card, .contribution-card) > footer {
+  display: block;
+  margin: 0.6rem 0 0;
+  padding-top: 0.5rem;
+  border-top: 1px solid var(--color-line);
+  font-size: 0.88rem;
+  line-height: 1.6;
+}
+.landing .event-summary strong {
+  font-weight: 600;
+}
+
 .contribution-header,
 .event-header {
   display: flex;
@@ -3101,6 +3670,280 @@ body > a.sr-only.focus\:not-sr-only:focus {
   color: var(--color-ink2);
 }
 
+/* ── Notices, rules, honors, commentary, operator queues ── */
+/*
+ * Components whose markup shipped without styles. Each keeps its meaning in
+ * text; colour only reinforces it.
+ */
+
+/* A platform notice beside, never inside, the author's scientific text. */
+.warning-banner,
+.landing .version-notice,
+.landing .closing-synthesis-notice,
+.admin-notice {
+  margin: 1rem 0;
+  padding: 0.7rem 1rem;
+  border: 1px solid color-mix(in srgb, var(--color-bronze) 35%, var(--color-line));
+  border-left: 3px solid var(--color-bronze);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--color-bronze) 7%, var(--color-card));
+  color: var(--color-ink2);
+}
+.warning-banner > strong {
+  display: block;
+  font-variant-caps: all-small-caps;
+  font-size: 1.02rem;
+  letter-spacing: 0.07em;
+  color: var(--color-bronze);
+}
+.warning-banner > p,
+.admin-notice > p {
+  margin: 0.25rem 0 0;
+}
+.landing .version-notice {
+  border-left-color: var(--color-info);
+  border-color: color-mix(in srgb, var(--color-info) 30%, var(--color-line));
+  background: color-mix(in srgb, var(--color-info) 6%, var(--color-card));
+}
+
+/* Commentary status marks: the label says it, the dashed edge echoes it. */
+.badge.badge-tombstone,
+.badge.badge-superseded {
+  color: var(--color-muted);
+  border-style: dashed;
+}
+
+/* Protocol rules: thirteen numbered tablets. */
+.landing .rules-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(17rem, 100%), 1fr));
+  gap: 0.8rem;
+  margin: 1.1rem 0;
+}
+.landing .rule-item {
+  padding: 0.95rem 1.1rem 1rem;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-lg);
+  background: var(--color-card);
+  box-shadow: var(--shadow-1);
+  scroll-margin-top: 5rem;
+}
+.landing .rule-item:target {
+  border-color: var(--color-clay);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-clay) 22%, transparent);
+}
+.landing .rule-header {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+}
+.landing .rule-id {
+  flex-shrink: 0;
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 0.92rem;
+  letter-spacing: 0.06em;
+  color: var(--color-clay);
+}
+.landing .rule-title {
+  font-weight: 600;
+  line-height: 1.35;
+}
+.landing .rule-summary {
+  margin: 0.4rem 0 0;
+  color: var(--color-ink2);
+  font-size: 0.96rem;
+  line-height: 1.5;
+}
+.landing .rules-budget-badge {
+  display: inline-block;
+  padding: 0.12rem 0.6rem;
+  border: 1px dashed var(--color-rule);
+  border-radius: var(--radius);
+  font-size: 0.86rem;
+  color: var(--color-muted);
+}
+
+/* Honors record entries. */
+.landing .results-list {
+  list-style: none;
+  margin: 1rem 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+.landing .result-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem 0.6rem;
+  margin-bottom: 0.4rem;
+}
+.landing .result-kind-badge {
+  display: inline-block;
+  padding: 0.05rem 0.6rem;
+  border: 1px solid var(--color-line);
+  border-radius: 999px;
+  background: var(--color-paper);
+  font-variant-caps: all-small-caps;
+  letter-spacing: 0.06em;
+  font-size: 0.92rem;
+  color: var(--color-ink2);
+}
+.landing .field-label {
+  margin: 0.6rem 0 0.2rem;
+  font-variant-caps: all-small-caps;
+  letter-spacing: 0.07em;
+  font-weight: 600;
+  color: var(--color-muted);
+}
+.landing .body-block {
+  padding: 0.1rem 0 0.1rem 0.9rem;
+  border-left: 2px solid var(--color-rule);
+}
+.landing :is(.result-actors, .result-dag-context, .result-evidence-trail) {
+  margin-top: 0.8rem;
+  padding-top: 0.7rem;
+  border-top: 1px solid var(--color-line);
+}
+.landing .result-actors {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(15rem, 100%), 1fr));
+  gap: 0.5rem 1.5rem;
+}
+.landing .reviewer-basis {
+  font-size: 0.9rem;
+  color: var(--color-ink2);
+}
+.landing :is(.pagination-nav, .search-pagination, .footer-links) {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 0.9rem;
+  margin: 1.5rem 0;
+}
+
+/* Sponsor commentary on a problem page. */
+.landing .commentary-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+  margin: 1rem 0;
+}
+.landing .commentary-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem 0.6rem;
+  margin-bottom: 0.35rem;
+  font-size: 0.92rem;
+}
+
+/* Problem page status and count rows. */
+.problem-page .problem-status-chip {
+  display: inline-block;
+  padding: 0.12rem 0.65rem;
+  border: 1px solid color-mix(in srgb, var(--color-clay) 40%, var(--color-line));
+  border-radius: 999px;
+  background: var(--wash-card);
+  font-variant-caps: all-small-caps;
+  letter-spacing: 0.06em;
+  color: var(--color-clay);
+}
+.problem-page .problem-counts-row {
+  color: var(--color-muted);
+  font-size: 0.92rem;
+}
+
+/* Conduct reports: a quiet line on public pages, a card on /report. */
+.landing .report-link {
+  margin-top: 1.4rem;
+  font-size: 0.88rem;
+}
+
+/* Private workshop drafts: a sunk sheet inside the console card. */
+.console .workshop-panel {
+  margin: 0.5rem 0;
+  padding: 0.65rem 0.85rem;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius);
+  background: var(--color-sunk);
+  color: var(--color-ink2);
+  font-size: 0.95rem;
+}
+
+/* Directive palette: a command line, so monospace and full width. */
+.console .palette-input {
+  width: 100%;
+  font-family: var(--font-mono);
+  font-size: 0.92rem;
+}
+
+/* Operator queues and audit log (/admin). */
+.landing .admin-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(18rem, 100%), 1fr));
+  gap: 1rem;
+}
+.landing .queue-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  margin: 0.8rem 0;
+}
+.console .queue-item.card,
+.landing .queue-item.card {
+  margin: 0;
+}
+.landing .item-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem 0.6rem;
+  font-size: 0.9rem;
+}
+.landing .timestamp,
+.landing .digest-line {
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  color: var(--color-muted);
+  overflow-wrap: anywhere;
+}
+.badge.badge-warning {
+  border-color: color-mix(in srgb, var(--color-bronze) 50%, var(--color-line));
+  color: var(--color-bronze);
+}
+.landing .audit-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius);
+  scrollbar-width: thin;
+}
+.landing .audit-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.88rem;
+}
+.landing .audit-table :is(th, td) {
+  padding: 0.45rem 0.7rem;
+  border-bottom: 1px solid var(--color-line);
+  text-align: left;
+  vertical-align: top;
+}
+.landing .audit-table th {
+  background: var(--color-sunk);
+  font-variant-caps: all-small-caps;
+  letter-spacing: 0.06em;
+  color: var(--color-ink2);
+}
+.landing .error-card {
+  border-left: 3px solid var(--color-danger);
+}
+.landing .warning-card {
+  border-left: 3px solid var(--color-bronze);
+}
+
 @media print {
   .meander,
   .frieze,
@@ -3133,6 +3976,13 @@ body > a.sr-only.focus\:not-sr-only:focus {
     --color-olive: #4b6524;
     --shadow-1: none;
     --shadow-2: none;
+    /* Bands print as plain paper with ink figures. */
+    --glaze: #ffffff;
+    --glaze-2: #ffffff;
+    --glaze-ink: #1f1b16;
+    --glaze-muted: #4a4238;
+    --glaze-clay: #a2442a;
+    --glaze-line: #ddd3c2;
   }
   main {
     animation: none;

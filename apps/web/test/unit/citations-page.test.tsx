@@ -107,7 +107,7 @@ test("exact citation page preserves the requested version, correction history, e
   }) as unknown as typeof fetch;
   const html = renderToStaticMarkup(await CitationPage(exactProps("L-1@1", { through: "80" })));
   expect(calls).toEqual([`${PRODUCTION_STOA_ORIGIN}/p/P-DEMO/citations/L-1%401.json?through=80`]);
-  for (const text of ["<h1>L-1@1</h1>", "Versions visible at this snapshot", "Corrected boundary estimates",
+  for (const text of ['<h1 class="record-title">L-1@1</h1>', "Versions visible at this snapshot", "Corrected boundary estimates",
     "Selected version", "Recorded scientific references", "The source gives the boundary estimate.",
     "current public source"]) expect(html).toContain(text);
   for (const suffix of ["bib", "csl.json", "md", "json"])
@@ -123,7 +123,7 @@ test("an exact citation remains readable outside the bounded history and omissio
     cursor: 300, citation: citation(205, 250), omitted: ["history_limit", "association_limit"],
   }))) as unknown as typeof fetch;
   const html = renderToStaticMarkup(await CitationPage(exactProps("L-1@205", { through: "300" })));
-  expect(html).toContain("<h1>L-1@205</h1>");
+  expect(html).toContain('<h1 class="record-title">L-1@205</h1>');
   expect(html).toContain("bounded selection of citation versions");
   expect(html).toContain("not a complete citation census");
   expect(html).toContain('href="/p/P-DEMO/citations/L-1%40205?through=300"');
@@ -138,7 +138,7 @@ test("Next raw and encoded citation selectors open the same pinned publication a
   for (const target of ["L-1@1", "L-1%401"]) {
     const input = exactProps(target, { through: "80" });
     const html = renderToStaticMarkup(await CitationPage(input));
-    expect(html).toContain("<h1>L-1@1</h1>");
+    expect(html).toContain('<h1 class="record-title">L-1@1</h1>');
     expect(html).toContain("Publication attribution for L-1@1");
     expect(html).toContain('href="/p/P-DEMO/citations/L-1%402?through=80"');
     expect((await citationMetadata(input)).title).toBe("P-DEMO — L-1@1 | ASImposium");

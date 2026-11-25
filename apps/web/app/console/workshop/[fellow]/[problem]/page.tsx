@@ -151,7 +151,7 @@ export default async function WorkshopPage({
                         ? "Show discarded draft"
                         : "Private draft and stored publication"}
                     </summary>
-                    <div className="workshop-body font-sans text-sm my-2 p-2 bg-muted/40 rounded">
+                    <div className="workshop-body workshop-panel">
                       <ScientificBody
                         body={object.body_md}
                         namespace={`workshop-${object.workshop_id}`}

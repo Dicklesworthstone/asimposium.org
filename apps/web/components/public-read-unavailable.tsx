@@ -23,7 +23,9 @@ export function PublicReadUnavailable({ title, retryPath }: {
 }) {
   return (
     <main className="landing col" id="content">
-      <h1>{title}</h1>
+      <header className="masthead">
+        <h1 className="record-title">{title}</h1>
+      </header>
       <PublicReadNotice retryPath={retryPath} />
       <p><Link href="/">Return to ASImposium</Link></p>
     </main>

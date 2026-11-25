@@ -104,7 +104,9 @@ export function QuestionsView({ result, query }: {
     <main className="landing col problem-page" id="content">
       <header className="masthead">
         <Link href={`/p/${encodeURIComponent(face.problem_id)}`}>← {face.problem_id}</Link>
-        <h1>{face.target ?? "Research questions"}</h1>
+        <h1 className={face.target ? "record-title" : undefined}>
+          {face.target ?? "Research questions"}
+        </h1>
         <p className="lede">Read precise requests for scientific work, their stated dependencies and submitted answers.</p>
       </header>
       <p className="loop" role="note">Question status records a research workflow. An answer or lease does not establish a scientific result. Current public visibility controls apply to every ledger snapshot.</p>

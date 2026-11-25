@@ -203,7 +203,7 @@ export default async function ClaimPage({ params, searchParams }: ClaimPageProps
       <main className="landing col problem-page" id="content">
         <header className="masthead">
           <Link href={`/p/${encodeURIComponent(face.problem)}`}>← {face.problem}</Link>
-          <h1>{exact}</h1>
+          <h1 className="record-title">{exact}</h1>
           <ClaimHonestyBadges badges={viewModel.badges} exactTarget={exact} />
           <p className="lede">{face.preamble}</p>
         </header>
@@ -251,74 +251,78 @@ export default async function ClaimPage({ params, searchParams }: ClaimPageProps
             Statement version {state.version} of {state.latest_version}; ledger cursor {face.cursor}
             .
           </p>
-          <p>
-            <Link
-              href={`/p/${encodeURIComponent(face.problem)}/claims/${exact}${cut}`}
-              prefetch={false}
-            >
-              Link to this ledger snapshot
-            </Link>
-            {through !== undefined && (
-              <>
-                {" "}
-                ·{" "}
-                <Link
-                  href={`/p/${encodeURIComponent(face.problem)}/claims/${state.claim_id}`}
-                  prefetch={false}
-                >
-                  Read the latest public record
-                </Link>
-              </>
-            )}
-          </p>
-          <p>
-            <Link
-              href={reviewHandoffHref(
-                reviewHandoffForClaim(face.problem, state.claim_id, state.version, face.cursor),
+          {/* One list of next reads and acts, so seven links scan as a set
+              rather than seven paragraphs. */}
+          <ul className="record-actions" aria-label="Read and act on this claim version">
+            <li>
+              <Link
+                href={`/p/${encodeURIComponent(face.problem)}/claims/${exact}${cut}`}
+                prefetch={false}
+              >
+                Link to this ledger snapshot
+              </Link>
+              {through !== undefined && (
+                <>
+                  {" "}
+                  ·{" "}
+                  <Link
+                    href={`/p/${encodeURIComponent(face.problem)}/claims/${state.claim_id}`}
+                    prefetch={false}
+                  >
+                    Read the latest public record
+                  </Link>
+                </>
               )}
-              prefetch={false}
-            >
-              Ask your Fellow to review this exact claim →
-            </Link>
-          </p>
-          <p>
-            <Link href={resultClaimConsolePath(face.problem, exact)} prefetch={false}>
-              Review this claim as a problem result
-            </Link>
-          </p>
-          <p>
-            <Link href="#claim-proof-obligations" prefetch={false}>
-              Inspect this claim’s missing proof steps and pinned premises →
-            </Link>
-          </p>
-          <p>
-            <Link
-              href={`/p/${encodeURIComponent(face.problem)}/conflicts?through=${face.cursor}`}
-              prefetch={false}
-            >
-              Inspect normalized scientific disagreements at the same snapshot →
-            </Link>
-          </p>
-          <p>
-            <Link
-              href={`/p/${encodeURIComponent(face.problem)}/questions?through=${face.cursor}`}
-              prefetch={false}
-            >
-              Read research questions and answering work at the same snapshot →
-            </Link>
-          </p>
-          <p>
-            <Link
-              href={directiveDisclosureHref({
-                problemId: face.problem,
-                claimId: state.claim_id,
-                version: state.version,
-              })}
-              prefetch={false}
-            >
-              Review sponsor disclosure for this claim version →
-            </Link>
-          </p>
+            </li>
+            <li>
+              <Link
+                href={reviewHandoffHref(
+                  reviewHandoffForClaim(face.problem, state.claim_id, state.version, face.cursor),
+                )}
+                prefetch={false}
+              >
+                Ask your Fellow to review this exact claim
+              </Link>
+            </li>
+            <li>
+              <Link href={resultClaimConsolePath(face.problem, exact)} prefetch={false}>
+                Review this claim as a problem result
+              </Link>
+            </li>
+            <li>
+              <Link href="#claim-proof-obligations" prefetch={false}>
+                Inspect this claim’s missing proof steps and pinned premises
+              </Link>
+            </li>
+            <li>
+              <Link
+                href={`/p/${encodeURIComponent(face.problem)}/conflicts?through=${face.cursor}`}
+                prefetch={false}
+              >
+                Inspect normalized scientific disagreements at the same snapshot
+              </Link>
+            </li>
+            <li>
+              <Link
+                href={`/p/${encodeURIComponent(face.problem)}/questions?through=${face.cursor}`}
+                prefetch={false}
+              >
+                Read research questions and answering work at the same snapshot
+              </Link>
+            </li>
+            <li>
+              <Link
+                href={directiveDisclosureHref({
+                  problemId: face.problem,
+                  claimId: state.claim_id,
+                  version: state.version,
+                })}
+                prefetch={false}
+              >
+                Review sponsor disclosure for this claim version
+              </Link>
+            </li>
+          </ul>
           {state.latest_version > 1 && (
             <nav aria-label="Claim statement versions">
               {state.version > 1 && (

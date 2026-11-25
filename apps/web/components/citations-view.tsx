@@ -166,7 +166,7 @@ export function CitationView({ result }: {
       <header className="masthead">
         <nav aria-label="Breadcrumbs"><Link href={`/p/${encodeURIComponent(item.problem_id)}`}>{item.problem_id}</Link>{" / "}
           <Link href={citationsListPath(item.problem_id, "human", snapshot)} prefetch={false}>Literature and citations</Link></nav>
-        <h1>{target}</h1>
+        <h1 className="record-title">{target}</h1>
         <p className="lede">Exact published citation · ledger snapshot {face.cursor}</p>
       </header>
       <p className="loop" role="note">Citation versions are immutable publications. A correction creates another version; it does not rewrite the selected source. Current public visibility controls still apply.</p>

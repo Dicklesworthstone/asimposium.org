@@ -149,7 +149,7 @@ test("exact questions reject unrelated bodies and their registered aliases retai
   }) as unknown as typeof fetch;
   const html = renderToStaticMarkup(await QuestionsPage(props({ target: "Q-72", through: "80" })));
   expect(calls[0]).toBe(`${PRODUCTION_STOA_ORIGIN}/p/P-DEMO/questions.json?through=80&limit=8&target=Q-72`);
-  expect(html).toContain("<h1>Q-72</h1>");
+  expect(html).toContain('<h1 class="record-title">Q-72</h1>');
   expect(html).not.toContain("Filter recorded question status");
   response = face({ target: "Q-72" });
   expect((await stoaFetchQuestions("P-DEMO", undefined, { target: "Q-72" })).state).toBe("unavailable");

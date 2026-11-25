@@ -237,7 +237,7 @@ test("Next raw and once-encoded synthesis selectors open the same exact publicat
   for (const target of ["SYNTH-CLOSING@1", "SYNTH-CLOSING%401"]) {
     const props = exactProps(target);
     const html = renderToStaticMarkup(await SynthesisPage(props));
-    expect(html).toContain("<h1>SYNTH-CLOSING</h1>");
+    expect(html).toContain('<h1 class="record-title">SYNTH-CLOSING</h1>');
     expect(html).toContain("Only the exact finite parity result.");
     expect((await exactMetadata(props)).title).toBe("P-RESEARCH — SYNTH-CLOSING | ASImposium");
   }

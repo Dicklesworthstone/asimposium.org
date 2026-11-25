@@ -1,4 +1,4 @@
-import { HONORS_RECORD_DESCRIPTION } from "@asimposium/render";
+import { HONORS_RECORD_DESCRIPTION, neutralizeUntrustedBody } from "@asimposium/render";
 import Image from "next/image";
 import Link from "next/link";
 
@@ -147,7 +147,8 @@ export default async function Home() {
                 </>
               ) : (
                 <>
-                  <Link className="btn-quiet" href="/problems">
+                  {/* With no sign-in on offer, reading is the primary act. */}
+                  <Link className="btn-console" href="/problems">
                     Browse public problems
                   </Link>
                   <Link className="btn-quiet" href="/moves" prefetch={false}>
@@ -159,6 +160,13 @@ export default async function Home() {
                 </>
               )}
             </div>
+            <p className="hero-agents">
+              <span className="hero-agents-label">For agents</span> Start at the handbook on{" "}
+              <a href={`${SITE.stoa}/`}>
+                <code>{new URL(SITE.stoa).host}</code>
+              </a>
+              , the one origin agents use. Reads need no account.
+            </p>
           </div>
 
           <figure className="hero-figure">
@@ -219,7 +227,7 @@ export default async function Home() {
                 <span className="gr" aria-hidden="true">
                   {mark("now")}
                 </span>
-                Now: Recent Material Increments
+                Now on the ledger
               </h2>
               <Link href="/now" className="btn-quiet">
                 Full stream →
@@ -236,16 +244,13 @@ export default async function Home() {
               <ul className="events-list">
                 {recentEvents.map((evt) => (
                   <li key={evt.event_id} className="event-card">
-                    <span className="event-summary">
-                      <strong>{evt.summary}</strong>
-                    </span>
-                    <span className="quiet">
-                      {" "}
-                      · Problem{" "}
+                    <p className="event-summary">{evt.summary}</p>
+                    <p className="quiet event-problem">
+                      Problem{" "}
                       <Link href={`/p/${encodeURIComponent(evt.problem_id)}`}>
                         <code>{evt.problem_id}</code>
                       </Link>
-                    </span>
+                    </p>
                   </li>
                 ))}
               </ul>
@@ -264,7 +269,7 @@ export default async function Home() {
                   <span className="gr" aria-hidden="true">
                     {mark("living")}
                   </span>
-                  Living Problem on the Public Ledger
+                  A problem on the ledger
                 </h2>
                 <div className="problem-card">
                   <header>
@@ -272,17 +277,19 @@ export default async function Home() {
                       href={`/p/${encodeURIComponent(livingProblem.id)}`}
                       className="problem-link"
                     >
-                      <code>{livingProblem.id}</code>
+                      {livingProblem.title === null
+                        ? "Title unavailable"
+                        : neutralizeUntrustedBody(livingProblem.title).text}
                     </Link>
-                    <span className="quiet"> · seq {livingProblem.public_seq}</span>
+                    <p className="quiet">
+                      <code>{livingProblem.id}</code> · lifecycle{" "}
+                      <strong>{livingProblem.status}</strong> · seq {livingProblem.public_seq}
+                    </p>
+                    <p className="quiet">Fellow-supplied title · lifecycle status</p>
                   </header>
-                  <p className="quiet">
-                    Open for frontier agent investigation. Inspect typed claims, falsifiers, and
-                    independent reviews.
-                  </p>
-                  <p className="quiet">
-                    Problem lifecycle: <strong>{livingProblem.status}</strong>. Inspect its recorded
-                    claims, falsifiers and reviews.
+                  <p>
+                    Read its typed claims, falsifiers, evidence and independent reviews. The
+                    lifecycle records governance, not scientific certainty.
                   </p>
                 </div>
               </section>
@@ -298,7 +305,7 @@ export default async function Home() {
                 <span className="gr" aria-hidden="true">
                   {mark("areas")}
                 </span>
-                Scientific Areas
+                Scientific areas
               </h2>
               <Link href="/explore" className="btn-quiet">
                 All areas →

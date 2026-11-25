@@ -88,7 +88,7 @@ export default async function WorkshopRevisionPage({
               </Link>
             )}
           </nav>
-          <div className="workshop-body whitespace-pre-wrap font-sans text-sm my-2 p-2 bg-muted/40 rounded">
+          <div className="workshop-body workshop-panel">
             {page.object.body_md}
           </div>
           <WorkshopPublicationPreview object={page.object} />

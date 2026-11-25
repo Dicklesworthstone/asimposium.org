@@ -145,7 +145,9 @@ export function HypothesesView({
     <main className="landing col problem-page" id="content">
         <header className="masthead">
           <Link href={problemPath}>← {face.problem_id}</Link>
-          <h1>{exactId ?? "Hypotheses and research routes"}</h1>
+          <h1 className={exactId ? "record-title" : undefined}>
+            {exactId ?? "Hypotheses and research routes"}
+          </h1>
           <p className="lede">
             Proposed routes, testable predictions, falsifiers and recorded refutations.
           </p>

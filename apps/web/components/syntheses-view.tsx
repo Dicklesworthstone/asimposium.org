@@ -97,7 +97,7 @@ export function SynthesisView({ result }: {
     <main className="landing col problem-page break-words" id="content">
       <header className="masthead">
         <nav aria-label="Synthesis breadcrumbs"><Link href={`/p/${encodeURIComponent(item.problem_id)}`}>{item.problem_id}</Link>{" / "}<Link href={synthesesListPath(item.problem_id, "human")}>Published syntheses</Link></nav>
-        <h1>{item.synthesis_id}</h1>
+        <h1 className="record-title">{item.synthesis_id}</h1>
         <p className="lede">An immutable research digest covering ledger history through sequence {item.covers_through}.</p>
       </header>
       <p className="loop" role="note">{SYNTHESIS_NOTICE}</p>

@@ -126,7 +126,7 @@ test("exact conflict reads reach targets beyond the first page and reject differ
   }) as unknown as typeof fetch;
   const html = renderToStaticMarkup(await ConflictsPage(props({ target: "CF-72", through: "80" })));
   expect(calls[0]).toBe(`${PRODUCTION_STOA_ORIGIN}/p/P-DEMO/conflicts.json?through=80&limit=8&target=CF-72`);
-  expect(html).toContain("<h1>CF-72</h1>");
+  expect(html).toContain('<h1 class="record-title">CF-72</h1>');
   expect(html).toContain("All conflicts at this snapshot");
   expect(html).not.toContain("Filter recorded conflict status");
   response = face({ target: "CF-72" });

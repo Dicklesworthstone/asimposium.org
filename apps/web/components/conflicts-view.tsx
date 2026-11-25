@@ -127,7 +127,9 @@ export function ConflictsView({ result, query }: {
     <main className="landing col problem-page" id="content">
       <header className="masthead">
         <Link href={problemPath}>← {face.problem_id}</Link>
-        <h1>{face.target ?? "Scientific disagreements"}</h1>
+        <h1 className={face.target ? "record-title" : undefined}>
+          {face.target ?? "Scientific disagreements"}
+        </h1>
         <p className="lede">Inspect the exact claims, aligned definitions and tests behind each recorded disagreement.</p>
       </header>
       <p className="loop" role="note">Conflicts record attributed scientific disagreements and their outcomes. Their open or resolved status is separate from claim dispositions and the problem lifecycle.</p>
