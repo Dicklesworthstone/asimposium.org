@@ -1,8 +1,25 @@
 # D1 migration boundary
 
 This directory is the sole home for numbered D1 SQL migrations. The sequence now carries the enrollment, Krater, session/ledger, outbox, and chain-integrity
-schema through `0152_sponsor_commentary_screening.sql` and `0156_integrity_write_budget.sql`.
-Numbers 0149–0152 were added on both sides; each filename below is a distinct migration.
+schema through `0161_sponsor_commentary_screening.sql`.
+
+The November 25 merge assigned numbers 0149–0152 twice. The four parallel-branch
+migrations now follow the retained 0149–0157 sequence, with their SQL bytes
+unchanged:
+
+| Former filename | Current filename |
+| --- | --- |
+| `0149_outbox_consumers_and_embeddings.sql` | `0158_outbox_consumers_and_embeddings.sql` |
+| `0150_synthesis_drafts_and_external_reviews.sql` | `0159_synthesis_drafts_and_external_reviews.sql` |
+| `0151_transactional_email_outbox.sql` | `0160_transactional_email_outbox.sql` |
+| `0152_sponsor_commentary_screening.sql` | `0161_sponsor_commentary_screening.sql` |
+
+Before applying to an existing environment, inspect its migration journal and
+schema lineage using `infra/migrate.mjs`. A target that recorded any former
+filename needs an explicit lineage reconciliation; the runner must continue to
+refuse a conflicting journal. Do not erase receipts, relabel applied migrations,
+or rerun the renamed SQL against already-created tables. This source repair
+does not establish which migrations a hosted environment has applied.
 
 Migration `0155_integrity_cases.sql` adds restricted scientific-integrity cases,
 append-only case actions, and atomic command receipts. Each case retains its
@@ -12,7 +29,7 @@ requires a different resolving operator. Correction links pin existing scientifi
 publications. Apply it before the matching Worker. Scientific standing continues
 to be computed from the ledger's evidence and reviews.
 
-Migration `0152_sponsor_commentary_screening.sql` adds sponsor-owned screening
+Migration `0161_sponsor_commentary_screening.sql` adds sponsor-owned screening
 cases (`sponsor_screening_cases`), appeals (`sponsor_screening_case_appeals`),
 and pre-provider attempt reservations (`sponsor_commentary_attempt_reservations`)
 so sponsor commentary routes through the common contextual screening, hold,
@@ -23,7 +40,7 @@ cursor index for bounded private report history. It changes no report, decision,
 authorship or accountability. Apply it before the matching Worker so reads do
 not scan other sponsors' report histories.
 
-Migration `0151_transactional_email_outbox.sql` adds sponsor notification
+Migration `0160_transactional_email_outbox.sql` adds sponsor notification
 preferences, a private outbox restricted to four transactional email classes,
 and spend counters for bounded delivery. Apply it before the email Worker.
 
@@ -39,7 +56,7 @@ or expired. Terminal question events release existing generic reservations.
 Apply it before the matching Worker. Public question history continues to show
 recorded lifecycle terms; current reservation availability comes from `leases`.
 
-Migration `0150_synthesis_drafts_and_external_reviews.sql` stores unpublished
+Migration `0159_synthesis_drafts_and_external_reviews.sql` stores unpublished
 Fellow synthesis drafts and operator-verified review attestations for famous
 problem resolution. Apply it before enabling sponsor publication of drafts.
 
@@ -52,7 +69,7 @@ preserving public events, receipts, notices and cursors. Publication rechecks
 current sponsor, grant, session and instruction scope after screening. Apply it
 before the matching Worker; no private instruction text is made public.
 
-Migration `0149_outbox_consumers_and_embeddings.sql` adds public-ledger projections
+Migration `0158_outbox_consumers_and_embeddings.sql` adds public-ledger projections
 for the Outbox consumers. They exclude private workshop objects and drafts.
 
 Migration `0149_question_request_inbox.sql` atomically queues newly published

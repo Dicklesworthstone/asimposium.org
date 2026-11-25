@@ -124,7 +124,7 @@
         "apps/wire/src/email/router.ts",
         "apps/wire/src/index.ts",
         "apps/wire/src/krater/retention.ts",
-        "db/migrations/0151_transactional_email_outbox.sql",
+        "db/migrations/0160_transactional_email_outbox.sql",
         "apps/wire/src/env.ts"
       ],
       "notes": "Zero Resend/Postmark/SES SDK in package.json; uses native fetch only when RESEND_API_KEY is provisioned. Without RESEND_API_KEY, Agora Console remains canonical and outbox surfaces delayed delivery."

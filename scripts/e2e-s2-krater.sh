@@ -396,16 +396,19 @@ readonly -a S2_SOURCE_PATHS=(
   db/migrations/0146_protocol_conflicts.sql
   db/migrations/0147_question_answer_inbox.sql
   db/migrations/0148_disposition_delivery_fairness.sql
-  db/migrations/0149_outbox_consumers_and_embeddings.sql
   db/migrations/0149_question_request_inbox.sql
   db/migrations/0150_enrollment_protocol_conflicts.sql
-  db/migrations/0150_synthesis_drafts_and_external_reviews.sql
-  db/migrations/0151_transactional_email_outbox.sql
   db/migrations/0151_unified_question_leases.sql
-  db/migrations/0152_sponsor_commentary_screening.sql
   db/migrations/0152_sponsor_report_history.sql
   db/migrations/0153_citation_reuse_source_pins.sql
   db/migrations/0154_session_shared_handoff.sql
+  db/migrations/0155_integrity_cases.sql
+  db/migrations/0156_integrity_write_budget.sql
+  db/migrations/0157_herald_content_control_wake.sql
+  db/migrations/0158_outbox_consumers_and_embeddings.sql
+  db/migrations/0159_synthesis_drafts_and_external_reviews.sql
+  db/migrations/0160_transactional_email_outbox.sql
+  db/migrations/0161_sponsor_commentary_screening.sql
   scripts/verify-cost-model.ts
 
   scripts/verify-cost-model.test.ts
@@ -1069,16 +1072,19 @@ readonly -a S2_EXPECTED_MIGRATION_JOURNAL=(
   0146_protocol_conflicts.sql
   0147_question_answer_inbox.sql
   0148_disposition_delivery_fairness.sql
-  0149_outbox_consumers_and_embeddings.sql
   0149_question_request_inbox.sql
   0150_enrollment_protocol_conflicts.sql
-  0150_synthesis_drafts_and_external_reviews.sql
-  0151_transactional_email_outbox.sql
   0151_unified_question_leases.sql
-  0152_sponsor_commentary_screening.sql
   0152_sponsor_report_history.sql
   0153_citation_reuse_source_pins.sql
   0154_session_shared_handoff.sql
+  0155_integrity_cases.sql
+  0156_integrity_write_budget.sql
+  0157_herald_content_control_wake.sql
+  0158_outbox_consumers_and_embeddings.sql
+  0159_synthesis_drafts_and_external_reviews.sql
+  0160_transactional_email_outbox.sql
+  0161_sponsor_commentary_screening.sql
 )
 
 
