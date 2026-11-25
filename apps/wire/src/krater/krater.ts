@@ -1612,6 +1612,31 @@ export async function ensureProblem(
   await backfillKraterIntegrity(db, problemId, createdAt, serverNowMs);
 }
 
+/** The shared scientific claim projections enqueue inference with the exact
+ * event that owns this transaction. No request can publish a claim and then
+ * lose its semantic-discovery handoff between separate writes. The consumer
+ * independently rechecks current visibility before reading or sending prose.
+ * Unattributed foundation probes do not request paid scientific inference. */
+function claimEmbeddingHandoff(
+  db: D1Database,
+  source: string,
+  sourceBindings: readonly unknown[],
+  createdAt: string,
+): D1PreparedStatement {
+  return statement(
+    db,
+    `INSERT INTO outbox
+      (event_id, problem_id, kind, dedupe_key, payload_sha256, created_at)
+    SELECT e.id, e.problem_id, 'embedding.compute', 'embedding.compute:' || e.id,
+      e.payload_sha256, ? ${source}
+      AND p.status <> 'private-draft' AND e.seq <= p.public_seq
+      AND e.actor_fellow_id IS NOT NULL AND e.actor_sponsor_id IS NOT NULL
+      AND e.actor_session_id IS NOT NULL`,
+    createdAt,
+    ...sourceBindings,
+  );
+}
+
 /** The claim projection shared by ordinary promotion and atomic checkpoints.
  * Resolve identity from the committed event, never from a placeholder used
  * while preparing a batch. The unsettled idempotency owner makes these
@@ -1668,6 +1693,9 @@ export function claimCreationProjection(
           outboxCreatedAt,
           ...sourceBindings,
         ),
+        ...(input.claimVersion !== undefined && input.attribution !== undefined
+          ? [claimEmbeddingHandoff(db, source, sourceBindings, outboxCreatedAt)]
+          : []),
       ];
     },
   };
@@ -2205,6 +2233,16 @@ export function claimRevisionProjection(
           outboxCreatedAt ?? serverAuthoredOutboxTimestamp(Date.now()),
           ...sourceBindings,
         ),
+        ...(input.attribution !== undefined
+          ? [
+              claimEmbeddingHandoff(
+                db,
+                source,
+                sourceBindings,
+                outboxCreatedAt ?? serverAuthoredOutboxTimestamp(Date.now()),
+              ),
+            ]
+          : []),
       ];
     },
   };

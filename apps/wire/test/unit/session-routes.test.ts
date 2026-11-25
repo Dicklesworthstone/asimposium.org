@@ -15672,14 +15672,13 @@ describe("committed promotion outbox nudge", () => {
     });
     expect(promoted.status).toBe(201);
     expect(recorder.scheduled).toHaveLength(1);
-    // Observed, not asserted from source order: the outbox row was already
-    // durable at the instant waitUntil received the wake.
-    expect(await recorder.outboxAtSchedule[0]).toEqual({ count: 1 });
+    // Both search and semantic handoffs were durable before the wake.
+    expect(await recorder.outboxAtSchedule[0]).toEqual({ count: 2 });
     // What waitUntil received is a promise, and it settles without surfacing.
     const wake = recorder.scheduled[0] as Promise<unknown>;
     expect(typeof wake?.then).toBe("function");
     expect(await wake).toBeUndefined();
-    expect(await outboxRows()).toEqual({ count: 1 });
+    expect(await outboxRows()).toEqual({ count: 2 });
   });
 
   test("does not wake the drainer on a refused promotion", async () => {
@@ -15715,7 +15714,7 @@ describe("committed promotion outbox nudge", () => {
     expect(conflicted.status).toBe(409);
     // The conflict reached no commit, so it added no wake.
     expect(recorder.scheduled).toHaveLength(1);
-    expect(await outboxRows()).toEqual({ count: 1 });
+    expect(await outboxRows()).toEqual({ count: 2 });
   });
 
   test("does not wake the drainer when the promotion batch rolls back", async () => {
@@ -15764,7 +15763,7 @@ describe("committed promotion outbox nudge", () => {
     expect(await replayed.text()).toBe(firstBytes);
     // The replay answers before any commit, so it reaches no wake at all.
     expect(recorder.scheduled).toHaveLength(1);
-    expect(await outboxRows()).toEqual({ count: 1 });
+    expect(await outboxRows()).toEqual({ count: 2 });
   });
 
   test("an unschedulable or rejecting wake never changes the committed response", async () => {
@@ -15811,7 +15810,7 @@ describe("committed promotion outbox nudge", () => {
         await prepared.db
           .prepare("SELECT COUNT(*) AS count FROM outbox WHERE state = 'pending'")
           .first<{ count: number }>(),
-      ).toEqual({ count: 1 });
+      ).toEqual({ count: 2 });
       expect(recorder.scheduled, plant).toHaveLength(1);
     }
   });
@@ -15950,7 +15949,7 @@ describe("committed promotion outbox nudge", () => {
       body: promoteBody(prepared.workshopId, "A duplicate wake changes no durable row."),
     });
     expect(promoted.status).toBe(201);
-    expect(await outboxRows()).toEqual({ count: 1 });
+    expect(await outboxRows()).toEqual({ count: 2 });
 
     let wakes = 0;
     const wakeEnv = {
@@ -15973,12 +15972,12 @@ describe("committed promotion outbox nudge", () => {
       expect(accepted.status, `attempt ${attempt}`).toBe(202);
     }
     expect(wakes).toBe(3);
-    // Three wakes, one row, unchanged state: replaying the wake cannot duplicate
+    // Three wakes, two jobs, unchanged state: replaying the wake cannot duplicate
     // or terminalize durable work by itself.
-    expect(await outboxRows()).toEqual({ count: 1 });
+    expect(await outboxRows()).toEqual({ count: 2 });
     expect(
       await db.prepare("SELECT COUNT(*) AS count FROM outbox").first<{ count: number }>(),
-    ).toEqual({ count: 1 });
+    ).toEqual({ count: 2 });
   });
 
   /**
@@ -16072,12 +16071,12 @@ describe("committed promotion outbox nudge", () => {
     // Without app.ts propagating the context this is 0 -- the mounted nudge threw
     // on an absent ExecutionContext and was swallowed. One wake proves the mount.
     expect(recorder.scheduled).toHaveLength(1);
-    expect(await recorder.outboxAtSchedule[0]).toEqual({ count: 1 });
+    expect(await recorder.outboxAtSchedule[0]).toEqual({ count: 2 });
     const wake = recorder.scheduled[0] as Promise<unknown>;
     expect(await wake).toBeUndefined();
     // The wake reached the drainer's /nudge, not another route.
     expect(nudgePaths).toEqual(["/nudge"]);
-    expect(await outboxRows()).toEqual({ count: 1 });
+    expect(await outboxRows()).toEqual({ count: 2 });
   });
 
   test("a mounted promotion without an ExecutionContext still commits and never fails", async () => {
@@ -16095,7 +16094,7 @@ describe("committed promotion outbox nudge", () => {
     expect(await promoted.json()).toMatchObject({ claim_id: "C-1", seq: 1 });
     expect(recorder.scheduled).toHaveLength(0);
     expect(nudgePaths).toEqual([]);
-    expect(await outboxRows()).toEqual({ count: 1 });
+    expect(await outboxRows()).toEqual({ count: 2 });
   });
 
   test("the production mount holds a promotion when its AI binding is absent", async () => {
@@ -16267,12 +16266,12 @@ describe("committed promotion outbox nudge", () => {
       body,
     });
     // The replay answers from the durable receipt before any new commit, so it
-    // reaches no wake at all: one wake, one drainer call, one row.
+    // reaches no wake at all: one wake, one drainer call, two unchanged jobs.
     expect(replay.status).toBe(200);
     expect(await replay.text()).toBe(firstBytes);
     expect(recorder.scheduled).toHaveLength(1);
     expect(nudgePaths).toEqual(["/nudge"]);
-    expect(await outboxRows()).toEqual({ count: 1 });
+    expect(await outboxRows()).toEqual({ count: 2 });
   });
 
   test("a mounted idempotency conflict does not wake the drainer a second time", async () => {
@@ -16289,7 +16288,7 @@ describe("committed promotion outbox nudge", () => {
     // The committed promotion woke the drainer exactly once through the mount.
     expect(recorder.scheduled).toHaveLength(1);
     expect(nudgePaths).toEqual(["/nudge"]);
-    expect(await outboxRows()).toEqual({ count: 1 });
+    expect(await outboxRows()).toEqual({ count: 2 });
 
     const conflicted = await call(`/v1/sessions/${prepared.sessionId}/promote`, {
       method: "POST",
@@ -16311,10 +16310,10 @@ describe("committed promotion outbox nudge", () => {
     // non-vacuity: a mount that scheduled or forwarded a wake before rejecting the
     // conflict would turn the length to 2 and nudgePaths to ["/nudge", "/nudge"]
     // -- so a schedule moved or added ahead of the conflict goes red on those two.
-    // The separate pending-count-one assertion proves it left no second durable row.
+    // The pending count proves neither durable handoff was duplicated.
     expect(recorder.scheduled).toHaveLength(1);
     expect(nudgePaths).toEqual(["/nudge"]);
-    expect(await outboxRows()).toEqual({ count: 1 });
+    expect(await outboxRows()).toEqual({ count: 2 });
   });
 
   test("PLANTED: prior-handback selection is a total order when closed_at ties (7llj)", async () => {
@@ -22044,7 +22043,7 @@ describe("committed promotion outbox nudge", () => {
           claim_versions: 1,
           claim_projections: 1,
           evidence: 1,
-          outbox: 1,
+          outbox: 2,
           screening_publications: 2,
         });
 

@@ -1117,6 +1117,7 @@ export class KraterOutboxDrainer {
         }
         let delivered = 0;
         let quarantined = 0;
+        let deferredConsumerFailure: Error | undefined;
         for (const row of rows) {
           const malformed = validateOutboxRow(row);
           if (malformed !== null) {
@@ -1156,6 +1157,16 @@ export class KraterOutboxDrainer {
               scanAfterId = row.id;
               continue;
             }
+            if (row.kind !== "search.index") {
+              // Optional async providers must not block a later public search
+              // handoff. Keep this row pending and continue the bounded page;
+              // the normal wrap scan revisits it on a subsequent alarm. The
+              // direct drain still reports failure after preserving progress.
+              deferredConsumerFailure ??=
+                error instanceof Error ? error : new Error("KRATER_OUTBOX_CONSUMER_UNAVAILABLE");
+              scanAfterId = row.id;
+              continue;
+            }
             throw error;
           }
           const intercepted = await this.beforeAcknowledgeRow(
@@ -1171,8 +1182,9 @@ export class KraterOutboxDrainer {
             await this.updateCounters((current) => ({
               ...current,
               delivered: saturatingCounterAdd(current.delivered),
-              failures: 0,
-              last_backoff_ms: null,
+              failures: deferredConsumerFailure === undefined ? 0 : current.failures,
+              last_backoff_ms:
+                deferredConsumerFailure === undefined ? null : current.last_backoff_ms,
               last_phase: "delivered",
             }));
             await this.state.storage.delete(attemptKey(row.event_id));
@@ -1217,6 +1229,7 @@ export class KraterOutboxDrainer {
           if (reclaimNeedsAlarm) await this.setAlarm(OUTBOX_ALARM_BASE_MS);
           else await this.setIdleReconcileAlarm();
         }
+        if (deferredConsumerFailure !== undefined) throw deferredConsumerFailure;
         return this.formatCompletedDrain(source, delivered, quarantined);
       } catch (error) {
         // Re-arm explicitly so fetch- and alarm-driven drains use the same

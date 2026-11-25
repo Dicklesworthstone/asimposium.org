@@ -181,13 +181,49 @@ export async function outboxFairness({ call, enroll, fixtures, env, userAgent })
   assert.equal(
     (
       await env.DB.prepare(
-        "SELECT COUNT(*) AS n FROM outbox WHERE problem_id = ? AND state = 'delivered'",
+        "SELECT COUNT(*) AS n FROM outbox WHERE problem_id = ? AND kind = 'search.index' AND state = 'delivered'",
       )
         .bind(problem)
         .first()
     ).n,
     2,
   );
+  // Production promotions, not a fixture enqueue, must have produced and
+  // delivered exactly one semantic-discovery job per immutable claim version.
+  const embedded = (
+    await env.DB.prepare(
+      `SELECT v.claim_id, v.version, v.model_id, v.model_version, v.event_id,
+         e.payload_sha256 = v.payload_sha256 AS digest_bound, o.state
+       FROM public_claim_embeddings v
+       JOIN events e ON e.id = v.event_id AND e.problem_id = v.problem_id
+       JOIN outbox o ON o.event_id = e.id AND o.kind = 'embedding.compute'
+       WHERE v.problem_id = ? ORDER BY v.claim_id`,
+    )
+      .bind(problem)
+      .all()
+  ).results;
+  assert.deepEqual(
+    embedded.map((row) => row.claim_id).sort(),
+    [first.claim_id, later.claim_id].sort(),
+  );
+  assert.ok(
+    embedded.every(
+      (row) => row.version === 1 && row.digest_bound === 1 && row.state === "delivered",
+    ),
+  );
+  assert.ok(
+    embedded.every(
+      (row) => row.model_id === "local-fixture-hash-embedding" && row.model_version === "v1",
+    ),
+  );
+  const embeddingJobs = (
+    await env.DB.prepare(
+      "SELECT COUNT(*) AS n FROM outbox WHERE problem_id = ? AND kind = 'embedding.compute'",
+    )
+      .bind(problem)
+      .first()
+  ).n;
+  assert.equal(embeddingJobs, 2, "Workshop/gap/relation events cannot request claim inference");
   const search = await call("/search.json?q=divisible&kind=claim&limit=50");
   assert.ok(search.items.some((item) => item.problem_id === problem && item.id === later.claim_id));
   assert.equal((await drain()).status, 200);
@@ -203,8 +239,9 @@ export async function outboxFairness({ call, enroll, fixtures, env, userAgent })
       unsupported_events: unsupported.length,
       fresh_unsupported_jobs: freshJobs,
       indexed_claims: indexed.length,
+      embedded_claims: embedded.length,
       fixtures:
-        "sponsor enrollment, empty problem, classifier decisions, restored legacy outbox handoffs",
+        "sponsor enrollment, empty problem, classifier decisions, deterministic embedding provider, restored legacy outbox handoffs",
     }),
   );
 }

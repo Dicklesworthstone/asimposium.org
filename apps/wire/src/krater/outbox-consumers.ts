@@ -102,7 +102,7 @@ function normalizeVector(raw: readonly number[]): number[] | null {
     if (typeof v !== "number" || !Number.isFinite(v)) return null;
     normSq += v * v;
   }
-  if (normSq <= 0) return null;
+  if (!Number.isFinite(normSq) || normSq <= 0) return null;
   const norm = Math.sqrt(normSq);
   return raw.map((v) => Math.round((v / norm) * 1_000_000) / 1_000_000);
 }
@@ -184,8 +184,7 @@ async function applyEmbeddingCompute(
     "SELECT 1 AS hit FROM workshop_objects WHERE workshop_id = ? LIMIT 1",
   )
     .bind(row.event_id)
-    .first<{ hit: number }>()
-    .catch(() => null);
+    .first<{ hit: number }>();
   if (workshopHit !== null) {
     throw new OutboxConsumerSourceError("PRIVATE_CONTENT_FORBIDDEN");
   }
@@ -239,8 +238,57 @@ async function applyEmbeddingCompute(
     throw new OutboxConsumerSourceError("OUTBOX_PAYLOAD_INVALID");
   }
 
+  // A crash after storing a vector but before acknowledging the handoff must
+  // not buy the same inference again. Reuse only a validated vector bound to
+  // this exact immutable publication; a changed version/digest never matches.
+  const retained = await env.DB.prepare(
+    `SELECT model_id, model_version, dimensions, vector_json, created_at
+     FROM public_claim_embeddings
+     WHERE problem_id = ? AND claim_id = ? AND version = ?
+       AND event_id = ? AND payload_sha256 = ?`,
+  )
+    .bind(
+      source.problem_id,
+      source.claim_id,
+      source.version,
+      source.event_id,
+      source.payload_sha256,
+    )
+    .first<{
+      model_id: string;
+      model_version: string;
+      dimensions: number;
+      vector_json: string;
+      created_at: string;
+    }>();
+  let reused: EmbeddingResult | undefined;
+  if (retained !== null) {
+    let vector: unknown;
+    try {
+      vector = JSON.parse(retained.vector_json);
+    } catch {
+      vector = null;
+    }
+    if (
+      Array.isArray(vector) &&
+      vector.length === retained.dimensions &&
+      normalizeVector(vector) !== null &&
+      retained.model_id.length >= 1 &&
+      retained.model_id.length <= 128 &&
+      retained.model_version.length >= 1 &&
+      retained.model_version.length <= 64
+    ) {
+      reused = {
+        vector,
+        modelId: retained.model_id,
+        modelVersion: retained.model_version,
+      };
+    }
+  }
   let embedding: EmbeddingResult;
-  if (env.embedText !== undefined) {
+  if (reused !== undefined) {
+    embedding = reused;
+  } else if (env.embedText !== undefined) {
     embedding = await env.embedText(statement.slice(0, MAX_EMBEDDING_TEXT_CHARS));
   } else if (env.AI !== undefined) {
     embedding = await computeWorkersAiEmbedding(env.AI, statement);
@@ -252,7 +300,8 @@ async function applyEmbeddingCompute(
   if (normalized === null) {
     throw new Error("EMBEDDING_VECTOR_INVALID");
   }
-  const nowIso = new Date().toISOString();
+  const nowIso =
+    reused !== undefined && retained !== null ? retained.created_at : new Date().toISOString();
 
   // Re-verify public, non-redacted, non-hidden visibility atomically at commit time
   // so a claim hidden/redacted concurrently during async embedding inference never

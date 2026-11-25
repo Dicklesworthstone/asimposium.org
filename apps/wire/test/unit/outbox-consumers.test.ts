@@ -2,6 +2,17 @@ import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import type { D1Database, DurableObjectState } from "@cloudflare/workers-types";
 import { inspectOutboxDb } from "../../../../scripts/ops-outbox-reconcile.ts";
+import { claimContentDigest } from "../../src/krater/claim-version.ts";
+import {
+  canonicalJson,
+  claimCreationProjection,
+  ensureProblem,
+  type KraterWriteInput,
+  sha256Hex,
+  writeClaim,
+  writeClaimRevision,
+  writeLedgerBatch,
+} from "../../src/krater/krater.ts";
 import {
   cosineSimilarity,
   enqueueOutboxJob,
@@ -9,7 +20,7 @@ import {
 } from "../../src/krater/outbox-consumers.ts";
 import { KraterOutboxDrainer, validateOutboxRow } from "../../src/krater/outbox-do.ts";
 import { selectCollapseDuplicateMove } from "../../src/mega-commands/duplicate-moves.ts";
-import { migratedSqlite } from "../support/migrated-sqlite.ts";
+import { migratedSqlite, migratedSqliteD1 } from "../support/migrated-sqlite.ts";
 
 function localD1(sqlite: ReturnType<typeof migratedSqlite>): D1Database {
   const prepare = (query: string) => {
@@ -155,6 +166,237 @@ function seedPublicClaim(
   );
   return { sha, ts };
 }
+
+function scientificClaimInput(
+  problemId: string,
+  ordinal: number,
+  statement = `Every finite path with ${ordinal} vertices has at most ${ordinal} edges.`,
+): KraterWriteInput & { readonly attribution: NonNullable<KraterWriteInput["attribution"]> } {
+  return {
+    problemId,
+    claimId: `C-${ordinal}`,
+    eventId: `E-${problemId}-${ordinal}`,
+    idempotencyKey: `claim-${ordinal}`,
+    statement,
+    claimVersion: { kind: "conjecture", falsifier: "A finite counterexample." },
+    attribution: {
+      fellowId: "F-CN2N",
+      sponsorId: "usr_cn2n",
+      sessionId: "S-CN2N",
+      modelSelfDeclared: "test-model",
+      harness: "test-harness",
+    },
+    createdAt: new Date().toISOString(),
+  };
+}
+
+describe("committed scientific claims produce semantic-discovery handoffs", () => {
+  test("creation and revision atomically enqueue exact-version embedding jobs; request replays add none", async () => {
+    const { db, sqlite } = migratedSqliteD1();
+    try {
+      const problemId = "P-PRODUCER";
+      const input = scientificClaimInput(problemId, 1);
+      await ensureProblem(db, problemId, input.createdAt);
+      sqlite.run("UPDATE problems SET status = 'active' WHERE id = ?", [problemId]);
+      const created = await writeClaim(db, input);
+      await writeClaim(db, input);
+      expect(
+        sqlite.query("SELECT kind, event_id, payload_sha256 FROM outbox ORDER BY id").all(),
+      ).toEqual([
+        { kind: "search.index", event_id: created.eventId, payload_sha256: created.payloadSha256 },
+        {
+          kind: "embedding.compute",
+          event_id: created.eventId,
+          payload_sha256: created.payloadSha256,
+        },
+      ]);
+      // Session promotion supplies this exact immutable version in its atomic
+      // companion. The low-level producer test seeds that existing domain row.
+      sqlite.run(
+        `INSERT INTO claim_versions
+          (problem_id, claim_id, version, kind, statement, falsifier, editor_fellow_id, created_at, content_digest)
+         VALUES (?, 'C-1', 1, 'conjecture', ?, 'A finite counterexample.', 'F-CN2N', ?, ?)`,
+        [
+          problemId,
+          input.statement,
+          input.createdAt,
+          await claimContentDigest(
+            {
+              kind: "conjecture",
+              statement: input.statement,
+              falsifier: "A finite counterexample.",
+            },
+            sha256Hex,
+          ),
+        ],
+      );
+      const revisedStatement = "Every finite simple path has one fewer edge than vertices.";
+      const revision = {
+        problemId,
+        claimId: "C-1",
+        eventId: "E-PRODUCER-REVISION",
+        idempotencyKey: "claim-revision-1",
+        baseVersion: 1,
+        newVersion: 2,
+        kind: "conjecture",
+        statement: revisedStatement,
+        falsifier: "A finite counterexample.",
+        contentDigest: await claimContentDigest(
+          {
+            kind: "conjecture",
+            statement: revisedStatement,
+            falsifier: "A finite counterexample.",
+          },
+          sha256Hex,
+        ),
+        editorFellowId: "F-CN2N",
+        normHash: await sha256Hex(revisedStatement),
+        attribution: input.attribution,
+        createdAt: new Date().toISOString(),
+      };
+      const revised = await writeClaimRevision(db, revision);
+      await writeClaimRevision(db, revision);
+      expect(sqlite.query("SELECT COUNT(*) AS n FROM events").get()).toEqual({ n: 2 });
+      expect(
+        sqlite
+          .query(
+            "SELECT event_id, payload_sha256 FROM outbox WHERE kind = 'embedding.compute' ORDER BY id",
+          )
+          .all(),
+      ).toEqual([
+        { event_id: created.eventId, payload_sha256: created.payloadSha256 },
+        { event_id: revised.eventId, payload_sha256: revised.payloadSha256 },
+      ]);
+    } finally {
+      sqlite.close();
+    }
+  });
+
+  test("atomic multi-claim publication composes one semantic handoff per committed member", async () => {
+    const { db, sqlite } = migratedSqliteD1();
+    try {
+      const problemId = "P-BATCHDISCOVERY";
+      const first = scientificClaimInput(problemId, 1);
+      await ensureProblem(db, problemId, first.createdAt);
+      sqlite.run("UPDATE problems SET status = 'active' WHERE id = ?", [problemId]);
+      const members = [first, scientificClaimInput(problemId, 2)].map((input) => ({
+        input: {
+          problemId,
+          eventId: input.eventId,
+          idempotencyKey: input.idempotencyKey,
+          requestDigest: "a".repeat(64),
+          eventType: "claim.created",
+          objectKind: "claim",
+          objectId: input.claimId,
+          objectVersion: 1,
+          payloadJson: canonicalJson({
+            claim_id: input.claimId,
+            kind: "conjecture",
+            statement: input.statement,
+            falsifier: "A finite counterexample.",
+          }),
+          createdAt: input.createdAt,
+          attribution: input.attribution,
+        },
+        projection: claimCreationProjection(db, input),
+        causedByEventIds: [],
+      }));
+      await writeLedgerBatch(db, members, () => []);
+      expect(
+        sqlite
+          .query("SELECT event_id FROM outbox WHERE kind = 'embedding.compute' ORDER BY id")
+          .all(),
+      ).toEqual(members.map((member) => ({ event_id: member.input.eventId })));
+      expect(sqlite.query("SELECT COUNT(*) AS n FROM events").get()).toEqual({ n: 2 });
+    } finally {
+      sqlite.close();
+    }
+  });
+
+  test("rolled-back writes, private drafts and unattributed probes cannot enqueue paid inference", async () => {
+    const { db, sqlite } = migratedSqliteD1();
+    try {
+      const input = scientificClaimInput("P-ROLLBACKDISCOVERY", 1);
+      await ensureProblem(db, input.problemId, input.createdAt);
+      sqlite.run("UPDATE problems SET status = 'active' WHERE id = ?", [input.problemId]);
+      await expect(
+        writeClaim(
+          db,
+          input,
+          {},
+          {
+            statementsAfterIdempotencySettlement: () => [
+              db.prepare("SELECT json_extract('[]', '$[OUTBOX_TEST_ABORT]')"),
+            ],
+          },
+        ),
+      ).rejects.toThrow();
+      expect(sqlite.query("SELECT COUNT(*) AS n FROM outbox").get()).toEqual({ n: 0 });
+      expect(sqlite.query("SELECT COUNT(*) AS n FROM events").get()).toEqual({ n: 0 });
+      sqlite.run("UPDATE problems SET status = 'private-draft' WHERE id = ?", [input.problemId]);
+      await writeClaim(db, input);
+      const probe = scientificClaimInput("P-FOUNDATIONPROBE", 1);
+      await ensureProblem(db, probe.problemId, probe.createdAt);
+      sqlite.run("UPDATE problems SET status = 'active' WHERE id = ?", [probe.problemId]);
+      await writeClaim(db, { ...probe, claimVersion: undefined, attribution: undefined });
+      expect(
+        sqlite.query("SELECT COUNT(*) AS n FROM outbox WHERE kind = 'embedding.compute'").get(),
+      ).toEqual({ n: 0 });
+    } finally {
+      sqlite.close();
+    }
+  });
+
+  test("a failed embedding provider leaves retryable work without starving subsequent search indexing", async () => {
+    const { db, sqlite } = migratedSqliteD1();
+    try {
+      const first = scientificClaimInput("P-DISCOVERYOUTAGE", 1);
+      await ensureProblem(db, first.problemId, first.createdAt);
+      sqlite.run("UPDATE problems SET status = 'active' WHERE id = ?", [first.problemId]);
+      await writeClaim(db, first);
+      await writeClaim(db, scientificClaimInput(first.problemId, 2));
+      const state = fakeDoState();
+      let unavailable = true;
+      let calls = 0;
+      const drainer = new KraterOutboxDrainer(state, {
+        DB: db,
+        embedText: async () => {
+          calls++;
+          if (unavailable) throw new Error("TEST_EMBEDDING_OUTAGE");
+          return { vector: [1, 0], modelId: "test-model", modelVersion: "v1" };
+        },
+      });
+      const firstDrain = await drainer.fetch(
+        new Request("https://krater-outbox.internal/drain-now", { method: "POST", body: "{}" }),
+      );
+      expect(firstDrain.status).toBe(400);
+      expect(sqlite.query("SELECT claim_id FROM public_claim_fts ORDER BY claim_id").all()).toEqual(
+        [{ claim_id: "C-1" }, { claim_id: "C-2" }],
+      );
+      expect(
+        sqlite.query("SELECT state FROM outbox WHERE kind = 'embedding.compute' ORDER BY id").all(),
+      ).toEqual([{ state: "pending" }, { state: "pending" }]);
+      expect(await state.storage.getAlarm()).not.toBeNull();
+      unavailable = false;
+      await drainer.alarm();
+      expect(
+        sqlite.query("SELECT COUNT(*) AS n FROM outbox WHERE state = 'pending'").get(),
+      ).toEqual({ n: 0 });
+      const callsAfterRecovery = calls;
+      sqlite.run(
+        "UPDATE outbox SET state = 'pending', delivered_at = NULL WHERE kind = 'embedding.compute'",
+      );
+      await drainer.alarm();
+      await drainer.alarm();
+      expect(calls).toBe(callsAfterRecovery);
+      expect(sqlite.query("SELECT COUNT(*) AS n FROM public_claim_embeddings").get()).toEqual({
+        n: 2,
+      });
+    } finally {
+      sqlite.close();
+    }
+  });
+});
 
 describe("KraterOutboxDrainer extended consumers, privacy fence, and semantic duplicate moves (cn2n)", () => {
   test("validateOutboxRow accepts all 6 launch-scope kinds and refuses Tier-2 webhook.deliver", () => {

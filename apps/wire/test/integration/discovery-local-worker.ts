@@ -13,6 +13,7 @@ import {
 import type {
   D1Database,
   D1PreparedStatement,
+  DurableObjectState,
   R2Bucket,
   ScheduledController,
   Request as WorkerRequest,
@@ -55,6 +56,10 @@ import {
   writeLedgerEvent,
 } from "../../src/krater/krater.ts";
 import {
+  type KraterOutboxEnv,
+  KraterOutboxDrainer as ProductionKraterOutboxDrainer,
+} from "../../src/krater/outbox-do.ts";
+import {
   applyDeletionJournal,
   deletionSafeRestore,
   expireSecurityRecords,
@@ -88,7 +93,24 @@ import { normHash } from "../../src/split/policy.ts";
 import { syntheticScreeningObservation } from "../support/screening.ts";
 
 export { HeraldRoom } from "../../src/herald/room.ts";
-export { KraterOutboxDrainer } from "../../src/krater/outbox-do.ts";
+
+/** Fixture provider only: real D1 and DO consumers exercise enqueue/delivery
+ * without external inference. Hash vectors make no semantic-quality claim. */
+export class KraterOutboxDrainer extends ProductionKraterOutboxDrainer {
+  constructor(state: DurableObjectState, env: KraterOutboxEnv) {
+    super(state, {
+      ...env,
+      embedText: async (text) => {
+        const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+        return {
+          vector: Array.from(new Uint8Array(digest), (byte) => (byte - 127.5) / 128),
+          modelId: "local-fixture-hash-embedding",
+          modelVersion: "v1",
+        };
+      },
+    });
+  }
+}
 
 import { deliverHeraldRooms } from "../../src/herald/outbox.ts";
 import {
