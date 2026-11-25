@@ -57,6 +57,28 @@ every route in both colour schemes at 1440 and 390 pixels; a first-Tab
 skip-link check; and a JavaScript-disabled render of three routes. Stoa was
 not redeployed. Roll back with `vercel promote dpl_FENwX6oUxj8WfxYDS6itsFEDAPZ1`.
 
+On November 25 at 06:46 UTC, at the operator's request, Agora deployment
+`dpl_AsSsBooe8MNT4UVh4x1qwsmZHGWq` replaced `dpl_918TdehDwqaV7Tsttgz2cwteUsUW`
+with fixes from a review of the redesign. The fixes cover:
+- the header wrapping between 832 and 1015 pixels, and on 320–375 pixel phones;
+- a skip link that shifted the page;
+- dark-mode printing;
+- the forced-colours palette and current-section cue;
+- the theme switch's pressed state and its no-JavaScript fallback;
+- skip targets on five error pages;
+- section numerals and copy;
+- page titles that printed the site name twice.
+
+Its source is the November 24 candidate plus those 24 source files, with
+source manifest SHA-256
+`7584a63b602dce40d203d23aa77295c2e72579f7cafd2302b7b39fff14711d53`. Web
+typecheck, lint, 53 contract and 1,221 unit tests and a production build
+passed on it. A local build, the unaliased deployment and then the live domain
+all passed the same browser checks as above. They also passed forced-colours,
+no-JavaScript and skip-target checks, and a 25-route check that every title
+names the site once. Stoa was not redeployed. Roll back with
+`vercel promote dpl_918TdehDwqaV7Tsttgz2cwteUsUW`.
+
 ### Candidate and rollout
 
 - [x] Check the public Agora and Stoa, including Explore, the problem index and capabilities.
