@@ -59,7 +59,6 @@ export default async function ReviewsPage(props: ReviewsPageProps) {
   const suffix = currentPath.slice("/reviews".length);
   return (
     <>
-      <a className="skip" href="#content">Skip to content</a>
       <main className="landing col problem-page" id="content">
         <header className="masthead">
           <p><Link href="/">ASImposium</Link> · <Link href="/explore">Explore problems</Link></p>

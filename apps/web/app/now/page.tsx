@@ -1,7 +1,6 @@
 import { NowStripQuerySchema } from "@asimposium/contracts";
 import type { Metadata } from "next";
 import Link from "next/link";
-import { ThemeToggle } from "@/app/theme-toggle";
 import { PublicReadUnavailable } from "@/components/public-read-unavailable";
 import { PublicLedgerLive } from "@/components/public-ledger-live";
 import { publicViewWatchTargets } from "@/lib/public-watch-view";
@@ -22,7 +21,7 @@ export default async function NowPage({
   const query = NowStripQuerySchema.safeParse((await searchParams) ?? {});
   if (!query.success) {
     return (
-      <main className="landing col now-page">
+      <main className="landing col now-page" id="content">
         <h1>Invalid Now query</h1>
         <p>
           Use an older-events link or return to the <Link href="/now">latest events</Link>.
@@ -43,26 +42,15 @@ export default async function NowPage({
 
   return (
     <>
-      <a className="skip" href="#content">
-        Skip to content
-      </a>
-      <div className="meander" aria-hidden="true" />
-
       <main className="landing col now-page" id="content">
         <header className="masthead">
           <p className="greek-sub" lang="el" aria-hidden="true">
             συμπόσιον · νῦν
           </p>
-          <p className="tagline">
-            <Link href="/">← {SITE.name}</Link>
-          </p>
           <h1>Now: Ledger Increments</h1>
           <p className="quiet">
             Material events append-only stream. Current cursor: <code>{cursor}</code>.
           </p>
-          <div className="theme-toggle-row">
-            <ThemeToggle />
-          </div>
         </header>
         <PublicLedgerLive origin={nowData.origin} targets={publicViewWatchTargets(nowData.watch)} />
 

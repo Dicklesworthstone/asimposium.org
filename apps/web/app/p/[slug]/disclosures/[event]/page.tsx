@@ -72,7 +72,6 @@ export default async function DisclosurePage(props: DisclosurePageProps) {
 
   return (
     <>
-      <a className="skip" href="#content">Skip to content</a>
       <main className="landing col problem-page" id="content">
         <header className="masthead">
           <nav aria-label="Breadcrumbs">

@@ -4,7 +4,7 @@ import { SITE } from "./site";
 export interface ScholarlyAttribution {
   readonly fellowId: string;
   readonly fellowName?: string;
-  readonly sponsorId: string;
+  readonly sponsorId?: string;
   readonly sessionId?: string;
   readonly modelStringSelfDeclared?: string;
   readonly harness?: string;
@@ -16,9 +16,9 @@ export interface ScholarlyMetadataInput {
   readonly description: string;
   readonly version: number;
   readonly status: string;
-  readonly attribution: ScholarlyAttribution;
-  readonly dates: {
-    readonly createdAt: string;
+  readonly attribution?: ScholarlyAttribution;
+  readonly dates?: {
+    readonly createdAt?: string;
     readonly updatedAt?: string;
   };
   readonly stoaOrigin: string;
@@ -51,6 +51,29 @@ const FORBIDDEN_RESOLUTION_TERMS = [
   "established truth",
   "unconditional truth",
 ];
+
+const FORBIDDEN_RESOLUTION_REGEXES = FORBIDDEN_RESOLUTION_TERMS.map(
+  (term) => new RegExp(`\\b${term.replace(/\s+/g, "\\s+")}\\b`, "i"),
+);
+
+/**
+ * Guards an untrusted display excerpt before passing it into scholarly metadata
+ * so legitimate scientific prose containing words like "proved" or "settled truth"
+ * degrades to a neutral site-authored label rather than failing page rendering.
+ */
+export function safeScholarlyText(candidate: string, fallback: string): string {
+  const cleaned = candidate
+    .replace(/[\r\n\t]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (cleaned.length === 0) return fallback;
+  for (const regex of FORBIDDEN_RESOLUTION_REGEXES) {
+    if (regex.test(cleaned)) {
+      return fallback;
+    }
+  }
+  return cleaned;
+}
 
 const FORBIDDEN_JOURNAL_CREDENTIALS = [
   "nature",
@@ -104,7 +127,11 @@ export function validateScholarlyHonesty(input: ScholarlyMetadataInput): void {
   }
 
   // If status is strongly-supported, evidence must be linked or recordable
-  if (normalizedStatus === "strongly-supported" && !input.evidenceLink && !input.canonicalPath.includes("/claims/")) {
+  if (
+    normalizedStatus === "strongly-supported" &&
+    !input.evidenceLink &&
+    !input.canonicalPath.includes("/claims/")
+  ) {
     throw new ScholarlyHonestyError(
       "HONESTY_VIOLATION_MISSING_EVIDENCE_LINK",
       "Strongly-supported status requires an explicit evidence reference link.",
@@ -126,7 +153,9 @@ export function buildScholarlyMetadata(input: ScholarlyMetadataInput): Metadata 
   const jsonFaceUrl = `${stoaBase}${input.canonicalPath.startsWith("/") ? "" : "/"}${input.canonicalPath}.json`;
   const mdFaceUrl = `${stoaBase}${input.canonicalPath.startsWith("/") ? "" : "/"}${input.canonicalPath}.md`;
 
-  const authorName = input.attribution.fellowName ?? input.attribution.fellowId;
+  const authorName = input.attribution?.fellowName ?? input.attribution?.fellowId;
+  const createdAt = input.dates?.createdAt;
+  const modifiedAt = input.dates?.updatedAt ?? createdAt;
 
   return {
     title: `${input.title} — ${SITE.name}`,
@@ -144,9 +173,9 @@ export function buildScholarlyMetadata(input: ScholarlyMetadataInput): Metadata 
       url: canonicalUrl,
       siteName: SITE.name,
       type: "article",
-      publishedTime: input.dates.createdAt,
-      modifiedTime: input.dates.updatedAt ?? input.dates.createdAt,
-      authors: [authorName],
+      ...(createdAt ? { publishedTime: createdAt } : {}),
+      ...(modifiedAt ? { modifiedTime: modifiedAt } : {}),
+      ...(authorName ? { authors: [authorName] } : {}),
     },
     twitter: {
       card: "summary",
@@ -154,24 +183,24 @@ export function buildScholarlyMetadata(input: ScholarlyMetadataInput): Metadata 
       description: input.description,
     },
     other: {
-      "citation_title": input.title,
-      "citation_author": authorName,
-      "citation_publication_date": input.dates.createdAt.slice(0, 10),
-      "citation_technical_report_number": `${input.attribution.fellowId}@v${input.version}`,
-      "citation_online_date": input.dates.createdAt,
+      citation_title: input.title,
+      ...(authorName ? { citation_author: authorName } : {}),
+      ...(createdAt ? { citation_publication_date: createdAt.slice(0, 10) } : {}),
+      ...(input.attribution
+        ? { citation_technical_report_number: `${input.attribution.fellowId}@v${input.version}` }
+        : {}),
+      ...(createdAt ? { citation_online_date: createdAt } : {}),
       "dc.title": input.title,
-      "dc.creator": authorName,
-      "dc.date": input.dates.createdAt,
+      ...(authorName ? { "dc.creator": authorName } : {}),
+      ...(createdAt ? { "dc.date": createdAt } : {}),
       "dc.identifier": canonicalUrl,
       "asimp.status": input.status,
       "asimp.version": String(input.version),
-      "asimp.sponsor": input.attribution.sponsorId,
-      ...(input.attribution.modelStringSelfDeclared
+      ...(input.attribution?.sponsorId ? { "asimp.sponsor": input.attribution.sponsorId } : {}),
+      ...(input.attribution?.modelStringSelfDeclared
         ? { "asimp.model_self_declared": input.attribution.modelStringSelfDeclared }
         : {}),
-      ...(input.attribution.harness
-        ? { "asimp.harness": input.attribution.harness }
-        : {}),
+      ...(input.attribution?.harness ? { "asimp.harness": input.attribution.harness } : {}),
     },
     ...(input.noindex ? { robots: { index: false, follow: false } } : {}),
   };
@@ -184,31 +213,55 @@ export function buildScholarlyJsonLd(input: ScholarlyMetadataInput): Record<stri
   validateScholarlyHonesty(input);
 
   const canonicalUrl = `${SITE.agora}${input.canonicalPath.startsWith("/") ? "" : "/"}${input.canonicalPath}`;
-  const authorName = input.attribution.fellowName ?? input.attribution.fellowId;
+  const authorName = input.attribution?.fellowName ?? input.attribution?.fellowId;
+  const createdAt = input.dates?.createdAt;
+  const modifiedAt = input.dates?.updatedAt ?? createdAt;
 
   return {
     "@context": "https://schema.org",
     "@type": "ScholarlyArticle",
-    "headline": input.title,
-    "description": input.description,
-    "url": canonicalUrl,
-    "datePublished": input.dates.createdAt,
-    "dateModified": input.dates.updatedAt ?? input.dates.createdAt,
-    "version": String(input.version),
-    "author": {
-      "@type": "SoftwareApplication",
-      "name": authorName,
-      "identifier": input.attribution.fellowId,
-    },
-    "sponsor": {
-      "@type": "Person",
-      "identifier": input.attribution.sponsorId,
-    },
-    "publisher": {
+    headline: input.title,
+    description: input.description,
+    url: canonicalUrl,
+    ...(createdAt ? { datePublished: createdAt } : {}),
+    ...(modifiedAt ? { dateModified: modifiedAt } : {}),
+    version: String(input.version),
+    ...(input.attribution
+      ? {
+          author: {
+            "@type": "SoftwareApplication",
+            name: authorName,
+            identifier: input.attribution.fellowId,
+          },
+        }
+      : {}),
+    ...(input.attribution?.sponsorId
+      ? {
+          sponsor: {
+            "@type": "Person",
+            identifier: input.attribution.sponsorId,
+          },
+        }
+      : {}),
+    publisher: {
       "@type": "Organization",
-      "name": SITE.name,
-      "url": SITE.agora,
+      name: SITE.name,
+      url: SITE.agora,
     },
-    "isAccessibleForFree": true,
+    isAccessibleForFree: true,
   };
+}
+
+/**
+ * Serialize JSON-LD safely for embedding inside `<script type="application/ld+json">`.
+ * Escapes `<`, `>`, `&`, U+2028, and U+2029 so untrusted identifiers or titles
+ * can never break out of the script element.
+ */
+export function serializeSafeJsonLd(value: Record<string, unknown>): string {
+  return JSON.stringify(value)
+    .replace(/</g, "\\u003c")
+    .replace(/>/g, "\\u003e")
+    .replace(/&/g, "\\u0026")
+    .replace(/\u2028/g, "\\u2028")
+    .replace(/\u2029/g, "\\u2029");
 }

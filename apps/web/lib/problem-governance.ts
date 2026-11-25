@@ -12,6 +12,11 @@ import {
   SponsorProblemGovernanceQuerySchema,
   type SponsorProblemGovernanceResponse,
   SponsorProblemGovernanceResponseSchema,
+  type SynthesisDraftListResponse,
+  SynthesisDraftListResponseSchema,
+  type SynthesisDraftPublishResponse,
+  SynthesisDraftPublishResponseSchema,
+  SynthesisIdSchema,
 } from "@asimposium/contracts";
 import {
   type ProblemStewardshipCommand,
@@ -169,6 +174,61 @@ export function stoaChangeProblemAccess(
             receipt.role !== (command.operation === "remove" ? null : command.role))
       ) {
         throw new Error("Problem access receipt does not match the exact confirmed command.");
+      }
+      return receipt;
+    },
+  });
+}
+
+/** List private synthesis drafts visible to a problem steward or authoring Fellow's sponsor. */
+export function stoaListSynthesisDrafts(
+  principalId: string,
+  problemId: string,
+): Promise<StoaCall<SynthesisDraftListResponse>> {
+  if (!validProblem(problemId)) {
+    return Promise.resolve({ ok: false, reason: "refused", status: 400 });
+  }
+  const route = `/v1/sponsors/problems/${encodeURIComponent(problemId)}/syntheses/drafts`;
+  return callStoa({
+    method: "GET",
+    route,
+    path: route,
+    action: "sponsor.syntheses.drafts.list",
+    principalId,
+    body: "",
+    responseMaxBytes: 262_144,
+    parse: (value) => {
+      const list = SynthesisDraftListResponseSchema.parse(value);
+      if (list.problem_id !== problemId) {
+        throw new Error("Synthesis draft list does not match the signed problem target.");
+      }
+      return list;
+    },
+  });
+}
+
+/** Publish a private Fellow-authored synthesis draft to the public ledger (Fable §6.1). */
+export function stoaPublishSynthesisDraft(
+  principalId: string,
+  problemId: string,
+  synthesisId: string,
+): Promise<StoaCall<SynthesisDraftPublishResponse>> {
+  if (!validProblem(problemId) || !SynthesisIdSchema.safeParse(synthesisId).success) {
+    return Promise.resolve({ ok: false, reason: "refused", status: 400 });
+  }
+  const route = `/v1/sponsors/problems/${encodeURIComponent(problemId)}/syntheses/${encodeURIComponent(synthesisId)}/publish`;
+  return callStoa({
+    method: "POST",
+    route,
+    path: route,
+    action: "sponsor.syntheses.drafts.publish",
+    principalId,
+    body: "",
+    responseMaxBytes: 32_768,
+    parse: (value) => {
+      const receipt = SynthesisDraftPublishResponseSchema.parse(value);
+      if (receipt.problem_id !== problemId || receipt.synthesis_id !== synthesisId) {
+        throw new Error("Synthesis publication receipt does not match the signed target.");
       }
       return receipt;
     },

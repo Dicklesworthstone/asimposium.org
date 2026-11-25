@@ -131,11 +131,21 @@ export const WRITE_PATH_EXEMPTIONS: ReadonlyMap<string, string> = new Map([
     "app/console/account/export/route.ts",
     "Authenticated body-only account-data read proxy. POST carries a bounded private cursor to the signed Worker export reader; Agora never reaches D1 or mutates Krater.",
   ],
+  [
+    "app/console/workshop/[fellow]/[problem]/room-ticket/route.ts",
+    "Authenticated same-origin workshop room-ticket relay. POST calls the signed Worker room-ticket minter on a.asimposium.org so the host-only session cookie never crosses the plane; Agora never reaches D1 or mutates Krater (Fable §11.1, §14.1).",
+  ],
 ]);
 
 export function permitsRouteWrite(relative: string, method: string): boolean {
   if (!WRITE_PATH_EXEMPTIONS.has(relative)) return false;
-  return relative !== "app/console/account/export/route.ts" || method === "POST";
+  if (
+    relative === "app/console/account/export/route.ts" ||
+    relative === "app/console/workshop/[fellow]/[problem]/room-ticket/route.ts"
+  ) {
+    return method === "POST";
+  }
+  return true;
 }
 
 const FILE_EXTENSIONS = [".tsx", ".ts", ".jsx", ".js"] as const;
@@ -317,7 +327,7 @@ function checkRouteFile(filePath: string, relative: string, out: Violation[]): v
   }
 
   const writes = methods.filter((m) => WRITE_METHOD_EXPORTS.has(m)).sort();
-  if (writes.some(method => !permitsRouteWrite(relative, method))) {
+  if (writes.some((method) => !permitsRouteWrite(relative, method))) {
     out.push(
       violation(
         "WRITE_PATH_FORBIDDEN",

@@ -50,8 +50,13 @@ export default async function SponsorSuspensionPage({
   const capHistory = history?.ok && history.data.audit_events.every(event => event.sponsor_id === sponsorId)
     ? history.data : undefined;
   const caseDetail = reviewed?.ok && reviewed.data.item.id === caseId ? reviewed.data : undefined;
-  const eligibleCase = caseDetail?.state === "rejected" && caseDetail.sponsor_id === sponsorId
-    ? caseDetail : undefined;
+  const isSponsorAuthoredCase = caseDetail?.fellow_id.startsWith("sponsor:") ?? false;
+  const eligibleCase =
+    caseDetail?.state === "rejected" &&
+    caseDetail.sponsor_id === sponsorId &&
+    !isSponsorAuthoredCase
+      ? caseDetail
+      : undefined;
 
   return (
     <main className="landing col console" id="content">
@@ -121,11 +126,20 @@ export default async function SponsorSuspensionPage({
                     <dt>Case</dt><dd><code>{caseDetail.item.id}</code></dd>
                     <dt>Review state</dt><dd>{caseDetail.state}</dd>
                     <dt>Coarse category</dt><dd>{caseDetail.item.coarse_category}</dd>
-                    <dt>Fellow at submission</dt><dd><code>{caseDetail.fellow_id}</code></dd>
+                    <dt>{isSponsorAuthoredCase ? "Author at submission" : "Fellow at submission"}</dt>
+                    <dd>
+                      <code>
+                        {isSponsorAuthoredCase
+                          ? `${caseDetail.route === "post-commentary" ? "sponsor commentary" : "sponsor governance"} (${caseDetail.sponsor_id})`
+                          : caseDetail.fellow_id}
+                      </code>
+                    </dd>
                     <dt>Decision recorded at (UTC)</dt><dd>{caseDetail.decided_at ?? "No decision recorded"}</dd>
                   </dl>
                   {caseDetail.decision_reason === null ? null : <p>Recorded review reason: {caseDetail.decision_reason}</p>}
-                  {eligibleCase === undefined ? (
+                  {isSponsorAuthoredCase ? (
+                    <p role="alert">Sponsor suspension requires an operator-rejected Fellow screening case; sponsor-authored screening cases are reviewed separately through quarantine and appeals.</p>
+                  ) : eligibleCase === undefined ? (
                     <p role="alert">Only an already rejected screening case can support this decision. Review the case in the operator console first.</p>
                   ) : (
                     <p>A rejected submission does not itself suspend its sponsor. The operator must separately document an egregious case and confirm the account-wide consequences below.</p>

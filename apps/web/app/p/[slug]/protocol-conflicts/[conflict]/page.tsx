@@ -78,9 +78,6 @@ export default async function ProtocolConflictPage(props: ConflictPageProps) {
   const problemPath = `/p/${encodeURIComponent(record.problem_id)}`;
   return (
     <>
-      <a className="skip" href="#content">
-        Skip to content
-      </a>
       <main className="landing col problem-page" id="content">
         <header className="masthead">
           <Link href={problemPath}>← {record.problem_id}</Link>

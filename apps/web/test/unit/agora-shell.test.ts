@@ -373,4 +373,36 @@ describe("W8.1 Agora Shell: Accessible Graph Table & Math Presentation (WCAG 2.2
     expect(inlineHtml).toContain("role=\"math\"");
     expect(inlineHtml).toContain(formula);
   });
+
+  test("y23e redesign follow-through: transitional CSS hide rules removed, LoadingFrame avoids duplicate main/skip, design.html aligned", async () => {
+    const { readFileSync } = await import("node:fs");
+    const { resolve } = await import("node:path");
+    const { renderToStaticMarkup } = await import("react-dom/server");
+    const React = await import("react");
+    const { default: LoadingFrame } = await import("../../components/loading-frame");
+    const { inlineScriptHashes } = await import("../../next.config");
+
+    const css = readFileSync(resolve(import.meta.dir, "../../app/globals.css"), "utf8");
+    expect(css).not.toContain("body > .meander");
+    expect(css).not.toContain(".site-header ~ .meander");
+    expect(css).not.toContain("main .theme-toggle-row");
+    expect(css).not.toContain(".site-header ~ * .theme-toggle-row");
+    expect(css).not.toContain('.tagline:has(> a[href="/"]:only-child)');
+    expect(css).not.toContain("body > a.skip");
+    expect(css).not.toContain(".site-header ~ a.skip");
+
+    const loadingHtml = renderToStaticMarkup(React.createElement(LoadingFrame));
+    expect(loadingHtml).toContain("<section");
+    expect(loadingHtml).not.toContain("<main");
+    expect(loadingHtml).not.toContain('id="content"');
+    expect(loadingHtml).not.toContain('class="skip"');
+
+    const designPath = resolve(import.meta.dir, "../../public/design.html");
+    const designHtml = readFileSync(designPath, "utf8");
+    expect(designHtml).toContain('href="/icon.svg"');
+    expect(designHtml).toContain("/fonts/eb-garamond-roman.woff2");
+    expect(designHtml).toContain("/fonts/cinzel.woff2");
+    expect(designHtml).toContain("--clay:#a2442a");
+    expect(inlineScriptHashes(designPath).length).toBe(2);
+  });
 });

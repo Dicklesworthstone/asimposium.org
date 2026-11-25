@@ -55,9 +55,6 @@ export default async function MovesPage(props: MovesPageProps) {
     return <PublicReadUnavailable title="Current scientific needs" retryPath={`/moves${suffix}`} />;
   return (
     <>
-      <a className="skip" href="#content">
-        Skip to content
-      </a>
       <main className="landing col problem-page" id="content">
         <header className="masthead">
           <p>

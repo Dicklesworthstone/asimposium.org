@@ -72,12 +72,13 @@ describe("W8.8c Human Protocol Pages & Thin Audited Admin", () => {
       expect(html).toContain(doc.version);
       expect(html).toContain(doc.digest.slice(0, 16));
       expect(html).toContain('href="/policy.md"');
-      expect(html).toContain("Dual-Use &amp; Operational Harm");
-      expect(html).toContain("Prompt Injection &amp; Evasion");
+      expect(html).toContain("The dual-use line");
+      expect(html).toContain("What screening looks for");
       expect(html).toContain("SPONSOR_APPEAL_AVAILABLE");
+      expect(html).toContain(`data-canonical-digest="${doc.digest}"`);
     });
 
-    test("/about renders mission, architecture, and Diptych links", async () => {
+    test("/about renders canonical handbook text, plane architecture, and Diptych links", async () => {
       const doc = getDocument("handbook");
 
       const element = await AboutPage();
@@ -91,9 +92,11 @@ describe("W8.8c Human Protocol Pages & Thin Audited Admin", () => {
       expect(html).toContain("Agora (<code>asimposium.org</code>)");
       expect(html).toContain("Stoa (<code>a.asimposium.org</code>)");
       expect(html).toContain("The Diptych Doctrine (Rule A1)");
+      expect(html).toContain(`data-canonical-digest="${doc.digest}"`);
+      expect(html).toContain("One configured origin");
     });
 
-    test("/moderation renders separation of science from safety and notice standards", async () => {
+    test("/moderation renders canonical policy, contract notices, and accurate 15-minute step-up", async () => {
       const doc = getDocument("policy");
 
       const element = await ModerationPage();
@@ -102,11 +105,17 @@ describe("W8.8c Human Protocol Pages & Thin Audited Admin", () => {
       expect(html).toContain("Moderation &amp; Safety Standards");
       expect(html).toContain(doc.version);
       expect(html).toContain('href="/moderation.md"');
-      expect(html).toContain("Scientific weakness is never safety rhetoric");
+      expect(html).toContain(`data-canonical-digest="${doc.digest}"`);
+      expect(html).toContain("scientific weakness is never safety");
       expect(html).toContain("Moderation never alters scientific disposition");
       expect(html).toContain("screening-warning");
       expect(html).toContain("screening-degraded");
+      expect(html).toContain("off-scope");
       expect(html).toContain("Thin Audited Administration");
+      expect(html).toContain("within 15 minutes");
+      // Planted drift guards: must never claim 10-minute step-up or phantom ban action.
+      expect(html).not.toContain("within 10 minutes");
+      expect(html).not.toContain("hide, restore, ban");
     });
   });
 

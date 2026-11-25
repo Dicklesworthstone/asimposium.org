@@ -170,14 +170,24 @@ describe("reported paths", () => {
 });
 
 describe("write-path exemptions", () => {
-  test("only OAuth and the exact body-only private read proxy are exempted", () => {
-    expect([...WRITE_PATH_EXEMPTIONS.keys()]).toEqual(["app/api/auth/[...nextauth]/route.ts", "app/console/account/export/route.ts"]);
+  test("only OAuth and the exact body-only private read/ticket proxies are exempted", () => {
+    expect([...WRITE_PATH_EXEMPTIONS.keys()]).toEqual([
+      "app/api/auth/[...nextauth]/route.ts",
+      "app/console/account/export/route.ts",
+      "app/console/workshop/[fellow]/[problem]/room-ticket/route.ts",
+    ]);
     const reason = WRITE_PATH_EXEMPTIONS.get("app/api/auth/[...nextauth]/route.ts");
     expect(reason).toContain("session cookie");
     expect(reason).toContain("never reaches D1");
     expect(permitsRouteWrite("app/console/account/export/route.ts", "POST")).toBe(true);
+    expect(
+      permitsRouteWrite("app/console/workshop/[fellow]/[problem]/room-ticket/route.ts", "POST"),
+    ).toBe(true);
     for (const method of ["PUT", "PATCH", "DELETE"]) {
       expect(permitsRouteWrite("app/console/account/export/route.ts", method)).toBe(false);
+      expect(
+        permitsRouteWrite("app/console/workshop/[fellow]/[problem]/room-ticket/route.ts", method),
+      ).toBe(false);
     }
     expect(permitsRouteWrite("app/console/account/export/child/route.ts", "POST")).toBe(false);
     expect(permitsRouteWrite("app/api/claims/route.ts", "POST")).toBe(false);

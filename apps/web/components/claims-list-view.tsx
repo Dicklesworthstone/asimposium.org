@@ -13,8 +13,7 @@ export function ClaimsListView({ result, historical }: {
 }) {
   const face = result.data;
   const query = { through: face.cursor, after: face.after };
-  return <>
-    <a className="skip" href="#content">Skip to content</a>
+  return (
     <main className="landing col problem-page" id="content">
       <header className="masthead">
         <Link href={`/p/${encodeURIComponent(face.problem_id)}`}>← {face.problem_id}</Link>
@@ -42,7 +41,7 @@ export function ClaimsListView({ result, historical }: {
           </header>
           {claim.stale && <p>This statement is marked stale. Inspect the exact claim record and its premises before relying on its standing.</p>}
           <ScreeningNotice notice={claim.screening_notice} />
-          <ScientificBody body={JSON.stringify({ statement: claim.statement })} namespace={`claims-list-${claim.id}-${claim.version}`} />
+          <ScientificBody body={JSON.stringify({ statement: claim.statement })} namespace={`claims-list-${claim.id}-${claim.version}`} headingLevel={3} />
           <footer className="claim-card-footer">
             <p className="quiet">Published <time dateTime={claim.created_at}>{claim.created_at}</time>.</p>
             <Link href={claimListEntryPath(face.problem_id, claim.id, claim.version, face.cursor, "human")} prefetch={false}>
@@ -61,5 +60,5 @@ export function ClaimsListView({ result, historical }: {
       <p><a href={`${result.origin}${claimsListPath(face.problem_id, "md", query)}`}>Canonical Markdown</a>{" · "}
         <a href={`${result.origin}${claimsListPath(face.problem_id, "json", query)}`}>Canonical JSON</a></p>
     </main>
-  </>;
+  );
 }

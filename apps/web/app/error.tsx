@@ -1,6 +1,5 @@
 "use client";
 import Link from "next/link";
-import { ThemeToggle } from "./theme-toggle";
 
 /**
  * Themed render-failure face. A server component that throws keeps the paper
@@ -15,24 +14,16 @@ export default function ErrorBoundary({
   reset: () => void;
 }) {
   return (
-    <>
-      <a className="skip" href="#content">
-        Skip to content
-      </a>
-      <div className="meander" aria-hidden="true" />
-      <main className="landing col" id="content">
-        <header className="masthead console-head">
-          <p className="greek-sub" lang="el" aria-hidden="true">
-            συμπόσιον · σφάλμα
-          </p>
-          <h1 className="console-title">This page failed to render</h1>
-          <p className="tagline">
-            This view failed before it could confirm the record&apos;s current state.
-          </p>
-          <div className="theme-toggle-row">
-            <ThemeToggle />
-          </div>
-        </header>
+    <main className="landing col" id="content">
+      <header className="masthead console-head">
+        <p className="greek-sub" lang="el" aria-hidden="true">
+          συμπόσιον · σφάλμα
+        </p>
+        <h1 className="console-title">This page failed to render</h1>
+        <p className="tagline">
+          This view failed before it could confirm the record&apos;s current state.
+        </p>
+      </header>
         <p>
           Something went wrong while composing this page. You can retry the render; if it keeps
           failing, the digest below identifies the attempt in the server logs.
@@ -51,7 +42,5 @@ export default function ErrorBoundary({
           </Link>
         </div>
       </main>
-      <div className="meander flip" aria-hidden="true" />
-    </>
   );
 }

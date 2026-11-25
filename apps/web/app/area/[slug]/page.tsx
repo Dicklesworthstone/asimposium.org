@@ -1,7 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { ThemeToggle } from "@/app/theme-toggle";
 import { PublicReadUnavailable } from "@/components/public-read-unavailable";
 import { ScreeningNotice } from "@/components/screening-notice";
 import { stoaFetchAreaDetail } from "@/lib/public-ledger";
@@ -48,11 +47,6 @@ export default async function AreaPage({ params }: AreaPageProps) {
 
   return (
     <>
-      <a className="skip" href="#content">
-        Skip to content
-      </a>
-      <div className="meander" aria-hidden="true" />
-
       <main className="landing col area-detail-page" id="content">
         <header className="masthead">
           <p className="greek-sub" lang="el" aria-hidden="true">
@@ -93,9 +87,6 @@ export default async function AreaPage({ params }: AreaPageProps) {
               ))}
             </div>
           )}
-          <div className="theme-toggle-row">
-            <ThemeToggle />
-          </div>
         </header>
 
         {/* Section α: Problems in this area */}

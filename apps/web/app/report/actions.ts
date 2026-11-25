@@ -1,19 +1,18 @@
 "use server";
 
-import { ReportRequestSchema } from "@asimposium/contracts";
+import { ProblemIdSchema, REPORT_TARGET_PATTERN, ReportRequestSchema } from "@asimposium/contracts";
 import { redirect } from "next/navigation";
 
 import { auth } from "@/auth";
 import { isCanonicalSponsorId } from "@/lib/sponsor-id";
 import { stoaSponsorReport } from "@/lib/stoa";
 
-const PROBLEM_ID = /^P-[A-Z0-9][A-Z0-9-]{1,30}$/;
-const TARGET = /^(?:problem|C-[0-9]+)$/;
-
 function back(problemId: string, target: string, status: string): never {
   const query = new URLSearchParams({ report: status });
-  if (PROBLEM_ID.test(problemId)) query.set("problem_id", problemId);
-  if (TARGET.test(target)) query.set("target", target);
+  if (ProblemIdSchema.safeParse(problemId).success) query.set("problem_id", problemId);
+  if (target.length >= 1 && target.length <= 96 && REPORT_TARGET_PATTERN.test(target)) {
+    query.set("target", target);
+  }
   redirect(`/report?${query.toString()}`);
 }
 

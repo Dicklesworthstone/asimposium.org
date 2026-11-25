@@ -9,6 +9,7 @@ import Link from "next/link";
 import { publicEventPath } from "@/lib/event-history";
 import type { PublicRead } from "@/lib/public-ledger";
 import { questionReferenceLink } from "@/lib/question-view";
+import { ReportLink } from "./report-panel";
 import { ScreeningNotice } from "./screening-notice";
 import { ScientificBody } from "./scientific-body";
 
@@ -72,6 +73,7 @@ function QuestionRecord({ item, cursor }: { readonly item: QuestionItem; readonl
       <dt>Published</dt><dd><time dateTime={item.created_at}>{item.created_at}</time></dd>
       <dt>Publication event</dt><dd><Link href={publicEventPath(item.problem_id, item.seq)} prefetch={false}>Ledger sequence {item.seq}</Link></dd>
     </dl></details>
+    <ReportLink problemId={item.problem_id} target={item.question_id} />
   </article>;
 }
 
@@ -98,8 +100,7 @@ export function QuestionsView({ result, query }: {
   const current = face.target === null
     ? { limit: query.limit, ...(face.status === null ? {} : { status: face.status }) }
     : { target: face.target };
-  return <>
-    <a className="skip" href="#content">Skip to content</a>
+  return (
     <main className="landing col problem-page" id="content">
       <header className="masthead">
         <Link href={`/p/${encodeURIComponent(face.problem_id)}`}>← {face.problem_id}</Link>
@@ -132,5 +133,5 @@ export function QuestionsView({ result, query }: {
       <p><a href={`${result.origin}${questionsListPath(face.problem_id, "md", pageQuery)}`}>Canonical Markdown</a>{" · "}
         <a href={`${result.origin}${questionsListPath(face.problem_id, "json", pageQuery)}`}>Canonical JSON</a></p>
     </main>
-  </>;
+  );
 }

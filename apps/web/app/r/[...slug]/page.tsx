@@ -8,7 +8,6 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 import { cache } from "react";
-import { ThemeToggle } from "@/app/theme-toggle";
 import { EventHistoryEntry, EventHistoryOmissions } from "@/components/event-history";
 import { PublicLedgerLive } from "@/components/public-ledger-live";
 import { PublicReadUnavailable } from "@/components/public-read-unavailable";
@@ -144,7 +143,6 @@ export default async function GenericDiptychFallbackPage(props: GenericDiptychPa
 
   return (
     <>
-      <a className="skip" href="#content">Skip to content</a>
       <main className="landing col problem-page generic-diptych-page" id="content">
         <header className="masthead">
           <div className="flex items-center justify-between gap-4">
@@ -152,7 +150,6 @@ export default async function GenericDiptychFallbackPage(props: GenericDiptychPa
               <Link href="/explore">Records</Link>{" / "}
               <Link href={`/p/${encodeURIComponent(target.problemId)}`}>{target.problemId}</Link>
             </nav>
-            <ThemeToggle />
           </div>
           <h1>{record.kind === "event" ? `Ledger event at sequence ${target.recordId}` : target.recordId ?? target.title}</h1>
           <p className="lede">{target.title} · canonical public scientific record</p>

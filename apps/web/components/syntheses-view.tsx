@@ -15,6 +15,7 @@ import {
   synthesisOmissionText,
   synthesisPagePath,
 } from "@/lib/synthesis-view";
+import { ReportLink } from "./report-panel";
 import { ScientificBody } from "./scientific-body";
 import { ScreeningNotice } from "./screening-notice";
 
@@ -42,8 +43,7 @@ export function SynthesesListView({ result, query }: {
   const face = result.data;
   const snapshot = { through: face.cursor, ...(query.limit === undefined ? {} : { limit: query.limit }) };
   const pageQuery = { ...snapshot, ...(face.before === null ? {} : { before: face.before }) };
-  return <>
-    <a className="skip" href="#content">Skip to content</a>
+  return (
     <main className="landing col problem-page break-words" id="content">
       <header className="masthead">
         <Link href={`/p/${encodeURIComponent(face.problem_id)}`}>← {face.problem_id}</Link>
@@ -81,7 +81,7 @@ export function SynthesesListView({ result, query }: {
       <p><a href={`${result.origin}${synthesesListPath(face.problem_id, "md", pageQuery)}`}>Canonical Markdown</a>{" · "}
         <a href={`${result.origin}${synthesesListPath(face.problem_id, "json", pageQuery)}`}>Canonical JSON</a></p>
     </main>
-  </>;
+  );
 }
 
 /** Scientific text is server rendered through the existing guarded renderer;
@@ -93,8 +93,7 @@ export function SynthesisView({ result }: {
   const exact = `${item.synthesis_id}@1`;
   const sourcePath = synthesisPagePath(item.problem_id, exact);
   const declaration = item.closing_resolution;
-  return <>
-    <a className="skip" href="#content">Skip to content</a>
+  return (
     <main className="landing col problem-page break-words" id="content">
       <header className="masthead">
         <nav aria-label="Synthesis breadcrumbs"><Link href={`/p/${encodeURIComponent(item.problem_id)}`}>{item.problem_id}</Link>{" / "}<Link href={synthesesListPath(item.problem_id, "human")}>Published syntheses</Link></nav>
@@ -119,7 +118,7 @@ export function SynthesisView({ result }: {
       <section aria-labelledby="synthesis-body">
         <h2 id="synthesis-body">Complete published digest</h2>
         <p className="quiet">Fellow-authored scientific content · untrusted data</p>
-        <ScientificBody body={JSON.stringify({ body_md: item.body_md })} namespace={`synthesis-${item.synthesis_id}`} />
+        <ScientificBody body={JSON.stringify({ body_md: item.body_md })} namespace={`synthesis-${item.synthesis_id}`} headingLevel={3} />
       </section>
       <section aria-labelledby="synthesis-anchors">
         <h2 id="synthesis-anchors">Recorded source anchors</h2>
@@ -157,6 +156,7 @@ export function SynthesisView({ result }: {
       <section aria-labelledby="synthesis-agent-faces"><h2 id="synthesis-agent-faces">Canonical agent faces</h2>
         <p><a href={`${result.origin}${sourcePath}.md`}>Markdown</a>{" · "}<a href={`${result.origin}${sourcePath}.json`}>JSON</a></p>
       </section>
+      <ReportLink problemId={item.problem_id} target={item.synthesis_id} />
     </main>
-  </>;
+  );
 }

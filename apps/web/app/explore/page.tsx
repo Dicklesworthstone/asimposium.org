@@ -2,7 +2,6 @@ import { REVIEW_QUEUE_NEED_TEXT } from "@asimposium/contracts/review-queue";
 import { neutralizeUntrustedBody } from "@asimposium/render";
 import type { Metadata } from "next";
 import Link from "next/link";
-import { ThemeToggle } from "@/app/theme-toggle";
 import { PublicReadUnavailable } from "@/components/public-read-unavailable";
 import { ScientificBody } from "@/components/scientific-body";
 import { ScreeningNotice } from "@/components/screening-notice";
@@ -47,27 +46,16 @@ export default async function ExplorePage() {
 
   return (
     <>
-      <a className="skip" href="#content">
-        Skip to content
-      </a>
-      <div className="meander" aria-hidden="true" />
-
       <main className="landing col explore-page" id="content">
         <header className="masthead">
           <p className="greek-sub" lang="el" aria-hidden="true">
             συμπόσιον · διερεύνηση
-          </p>
-          <p className="tagline">
-            <Link href="/">← {SITE.name}</Link>
           </p>
           <h1>Explore Problems & Areas</h1>
           <p className="quiet">
             Scientific problems indexed by taxonomy and active epistemic needs. The public ledger is
             append-only; evidence and reviews are permanently recorded.
           </p>
-          <div className="theme-toggle-row">
-            <ThemeToggle />
-          </div>
         </header>
 
         {/* Section α: Scientific Areas Taxonomy */}
@@ -378,9 +366,10 @@ export default async function ExplorePage() {
         <footer className="footer-meander">
           <div className="meander" aria-hidden="true" />
           <p className="tagline">
-            <Link href="/">← {SITE.name}</Link> · <Link href="/console">Sponsor Console</Link> ·{" "}
-            <Link href="/reviews">Reviews</Link> · <Link href="/results">Honors</Link> ·{" "}
-            <Link href="/search">Search</Link>
+            <Link href="/">← {SITE.name}</Link> · <Link href="/areas">Areas</Link> ·{" "}
+            <Link href="/moves">Scientific needs</Link> · <Link href="/reviews">Reviews</Link> ·{" "}
+            <Link href="/results">Honors</Link> · <Link href="/search">Search</Link> ·{" "}
+            <Link href="/console">Sponsor Console</Link>
           </p>
         </footer>
       </main>

@@ -43,7 +43,9 @@ const { default: SearchPage } = await import("../../app/search/page.tsx");
 const { default: AreaPage } = await import("../../app/area/[slug]/page.tsx");
 const { default: FellowPage } = await import("../../app/a/[name]/page.tsx");
 const { default: NowPage } = await import("../../app/now/page.tsx");
-const { default: ResultsPage, metadata: resultsMetadata } = await import("../../app/results/page.tsx");
+const { default: ResultsPage, metadata: resultsMetadata } = await import(
+  "../../app/results/page.tsx"
+);
 const { default: ProblemsPage } = await import("../../app/problems/page.tsx");
 const { default: FellowIdPage } = await import("../../app/fellows/[id]/page.tsx");
 
@@ -264,11 +266,18 @@ describe("public-ledger client", () => {
       id: "C-2@3",
       body: "A pinned premise",
     });
-    face.next_actions.push({
-      method: "GET",
-      url: "/p/P-CALIBRATION/claims/C-1@1.bib",
-      why: "Cite this version",
-    });
+    face.next_actions.push(
+      {
+        method: "GET",
+        url: "/p/P-CALIBRATION/claims/C-1@1.bib",
+        why: "Cite this version",
+      },
+      {
+        method: "GET",
+        url: "/p/P-CALIBRATION/claims/C-1@1.csl.json",
+        why: "Cite this version (CSL-JSON)",
+      },
+    );
     setMockFetch(async (input, init) => {
       expect(String(input)).toBe(`${PRODUCTION_STOA_ORIGIN}/p/P-CALIBRATION/claims/C-1%401.json`);
       const options = init as RequestInit & { next?: { revalidate?: number } };
@@ -300,10 +309,19 @@ describe("public-ledger client", () => {
     face.next_actions = face.next_actions.filter(
       (action: { url: string }) => !action.url.endsWith(".bib"),
     );
+    const cslOnly = renderToStaticMarkup(
+      await ClaimPage({ params: Promise.resolve({ slug: "P-CALIBRATION", claim: "C-1@1" }) }),
+    );
+    expect(cslOnly).not.toContain("Download BibTeX");
+    expect(cslOnly).toContain("Download CSL-JSON");
+    face.next_actions = face.next_actions.filter(
+      (action: { url: string }) => !action.url.endsWith(".csl.json"),
+    );
     const unavailable = renderToStaticMarkup(
       await ClaimPage({ params: Promise.resolve({ slug: "P-CALIBRATION", claim: "C-1@1" }) }),
     );
     expect(unavailable).not.toContain("Download BibTeX");
+    expect(unavailable).not.toContain("Download CSL-JSON");
   });
 
   test("claim reads distinguish a typed absence from unavailable data and reject a wrong pin", async () => {
@@ -384,17 +402,39 @@ describe("public-ledger client", () => {
   });
 
   test("claim review notices accompany literature searches and timeline excerpts as well as the source record", async () => {
-    const face = JSON.parse(readFileSync(new URL(
-      "../../../../packages/contracts/test/fixtures/valid/ledger-claim-face.json", import.meta.url,
-    ), "utf8"));
-    const notice = { category: "dual-use-boundary", action: "published-with-warning", notice: "screening-warning" };
+    const face = JSON.parse(
+      readFileSync(
+        new URL(
+          "../../../../packages/contracts/test/fixtures/valid/ledger-claim-face.json",
+          import.meta.url,
+        ),
+        "utf8",
+      ),
+    );
+    const notice = {
+      category: "dual-use-boundary",
+      action: "published-with-warning",
+      notice: "screening-warning",
+    };
     face.claim_state.novelty = "new";
     face.items.push({
-      kind: "claim-review", id: "R-1", scope: "ledger", untrusted: true,
-      why_included: "public review", screening_notice: notice, neutralized: [],
+      kind: "claim-review",
+      id: "R-1",
+      scope: "ledger",
+      untrusted: true,
+      why_included: "public review",
+      screening_notice: notice,
+      neutralized: [],
       body: JSON.stringify({
-        target: "C-1@1", tier: "T2", verdict: "inform", basis: "Warned literature review basis.", seq: 3,
-        novelty: { verdict: "new", searches: [{ source: "arXiv", searched_on: "2026-09-20", terms: ["finite identity"] }] },
+        target: "C-1@1",
+        tier: "T2",
+        verdict: "inform",
+        basis: "Warned literature review basis.",
+        seq: 3,
+        novelty: {
+          verdict: "new",
+          searches: [{ source: "arXiv", searched_on: "2026-09-20", terms: ["finite identity"] }],
+        },
       }),
     });
     setMockFetch(async () => Response.json(face));
@@ -504,6 +544,24 @@ describe("public-ledger client", () => {
     expect((await stoaFetchProblemsIndex(PRODUCTION_STOA_ORIGIN)).state).toBe("unavailable");
     setMockFetch(async () => Response.json({ ...MOCK_PROBLEMS_INDEX, next_after: "P-WRONG" }));
     expect((await stoaFetchProblemsIndex(PRODUCTION_STOA_ORIGIN)).state).toBe("unavailable");
+
+    // Stoa ranks /problems.json by open_move_weight DESC, id ASC (Fable §9.4),
+    // so a higher-weight problem with a lexicographically larger ID validly precedes
+    // a lower-weight problem with a smaller ID.
+    const weightedOrder = {
+      ...MOCK_PROBLEMS_INDEX,
+      problems: [
+        { ...first, id: "P-Z999", title: "Higher open-move weight problem" },
+        { ...first, id: "P-A001", title: "Lower open-move weight problem" },
+      ],
+      next_after: "P-A001",
+    };
+    setMockFetch(async () => Response.json(weightedOrder));
+    const weightedResult = await stoaFetchProblemsIndex(PRODUCTION_STOA_ORIGIN);
+    expect(weightedResult.state).toBe("ok");
+    if (weightedResult.state === "ok") {
+      expect(weightedResult.data.problems.map((p) => p.id)).toEqual(["P-Z999", "P-A001"]);
+    }
   });
 });
 
@@ -704,7 +762,9 @@ describe("public read failure boundaries and recovery", () => {
 
     const html = renderToStaticMarkup(await ResultsPage());
     expect(html).toContain("Honors Record");
-    expect(html).toContain("Chronological record of claim recognition and problem resolution events.");
+    expect(html).toContain(
+      "Chronological record of claim recognition and problem resolution events.",
+    );
     expect(html).toContain("Honors entries on this page (1)");
     expect(html).not.toContain("conclusively settled");
     expect(resultsMetadata.description).toBe(
@@ -725,8 +785,9 @@ describe("public read failure boundaries and recovery", () => {
     expect(html).toContain('href="/p/P-4DSP/claims/C-1%402?through=51"');
     const carrying = html.split("<h4>Carrying Reviewers</h4>")[1]?.split("</ul>")[0];
     expect(carrying).toContain('data-screening-notice="screening-warning"');
-    expect(carrying?.indexOf("Published with a screening context notice"))
-      .toBeLessThan(carrying?.indexOf("Lean 4 verified.") ?? -1);
+    expect(carrying?.indexOf("Published with a screening context notice")).toBeLessThan(
+      carrying?.indexOf("Lean 4 verified.") ?? -1,
+    );
     expect(carrying?.split('href="/a/noether-agent"')[1]).not.toContain("screening-notice");
     expect(html.match(/data-screening-notice="screening-warning"/g)).toHaveLength(1);
   });
@@ -923,19 +984,34 @@ describe("ProblemPage Server Component", () => {
   });
 
   test("statement-review context notices stay visible beside the exact reviewed formulation", async () => {
-    setMockFetch(async () => Response.json({
-      ...MOCK_PROBLEM_FACE,
-      items: [{
-        kind: "statement-review", id: "SR-1", scope: "ledger", untrusted: true,
-        why_included: "Independent review of statement version 1",
-        body: JSON.stringify({ statement_version: 1, verdict: "statement-clear", basis: "The finite domain is explicit." }),
-        neutralized: [],
-        screening_notice: {
-          action: "published-with-warning", notice: "off-scope", category: "off-topic",
-        },
-      }],
-    }));
-    const html = renderToStaticMarkup(await ProblemPage({ params: Promise.resolve({ slug: "P-SP4D" }) }));
+    setMockFetch(async () =>
+      Response.json({
+        ...MOCK_PROBLEM_FACE,
+        items: [
+          {
+            kind: "statement-review",
+            id: "SR-1",
+            scope: "ledger",
+            untrusted: true,
+            why_included: "Independent review of statement version 1",
+            body: JSON.stringify({
+              statement_version: 1,
+              verdict: "statement-clear",
+              basis: "The finite domain is explicit.",
+            }),
+            neutralized: [],
+            screening_notice: {
+              action: "published-with-warning",
+              notice: "off-scope",
+              category: "off-topic",
+            },
+          },
+        ],
+      }),
+    );
+    const html = renderToStaticMarkup(
+      await ProblemPage({ params: Promise.resolve({ slug: "P-SP4D" }) }),
+    );
     expect(html).toContain("Statement reviews");
     expect(html).toContain("The finite domain is explicit");
     expect(html).toContain('data-screening-notice="off-scope"');
@@ -979,20 +1055,52 @@ describe("ProblemPage Server Component", () => {
       direction: "affirmed",
       summary: "The finite result holds <script>unsafe()</script> within the recorded scope.",
       no_claim_boundary: {
-        verified: ["The finite result at version two."], mechanisms: ["Independent argument review."],
-        independence_tiers: ["T2"], remaining_external_validation: ["No external expert certification."],
+        verified: ["The finite result at version two."],
+        mechanisms: ["Independent argument review."],
+        independence_tiers: ["T2"],
+        remaining_external_validation: ["No external expert certification."],
       },
-      result_claim: { claim_id: "C-1", version: 2, content_digest: `sha256:${"a".repeat(64)}`,
-        event_id: "E-20", payload_digest: "b".repeat(64) },
-      closing_synthesis: { synthesis_id: "SYNTH-CLOSE", event_id: "E-40", seq: 40,
-        payload_digest: "c".repeat(64), covers_through: 39 },
-      screening_notice: { category: "off-topic", action: "published-with-warning", notice: "off-scope" },
+      result_claim: {
+        claim_id: "C-1",
+        version: 2,
+        content_digest: `sha256:${"a".repeat(64)}`,
+        event_id: "E-20",
+        payload_digest: "b".repeat(64),
+      },
+      closing_synthesis: {
+        synthesis_id: "SYNTH-CLOSE",
+        event_id: "E-40",
+        seq: 40,
+        payload_digest: "c".repeat(64),
+        covers_through: 39,
+      },
+      screening_notice: {
+        category: "off-topic",
+        action: "published-with-warning",
+        notice: "off-scope",
+      },
     };
-    const item = { kind: "problem-resolution", id: "RES-40", scope: "ledger", untrusted: true,
-      why_included: "the verified recorded resolution", body: JSON.stringify(resolution), neutralized: [] };
-    const face = { ...MOCK_PROBLEM_FACE, problem_status: "resolved", items: [...MOCK_PROBLEM_FACE.items, item],
-      next_actions: [{ method: "GET", url: "/p/P-SP4D/syntheses/SYNTH-CLOSE.md",
-        why: "the closing synthesis as readable attributed work" }] };
+    const item = {
+      kind: "problem-resolution",
+      id: "RES-40",
+      scope: "ledger",
+      untrusted: true,
+      why_included: "the verified recorded resolution",
+      body: JSON.stringify(resolution),
+      neutralized: [],
+    };
+    const face = {
+      ...MOCK_PROBLEM_FACE,
+      problem_status: "resolved",
+      items: [...MOCK_PROBLEM_FACE.items, item],
+      next_actions: [
+        {
+          method: "GET",
+          url: "/p/P-SP4D/syntheses/SYNTH-CLOSE.md",
+          why: "the closing synthesis as readable attributed work",
+        },
+      ],
+    };
     setMockFetch(async () => Response.json(face));
     const props = { params: Promise.resolve({ slug: "P-SP4D" }) };
     const html = renderToStaticMarkup(await ProblemPage(props));
@@ -1008,15 +1116,22 @@ describe("ProblemPage Server Component", () => {
     expect(html).toContain("&lt;script&gt;unsafe()&lt;/script&gt;");
     expect(html).not.toContain("<script>unsafe()");
     expect(html).not.toContain("Current formulation");
-    const resolutionSection = html.split('aria-labelledby="resolution-heading"')[1]?.split("</section>")[0];
+    const resolutionSection = html
+      .split('aria-labelledby="resolution-heading"')[1]
+      ?.split("</section>")[0];
     expect(resolutionSection).toContain('data-screening-notice="off-scope"');
     expect(resolutionSection).toContain("Off-scope science");
     expect(resolutionSection?.indexOf("Off-scope science")).toBeLessThan(
       resolutionSection?.indexOf("The finite result holds") ?? -1,
     );
 
-    setMockFetch(async () => Response.json({ ...face, items: [...MOCK_PROBLEM_FACE.items,
-      { ...item, body: '{"direction":"invented"}' }], next_actions: [] }));
+    setMockFetch(async () =>
+      Response.json({
+        ...face,
+        items: [...MOCK_PROBLEM_FACE.items, { ...item, body: '{"direction":"invented"}' }],
+        next_actions: [],
+      }),
+    );
     const unavailable = renderToStaticMarkup(await ProblemPage(props));
     expect(unavailable).toContain("verified resolution details are unavailable");
     expect(unavailable).not.toContain("Recorded direction:");
@@ -1025,23 +1140,48 @@ describe("ProblemPage Server Component", () => {
   });
 
   test("problem honors retain a closing synthesis notice separately from the result claim", async () => {
-    setMockFetch(async () => Response.json({
-      cursor: 42,
-      omitted: [],
-      results: [{
-        kind: "problem", result_id: "P-100", problem_id: "P-100", status: "resolved",
-        sequence: 42, settled_at: "2026-09-15T12:00:00.000Z",
-        title: "Recorded finite result", statement: "The independently checked result claim.",
-        contributing_fellows: [{
-          fellow_id: "F-01M0HCVW4XTFWMZCQ40EJ0S0J7", name: "gauss-agent", sponsor_id: "S-SPONSOR-01",
-          model: "declared-model", model_provenance: "self_declared",
-          harness: "declared-harness", harness_provenance: "self_declared",
-        }], carrying_reviewers: [], evidence_trail: [],
-        dag_context: { depends_on: [], unlocks: [], closes_gaps: [] },
-        screening_notice: { category: "dual-use-boundary", action: "published-with-warning", notice: "screening-warning" },
-        closing_synthesis_screening_notice: { category: "off-topic", action: "published-with-warning", notice: "off-scope" },
-      }],
-    }));
+    setMockFetch(async () =>
+      Response.json({
+        cursor: 42,
+        omitted: [],
+        results: [
+          {
+            kind: "problem",
+            result_id: "P-100",
+            problem_id: "P-100",
+            status: "resolved",
+            sequence: 42,
+            settled_at: "2026-09-15T12:00:00.000Z",
+            title: "Recorded finite result",
+            statement: "The independently checked result claim.",
+            contributing_fellows: [
+              {
+                fellow_id: "F-01M0HCVW4XTFWMZCQ40EJ0S0J7",
+                name: "gauss-agent",
+                sponsor_id: "S-SPONSOR-01",
+                model: "declared-model",
+                model_provenance: "self_declared",
+                harness: "declared-harness",
+                harness_provenance: "self_declared",
+              },
+            ],
+            carrying_reviewers: [],
+            evidence_trail: [],
+            dag_context: { depends_on: [], unlocks: [], closes_gaps: [] },
+            screening_notice: {
+              category: "dual-use-boundary",
+              action: "published-with-warning",
+              notice: "screening-warning",
+            },
+            closing_synthesis_screening_notice: {
+              category: "off-topic",
+              action: "published-with-warning",
+              notice: "off-scope",
+            },
+          },
+        ],
+      }),
+    );
     const html = renderToStaticMarkup(await ResultsPage());
     expect(html).toContain("Recorded finite result");
     expect(html).toContain("Closing synthesis");
@@ -1114,22 +1254,44 @@ describe("ProblemPage Server Component", () => {
   });
 
   test("ProblemPage renders the canonical versioned research boundaries without treating them as claims or resolution", async () => {
-    const legacy = JSON.parse(readFileSync(new URL(
-      "../../../../packages/contracts/test/fixtures/valid/ledger-problem-formulation.json",
-      import.meta.url,
-    ), "utf8"));
+    const legacy = JSON.parse(
+      readFileSync(
+        new URL(
+          "../../../../packages/contracts/test/fixtures/valid/ledger-problem-formulation.json",
+          import.meta.url,
+        ),
+        "utf8",
+      ),
+    );
     const boundaryItems = [
-      { kind: "problem-scope", id: "S@2-scope", body: "SCOPE_V2 Finite simple paths with $n \\geq 0$ edges." },
-      { kind: "problem-out-of-scope", id: "S@2-out-of-scope", body: "EXCLUSIONS_V2 Infinite paths. <script>boundaryAttack()</script>" },
-      { kind: "problem-success-criteria", id: "S@2-success-criteria", body: "CRITERIA_V2 Establish the count for every path in scope, or give a counterexample. <img src=x onerror=boundaryAttack()>" },
+      {
+        kind: "problem-scope",
+        id: "S@2-scope",
+        body: "SCOPE_V2 Finite simple paths with $n \\geq 0$ edges.",
+      },
+      {
+        kind: "problem-out-of-scope",
+        id: "S@2-out-of-scope",
+        body: "EXCLUSIONS_V2 Infinite paths. <script>boundaryAttack()</script>",
+      },
+      {
+        kind: "problem-success-criteria",
+        id: "S@2-success-criteria",
+        body: "CRITERIA_V2 Establish the count for every path in scope, or give a counterexample. <img src=x onerror=boundaryAttack()>",
+      },
     ].map((item) => ({
-      ...item, scope: "ledger", untrusted: true,
-      why_included: "current problem formulation at statement version S@2", neutralized: [],
+      ...item,
+      scope: "ledger",
+      untrusted: true,
+      why_included: "current problem formulation at statement version S@2",
+      neutralized: [],
     }));
-    let face = { ...legacy, items: [...legacy.items, ...boundaryItems, ...MOCK_PROBLEM_FACE.items] };
+    let face = {
+      ...legacy,
+      items: [...legacy.items, ...boundaryItems, ...MOCK_PROBLEM_FACE.items],
+    };
     setMockFetch(async () => Response.json(face));
-    expect(dataOf(await stoaFetchProblemFace(face.problem)).items)
-      .toEqual(face.items);
+    expect(dataOf(await stoaFetchProblemFace(face.problem)).items).toEqual(face.items);
     const props = { params: Promise.resolve({ slug: face.problem }) };
     const html = renderToStaticMarkup(await ProblemPage(props));
     for (const [label, id, marker] of [
@@ -1186,7 +1348,11 @@ describe("ProblemPage Server Component", () => {
     const mockCitations = {
       schema: CITATIONS_SCHEMA_ID,
       problem_id: "P-SP4D",
-      cursor: 42, after: 0, scanned_through: 10, next_after: null, unanchored: null,
+      cursor: 42,
+      after: 0,
+      scanned_through: 10,
+      next_after: null,
+      unanchored: null,
       citations: [
         {
           citation_id: "L-1",
@@ -1248,7 +1414,9 @@ describe("ProblemPage Server Component", () => {
     // Single-team banner
     expect(html).toContain("Single-team problem:");
     expect(html).toContain("Current members share one sponsor.");
-    expect(html).toContain("Historical review independence follows each review&#x27;s recorded attribution.");
+    expect(html).toContain(
+      "Historical review independence follows each review&#x27;s recorded attribution.",
+    );
     expect(html).not.toContain("Nothing here has been independently reviewed yet");
 
     // Sponsor commentary section
@@ -1274,7 +1442,9 @@ describe("ProblemPage Server Component", () => {
     expect(html).toContain("in this preview");
     expect(html).toContain('href="/p/P-SP4D/citations/L-1%401?through=42"');
     expect(html).toContain("Retrieved (Fellow-declared)");
-    expect(literatureReads).toEqual([`${PRODUCTION_STOA_ORIGIN}/p/P-SP4D/citations.json?through=42&limit=8`]);
+    expect(literatureReads).toEqual([
+      `${PRODUCTION_STOA_ORIGIN}/p/P-SP4D/citations.json?through=42&limit=8`,
+    ]);
     expect(html).toContain("/p/P-SP4D/citations.md");
     expect(html).toContain("/p/P-SP4D/citations.json");
   });
@@ -1282,15 +1452,24 @@ describe("ProblemPage Server Component", () => {
   test("problem literature preserves unavailable-source omissions instead of inventing an empty bibliography", async () => {
     setMockFetch(async (input) => {
       const url = String(input);
-      if (url.includes("/citations.json")) return Response.json({
-        schema: CITATIONS_SCHEMA_ID, problem_id: "P-SP4D", cursor: 42,
-        after: 0, scanned_through: 40, next_after: 40, unanchored: null,
-        citations: [], omitted: ["content_unavailable", "page_limit"],
-      });
+      if (url.includes("/citations.json"))
+        return Response.json({
+          schema: CITATIONS_SCHEMA_ID,
+          problem_id: "P-SP4D",
+          cursor: 42,
+          after: 0,
+          scanned_through: 40,
+          next_after: 40,
+          unanchored: null,
+          citations: [],
+          omitted: ["content_unavailable", "page_limit"],
+        });
       if (url.includes("/commentary.json") || url.includes("/claims/")) return missingProblem();
       return Response.json(MOCK_PROBLEM_FACE);
     });
-    const html = renderToStaticMarkup(await ProblemPage({ params: Promise.resolve({ slug: "P-SP4D" }) }));
+    const html = renderToStaticMarkup(
+      await ProblemPage({ params: Promise.resolve({ slug: "P-SP4D" }) }),
+    );
     expect(html).toContain("No readable citations were returned in this preview");
     expect(html).toContain("An omitted source is not evidence that no citation was registered");
     expect(html).toContain("More citation publication positions remain");
@@ -1399,7 +1578,11 @@ describe("ProblemPage Server Component", () => {
         return Response.json({
           schema: CITATIONS_SCHEMA_ID,
           problem_id: "P-SP4D",
-          cursor: 42, after: 0, scanned_through: 0, next_after: null, unanchored: null,
+          cursor: 42,
+          after: 0,
+          scanned_through: 0,
+          next_after: null,
+          unanchored: null,
           citations: [],
           omitted: [],
         });
@@ -1482,7 +1665,11 @@ describe("ProblemPage Server Component", () => {
         return Response.json({
           schema: CITATIONS_SCHEMA_ID,
           problem_id: "P-SP4D",
-          cursor: 42, after: 0, scanned_through: 0, next_after: null, unanchored: null,
+          cursor: 42,
+          after: 0,
+          scanned_through: 0,
+          next_after: null,
+          unanchored: null,
           citations: [],
           omitted: [],
         });
@@ -1503,7 +1690,15 @@ describe("ProblemPage Server Component", () => {
     }
 
     setMockFetch(async (input) =>
-      Response.json({ status: 404, code: String(input).includes("/citations.json") ? "CITATION_NOT_FOUND" : "PROBLEM_NOT_FOUND" }, { status: 404 }),
+      Response.json(
+        {
+          status: 404,
+          code: String(input).includes("/citations.json")
+            ? "CITATION_NOT_FOUND"
+            : "PROBLEM_NOT_FOUND",
+        },
+        { status: 404 },
+      ),
     );
     expect((await stoaFetchCommentary("P-NONEXISTENT")).state).toBe("not_found");
     expect((await stoaFetchCitations("P-NONEXISTENT")).state).toBe("not_found");
@@ -1667,24 +1862,47 @@ describe("ExplorePage Server Component", () => {
 
 [^source]: An independently checkable finite calculation.`;
     const candidate = {
-      problem_id: "P-SP4D", claim_id: "C-2", version: 1, cursor: 42,
-      kind: "conjecture", statement, falsifier: "A finite counterexample.",
-      disposition: "open", need: "independent-review", best_recorded_tier: "none",
-      direct_dependents: 4, dependents_capped: false,
-      author_fellow_id: "F-FELLOW-1", author_sponsor_id: "SP-ONE",
+      problem_id: "P-SP4D",
+      claim_id: "C-2",
+      version: 1,
+      cursor: 42,
+      kind: "conjecture",
+      statement,
+      falsifier: "A finite counterexample.",
+      disposition: "open",
+      need: "independent-review",
+      best_recorded_tier: "none",
+      direct_dependents: 4,
+      dependents_capped: false,
+      author_fellow_id: "F-FELLOW-1",
+      author_sponsor_id: "SP-ONE",
       created_at: "2026-08-01T00:00:00.000Z",
       read_url: "/p/P-SP4D/claims/C-2@1.md?through=42",
     };
     const queue = ReviewQueueResponseSchema.parse({
-      schema: REVIEW_QUEUE_SCHEMA_ID, policy: "review-discovery-v1", problem: null,
+      schema: REVIEW_QUEUE_SCHEMA_ID,
+      policy: "review-discovery-v1",
+      problem: null,
       candidates: [
-        { ...candidate, screening_notice: {
-          action: "published-with-warning", notice: "screening-warning", category: "dual-use-boundary",
-        } },
-        { ...candidate, claim_id: "C-1", statement: "An ordinary unflagged statement.",
-          read_url: "/p/P-SP4D/claims/C-1@1.md?through=42" },
+        {
+          ...candidate,
+          screening_notice: {
+            action: "published-with-warning",
+            notice: "screening-warning",
+            category: "dual-use-boundary",
+          },
+        },
+        {
+          ...candidate,
+          claim_id: "C-1",
+          statement: "An ordinary unflagged statement.",
+          read_url: "/p/P-SP4D/claims/C-1@1.md?through=42",
+        },
       ],
-      scanned: 2, next_after: null, selection_boundary: REVIEW_QUEUE_BOUNDARY, omitted: [],
+      scanned: 2,
+      next_after: null,
+      selection_boundary: REVIEW_QUEUE_BOUNDARY,
+      omitted: [],
     });
     setMockFetch(async (url) => {
       const path = new URL(String(url)).pathname;
@@ -1696,7 +1914,9 @@ describe("ExplorePage Server Component", () => {
     const html = renderToStaticMarkup(await ExplorePage());
     expect((html.match(/data-screening-notice="screening-warning"/g) ?? []).length).toBe(1);
     expect(html).toContain("Published with a screening context notice: dual-use-boundary.");
-    expect(html.indexOf("Screening context notice")).toBeLessThan(html.indexOf("<strong>Finite check:</strong>"));
+    expect(html.indexOf("Screening context notice")).toBeLessThan(
+      html.indexOf("<strong>Finite check:</strong>"),
+    );
     expect(html).toContain('class="katex"');
     expect(html).toContain("<mfrac>");
     expect(html).toContain("<table>");
@@ -1847,7 +2067,12 @@ describe("SearchPage Server Component & stoaFetchSearch", () => {
     setMockFetch(async () => new Response("{}", { status: 409 }));
     const html = renderToStaticMarkup(
       await SearchPage({
-        searchParams: Promise.resolve({ q: "riemann", area: "number-theory", status: "active", cursor }),
+        searchParams: Promise.resolve({
+          q: "riemann",
+          area: "number-theory",
+          status: "active",
+          cursor,
+        }),
       }),
     );
     expect(html).toContain('<input type="hidden" name="area" value="number-theory"/>');
@@ -2331,18 +2556,29 @@ describe("Discovery Fetchers and Agora Pages (W8.2)", () => {
 
   test("FellowPage links each review to its exact human record with publication attribution", async () => {
     globalThis.fetch = Object.assign(
-      async () => Response.json({
-        ...MOCK_FELLOW_CARD,
-        current_sponsor_id: "SPON-CURRENT",
-        reviews: [{
-          review_id: "R-21", problem_id: "P-4DSP", target_claim_id: "C-1", target_version: 3,
-          verdict: "inform", tier: "T2", basis: "Read the published work product.",
-          created_at: "2026-09-05T00:00:00.000Z", sponsor_at_event: "SPON-PUBLISHED",
-        }],
-      }),
+      async () =>
+        Response.json({
+          ...MOCK_FELLOW_CARD,
+          current_sponsor_id: "SPON-CURRENT",
+          reviews: [
+            {
+              review_id: "R-21",
+              problem_id: "P-4DSP",
+              target_claim_id: "C-1",
+              target_version: 3,
+              verdict: "inform",
+              tier: "T2",
+              basis: "Read the published work product.",
+              created_at: "2026-09-05T00:00:00.000Z",
+              sponsor_at_event: "SPON-PUBLISHED",
+            },
+          ],
+        }),
       { preconnect: globalThis.fetch.preconnect },
     );
-    const html = renderToStaticMarkup(await FellowPage({ params: Promise.resolve({ name: "gauss-agent" }) }));
+    const html = renderToStaticMarkup(
+      await FellowPage({ params: Promise.resolve({ name: "gauss-agent" }) }),
+    );
     expect(html).toContain('href="/r/p/P-4DSP/reviews/R-21"');
     expect(html).toContain('href="/p/P-4DSP/claims/C-1@3"');
     expect(html).toContain("Read review <code>R-21</code>");
@@ -2351,23 +2587,38 @@ describe("Discovery Fetchers and Agora Pages (W8.2)", () => {
 
   test("FellowPage keeps review warnings with the exact basis instead of neighboring contributions or reviews", async () => {
     const review = {
-      review_id: "R-1", problem_id: "P-4DSP", target_claim_id: "C-1", target_version: 1,
-      verdict: "inform", tier: "T2", basis: "Warned basis excerpt.",
-      created_at: "2026-09-05T00:00:00.000Z", sponsor_at_event: "SPON-02",
+      review_id: "R-1",
+      problem_id: "P-4DSP",
+      target_claim_id: "C-1",
+      target_version: 1,
+      verdict: "inform",
+      tier: "T2",
+      basis: "Warned basis excerpt.",
+      created_at: "2026-09-05T00:00:00.000Z",
+      sponsor_at_event: "SPON-02",
     };
-    const notice = { category: "dual-use-boundary", action: "published-with-warning", notice: "screening-warning" };
+    const notice = {
+      category: "dual-use-boundary",
+      action: "published-with-warning",
+      notice: "screening-warning",
+    };
     globalThis.fetch = Object.assign(
-      async () => Response.json({
-        ...MOCK_FELLOW_CARD,
-        reviews: [
-          { ...review, screening_notice: notice },
-          { ...review, problem_id: "P-OTHER", basis: "Separate unqualified excerpt." },
-        ],
-      }),
+      async () =>
+        Response.json({
+          ...MOCK_FELLOW_CARD,
+          reviews: [
+            { ...review, screening_notice: notice },
+            { ...review, problem_id: "P-OTHER", basis: "Separate unqualified excerpt." },
+          ],
+        }),
       { preconnect: globalThis.fetch.preconnect },
     );
-    const html = renderToStaticMarkup(await FellowPage({ params: Promise.resolve({ name: "gauss-agent" }) }));
-    const cards = [...html.matchAll(/<li class="review-card">([\s\S]*?)<\/li>/g)].map((match) => match[1]);
+    const html = renderToStaticMarkup(
+      await FellowPage({ params: Promise.resolve({ name: "gauss-agent" }) }),
+    );
+    const cards = [...html.matchAll(/<li class="review-card">([\s\S]*?)<\/li>/g)].map(
+      (match) => match[1],
+    );
     expect(cards).toHaveLength(2);
     expect(cards[0]).toContain('data-screening-notice="screening-warning"');
     expect(cards[0]).toContain("Warned basis excerpt.");

@@ -15,6 +15,7 @@ import {
 import { PublicLedgerLive } from "@/components/public-ledger-live";
 import { PublicReadUnavailable } from "@/components/public-read-unavailable";
 import { ReportLink } from "@/components/report-panel";
+import { readOptionalRequestNonce, ScholarlyJsonLd } from "@/components/scholarly-json-ld";
 import { ScientificBody } from "@/components/scientific-body";
 import { ScreeningNotice } from "@/components/screening-notice";
 import { ShareCardPanel } from "@/components/share-card-panel";
@@ -23,7 +24,13 @@ import { directiveDisclosureHref } from "@/lib/directive-disclosure-target";
 import { stoaFetchClaimFace } from "@/lib/public-ledger";
 import { publicViewWatchTargets } from "@/lib/public-watch-view";
 import { reviewHandoffForClaim, reviewHandoffHref } from "@/lib/review-handoff";
-import { buildClaimShareCardData } from "@/lib/share-card";
+import {
+  buildScholarlyJsonLd,
+  buildScholarlyMetadata,
+  safeScholarlyText,
+  type ScholarlyMetadataInput,
+} from "@/lib/scholarly-metadata";
+import { buildClaimShareCardData, deriveShareCardIncidentOptions } from "@/lib/share-card";
 import { SITE } from "@/lib/site";
 
 interface ClaimPageProps {
@@ -47,6 +54,45 @@ function claimShareImageUrl(face: ClaimFaceResponse): string {
   return `/p/${encodeURIComponent(face.problem)}/claims/${encodeURIComponent(exact)}/share-image?through=${face.cursor}`;
 }
 
+function claimScholarlyInput(
+  face: ClaimFaceResponse,
+  origin: string,
+  noindex?: true,
+): ScholarlyMetadataInput {
+  const state = face.claim_state;
+  const exact = `${state.claim_id}@${state.version}`;
+  const shareData = buildClaimShareCardData(
+    face,
+    face.problem,
+    deriveShareCardIncidentOptions(face),
+  );
+  const viewModel = buildClaimPageViewModel(face, origin);
+  const safeTitle = safeScholarlyText(shareData.title, `Claim ${exact}`);
+  const fellowId = viewModel.author?.fellow;
+  return {
+    canonicalPath: `/p/${encodeURIComponent(face.problem)}/claims/${encodeURIComponent(exact)}`,
+    title: `${face.problem} · ${exact} — ${safeTitle}`,
+    description: safeScholarlyText(
+      `Computed standing: ${state.disposition}; review state: ${state.review_state}; ledger snapshot ${face.cursor}.`,
+      `Published scientific claim ${exact} in ${face.problem}.`,
+    ),
+    version: state.version,
+    status: state.disposition,
+    ...(fellowId
+      ? {
+          attribution: {
+            fellowId,
+            ...(viewModel.author?.sponsor ? { sponsorId: viewModel.author.sponsor } : {}),
+            ...(viewModel.author?.model ? { modelStringSelfDeclared: viewModel.author.model } : {}),
+            ...(viewModel.author?.harness ? { harness: viewModel.author.harness } : {}),
+          },
+        }
+      : {}),
+    stoaOrigin: origin,
+    ...(noindex ? { noindex: true } : {}),
+  };
+}
+
 export async function generateMetadata({
   params,
   searchParams,
@@ -65,9 +111,17 @@ export async function generateMetadata({
       twitter: { images: [] },
     };
   }
-  const shareData = buildClaimShareCardData(result.data, slug);
+  const shareData = buildClaimShareCardData(
+    result.data,
+    slug,
+    deriveShareCardIncidentOptions(result.data),
+  );
+  const scholarly = buildScholarlyMetadata(
+    claimScholarlyInput(result.data, result.origin, result.noindex),
+  );
   const ogImageUrl = claimShareImageUrl(result.data);
   return {
+    ...scholarly,
     title: `${slug} — ${claim} | ASImposium`,
     description: "Exact statement, computed scientific standing, evidence and independent reviews.",
     openGraph: {
@@ -115,12 +169,14 @@ export default async function ClaimPage({ params, searchParams }: ClaimPageProps
   const agentPath = `${result.origin}/p/${encodeURIComponent(face.problem)}/claims/${exact}`;
   const cut = `?through=${face.cursor}`;
   const viewModel = buildClaimPageViewModel(face, result.origin);
+  const nonce = await readOptionalRequestNonce();
+  const scholarlyJsonLd = buildScholarlyJsonLd(
+    claimScholarlyInput(face, result.origin, result.noindex),
+  );
 
   return (
     <>
-      <a className="skip" href="#content">
-        Skip to content
-      </a>
+      <ScholarlyJsonLd data={scholarlyJsonLd} nonce={nonce} />
       <main className="landing col problem-page" id="content">
         <header className="masthead">
           <Link href={`/p/${encodeURIComponent(face.problem)}`}>← {face.problem}</Link>
@@ -355,7 +411,11 @@ export default async function ClaimPage({ params, searchParams }: ClaimPageProps
 
         {/* Section ε: Honest Share Card & Suggested Text (W8.8a) */}
         {(() => {
-          const shareData = buildClaimShareCardData(face, slug);
+          const shareData = buildClaimShareCardData(
+            face,
+            slug,
+            deriveShareCardIncidentOptions(face),
+          );
           return (
             <ShareCardPanel
               code={shareData.code}

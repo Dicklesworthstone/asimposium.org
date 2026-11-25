@@ -1,7 +1,8 @@
 "use server";
 
-import { SynthesisIdSchema } from "@asimposium/contracts";
+import { type SynthesisDraftPublishResponse, SynthesisIdSchema } from "@asimposium/contracts";
 import { auth } from "@/auth";
+import { stoaPublishSynthesisDraft } from "@/lib/problem-governance";
 import {
   parseProblemResearchCommand,
   type ProblemResearchActionResult,
@@ -110,5 +111,66 @@ export async function changeProblemResearch(
     return uncertain;
   } catch {
     return uncertain;
+  }
+}
+
+export type PublishSynthesisDraftActionResult =
+  | { readonly ok: true; readonly published: SynthesisDraftPublishResponse }
+  | { readonly ok: false; readonly message: string };
+
+/** Publish a private Fellow-authored synthesis draft to the public ledger (Fable §6.1). */
+export async function publishSynthesisDraftAction(
+  expectedSponsorId: string,
+  problemId: string,
+  synthesisId: string,
+): Promise<PublishSynthesisDraftActionResult> {
+  try {
+    const session = await auth();
+    const principalId = session?.user?.id;
+    if (!isCanonicalSponsorId(principalId) || principalId !== expectedSponsorId) {
+      return {
+        ok: false,
+        message: "Your signed-in sponsor account changed or could not be verified. Reload first.",
+      };
+    }
+    if (!validProblemResearchTarget(problemId) || !SynthesisIdSchema.safeParse(synthesisId).success) {
+      return { ok: false, message: "Invalid problem or synthesis draft identifier." };
+    }
+    const result = await stoaPublishSynthesisDraft(principalId, problemId, synthesisId);
+    if (result.ok) return { ok: true, published: result.data };
+    if (result.reason === "refused" && result.status === 403) {
+      return {
+        ok: false,
+        message:
+          "Only a problem steward or the authoring Fellow's current sponsor may publish this draft.",
+      };
+    }
+    if (result.reason === "refused" && result.problemCode === "SYNTHESIS_UNANCHORED") {
+      return {
+        ok: false,
+        message:
+          "One or more anchors in this synthesis draft are no longer available at its covers_through cursor.",
+      };
+    }
+    if (result.reason === "refused" && result.problemCode === "SECRET_SHAPED_CONTENT") {
+      return {
+        ok: false,
+        message:
+          "This synthesis draft contains credential-shaped text and cannot be published to the public ledger.",
+      };
+    }
+    if (result.reason === "refused" && result.problemCode === "CLAIMS_BOARD_LOCKED") {
+      return {
+        ok: false,
+        message:
+          "This problem is no longer open for new synthesis publications in its current lifecycle state.",
+      };
+    }
+    return {
+      ok: false,
+      message: "Stoa could not publish this synthesis draft. Reload and try again.",
+    };
+  } catch {
+    return { ok: false, message: "Publishing the synthesis draft failed unexpectedly." };
   }
 }

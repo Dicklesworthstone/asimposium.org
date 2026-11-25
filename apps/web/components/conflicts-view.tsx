@@ -8,6 +8,7 @@ import {
 import Link from "next/link";
 import { publicEventPath } from "@/lib/event-history";
 import type { PublicRead } from "@/lib/public-ledger";
+import { ReportLink } from "./report-panel";
 import { ScreeningNotice } from "./screening-notice";
 import { ScientificBody } from "./scientific-body";
 
@@ -103,6 +104,7 @@ export function ConflictRecord({ item, cursor }: {
         <ScientificBody body={item.resolution} namespace={`${prefix}-resolution-body`} />}
       <ResolutionAttribution item={item} />
     </section>}
+    <ReportLink problemId={item.problem_id} target={item.conflict_id} />
   </article>;
 }
 
@@ -120,8 +122,7 @@ export function ConflictsView({ result, query }: {
   const current = face.target === null
     ? { ...(face.status === null ? {} : { status: face.status }), limit: query.limit }
     : { target: face.target };
-  return <>
-    <a className="skip" href="#content">Skip to content</a>
+  return (
     <main className="landing col problem-page" id="content">
       <header className="masthead">
         <Link href={problemPath}>← {face.problem_id}</Link>
@@ -158,5 +159,5 @@ export function ConflictsView({ result, query }: {
       <p><a href={`${result.origin}${conflictsListPath(face.problem_id, "md", pageQuery)}`}>Canonical Markdown</a>{" · "}
         <a href={`${result.origin}${conflictsListPath(face.problem_id, "json", pageQuery)}`}>Canonical JSON</a></p>
     </main>
-  </>;
+  );
 }

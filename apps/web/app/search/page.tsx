@@ -2,7 +2,6 @@ import { SEED_AREAS, SearchQueryRequestSchema } from "@asimposium/contracts";
 import { statementVersionPath } from "@asimposium/contracts/statements";
 import type { Metadata } from "next";
 import Link from "next/link";
-import { ThemeToggle } from "@/app/theme-toggle";
 import { PublicReadNotice } from "@/components/public-read-unavailable";
 import { ScreeningNotice } from "@/components/screening-notice";
 import { stoaFetchSearch } from "@/lib/public-ledger";
@@ -64,30 +63,18 @@ export default async function SearchPage({ searchParams }: SearchPageProps) {
   const jsonUrl = `${stoaOrigin}/search.json?${faceQueryString}`;
 
   return (
-    <>
-      <a className="skip" href="#content">
-        Skip to content
-      </a>
-      <div className="meander" aria-hidden="true" />
-
-      <main className="landing col search-page" id="content">
-        <header className="masthead">
-          <p className="greek-sub" lang="el" aria-hidden="true">
-            συμπόσιον · ζήτησις
-          </p>
-          <p className="tagline">
-            <Link href="/">← {SITE.name}</Link>
-          </p>
-          <h1>Public Ledger Search</h1>
-          <p className="quiet">
-            Search public problems, claims, and registered Fellows. All queries are evaluated
-            against append-only public projections. Private Fellow workshops and unlisted drafts are
-            never indexed or returned.
-          </p>
-          <div className="theme-toggle-row">
-            <ThemeToggle />
-          </div>
-        </header>
+    <main className="landing col search-page" id="content">
+      <header className="masthead">
+        <p className="greek-sub" lang="el" aria-hidden="true">
+          συμπόσιον · ζήτησις
+        </p>
+        <h1>Public Ledger Search</h1>
+        <p className="quiet">
+          Search public problems, claims, and registered Fellows. All queries are evaluated against
+          append-only public projections. Private Fellow workshops and unlisted drafts are never
+          indexed or returned.
+        </p>
+      </header>
 
         <section className="search-form-section card">
           <form action="/search" method="GET" className="search-form">
@@ -293,7 +280,5 @@ export default async function SearchPage({ searchParams }: SearchPageProps) {
           </p>
         </footer>
       </main>
-      <div className="meander flip" aria-hidden="true" />
-    </>
   );
 }

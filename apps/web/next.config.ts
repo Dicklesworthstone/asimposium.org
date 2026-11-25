@@ -10,7 +10,10 @@ const DESIGN_HTML = join(import.meta.dirname, "public/design.html");
 export function inlineScriptHashes(path: string): string[] {
   const html = readFileSync(path, "utf8");
   return [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(
-    (match) => `'sha256-${createHash("sha256").update(match[1] ?? "").digest("base64")}'`,
+    (match) =>
+      `'sha256-${createHash("sha256")
+        .update(match[1] ?? "")
+        .digest("base64")}'`,
   );
 }
 export interface AgoraNextConfig {
@@ -76,6 +79,15 @@ const nextConfig: AgoraNextConfig = {
           },
         ],
       },
+      {
+        // Placed AFTER /(.*) so the specific route overrides Referrer-Policy:
+        // signed digest unsubscribe links carry an HMAC token in query params.
+        source: "/console/email-preferences/unsubscribe",
+        headers: [
+          { key: "Referrer-Policy", value: "no-referrer" },
+          { key: "Cache-Control", value: "private, no-store" },
+        ],
+      },
     ];
   },
   async rewrites() {
@@ -135,6 +147,26 @@ const nextConfig: AgoraNextConfig = {
         permanent: true,
       },
       {
+        source: "/about.md",
+        destination: `${stoaOrigin}/about.md`,
+        permanent: true,
+      },
+      {
+        source: "/moderation.md",
+        destination: `${stoaOrigin}/moderation.md`,
+        permanent: true,
+      },
+      {
+        source: "/moderation/log.md",
+        destination: `${stoaOrigin}/moderation/log.md`,
+        permanent: true,
+      },
+      {
+        source: "/moderation/log.json",
+        destination: `${stoaOrigin}/moderation/log.json`,
+        permanent: true,
+      },
+      {
         source: "/inoculation.md",
         destination: `${stoaOrigin}/inoculation.md`,
         permanent: true,
@@ -185,6 +217,31 @@ const nextConfig: AgoraNextConfig = {
         permanent: true,
       },
       {
+        source: "/area/:slug.md",
+        destination: `${stoaOrigin}/area/:slug.md`,
+        permanent: true,
+      },
+      {
+        source: "/area/:slug.json",
+        destination: `${stoaOrigin}/area/:slug.json`,
+        permanent: true,
+      },
+      ...["md", "json", "html"].map((suffix) => ({
+        source: `/a/:name.${suffix}`,
+        destination: `${stoaOrigin}/a/:name.${suffix}`,
+        permanent: true,
+      })),
+      ...["md", "json"].map((suffix) => ({
+        source: `/fellows/:id.${suffix}`,
+        destination: `${stoaOrigin}/fellows/:id.${suffix}`,
+        permanent: true,
+      })),
+      ...["md", "json", "html"].map((suffix) => ({
+        source: `/reviews.${suffix}`,
+        destination: `${stoaOrigin}/reviews.${suffix}`,
+        permanent: true,
+      })),
+      {
         source: "/now.md",
         destination: `${stoaOrigin}/now.md`,
         permanent: true,
@@ -194,16 +251,11 @@ const nextConfig: AgoraNextConfig = {
         destination: `${stoaOrigin}/now.json`,
         permanent: true,
       },
-      {
-        source: "/results.md",
-        destination: `${stoaOrigin}/results.md`,
+      ...["md", "json", "html"].map((suffix) => ({
+        source: `/results.${suffix}`,
+        destination: `${stoaOrigin}/results.${suffix}`,
         permanent: true,
-      },
-      {
-        source: "/results.json",
-        destination: `${stoaOrigin}/results.json`,
-        permanent: true,
-      },
+      })),
       ...["md", "json"].map((suffix) => ({
         source: `/stats.${suffix}`,
         destination: `${stoaOrigin}/stats.${suffix}`,
@@ -224,36 +276,46 @@ const nextConfig: AgoraNextConfig = {
         destination: `${stoaOrigin}/p/:slug/full.md`,
         permanent: true,
       },
-      {
-        source: "/p/:slug/claims.md",
-        destination: `${stoaOrigin}/p/:slug/claims.md`,
+      ...["md", "json"].map((suffix) => ({
+        source: `/p/:slug/moves.${suffix}`,
+        destination: `${stoaOrigin}/p/:slug/moves.${suffix}`,
         permanent: true,
-      },
-      {
-        source: "/p/:slug/claims.json",
-        destination: `${stoaOrigin}/p/:slug/claims.json`,
+      })),
+      ...["md", "json", "html"].map((suffix) => ({
+        source: `/p/:slug/statements.${suffix}`,
+        destination: `${stoaOrigin}/p/:slug/statements.${suffix}`,
         permanent: true,
-      },
-      {
-        source: "/p/:slug/claims.html",
-        destination: `${stoaOrigin}/p/:slug/claims.html`,
+      })),
+      ...["md", "json", "html"].map((suffix) => ({
+        source: `/p/:slug/statements/:version.${suffix}`,
+        destination: `${stoaOrigin}/p/:slug/statements/:version.${suffix}`,
         permanent: true,
-      },
-      {
-        source: "/p/:slug/claims/:claim.md",
-        destination: `${stoaOrigin}/p/:slug/claims/:claim.md`,
+      })),
+      ...["md", "json", "html"].map((suffix) => ({
+        source: `/p/:slug/claims.${suffix}`,
+        destination: `${stoaOrigin}/p/:slug/claims.${suffix}`,
         permanent: true,
-      },
-      {
-        source: "/p/:slug/claims/:claim.bib",
-        destination: `${stoaOrigin}/p/:slug/claims/:claim.bib`,
+      })),
+      ...["csl.json", "md", "json", "html", "bib"].map((suffix) => ({
+        source: `/p/:slug/claims/:claim.${suffix}`,
+        destination: `${stoaOrigin}/p/:slug/claims/:claim.${suffix}`,
         permanent: true,
-      },
-      {
-        source: "/p/:slug/claims/:claim.json",
-        destination: `${stoaOrigin}/p/:slug/claims/:claim.json`,
+      })),
+      ...["md", "json", "html"].map((suffix) => ({
+        source: `/p/:slug/hypotheses.${suffix}`,
+        destination: `${stoaOrigin}/p/:slug/hypotheses.${suffix}`,
         permanent: true,
-      },
+      })),
+      ...["md", "json", "html"].map((suffix) => ({
+        source: `/p/:slug/hypotheses/:hid.${suffix}`,
+        destination: `${stoaOrigin}/p/:slug/hypotheses/:hid.${suffix}`,
+        permanent: true,
+      })),
+      ...["md", "json"].map((suffix) => ({
+        source: `/p/:slug/evidence/:eid.${suffix}`,
+        destination: `${stoaOrigin}/p/:slug/evidence/:eid.${suffix}`,
+        permanent: true,
+      })),
       ...["md", "json"].flatMap((suffix) => [
         {
           source: `/p/:slug/evidence/:evidence/artifacts.${suffix}`,
@@ -266,6 +328,11 @@ const nextConfig: AgoraNextConfig = {
           permanent: true,
         },
       ]),
+      ...["md", "json"].map((suffix) => ({
+        source: `/p/:slug/reviews/:rid.${suffix}`,
+        destination: `${stoaOrigin}/p/:slug/reviews/:rid.${suffix}`,
+        permanent: true,
+      })),
       ...["md", "json", "html"].map((suffix) => ({
         source: `/p/:slug/citations.${suffix}`,
         destination: `${stoaOrigin}/p/:slug/citations.${suffix}`,
@@ -276,6 +343,73 @@ const nextConfig: AgoraNextConfig = {
         destination: `${stoaOrigin}/p/:slug/citations/:target.${suffix}`,
         permanent: true,
       })),
+      ...["md", "json", "html"].flatMap((suffix) => [
+        {
+          source: `/p/:slug/gaps.${suffix}`,
+          destination: `${stoaOrigin}/p/:slug/gaps.${suffix}`,
+          permanent: true,
+        },
+        {
+          source: `/p/:slug/conflicts.${suffix}`,
+          destination: `${stoaOrigin}/p/:slug/conflicts.${suffix}`,
+          permanent: true,
+        },
+        {
+          source: `/p/:slug/dead-ends.${suffix}`,
+          destination: `${stoaOrigin}/p/:slug/dead-ends.${suffix}`,
+          permanent: true,
+        },
+        {
+          source: `/p/:slug/syntheses.${suffix}`,
+          destination: `${stoaOrigin}/p/:slug/syntheses.${suffix}`,
+          permanent: true,
+        },
+        {
+          source: `/p/:slug/syntheses/:target.${suffix}`,
+          destination: `${stoaOrigin}/p/:slug/syntheses/:target.${suffix}`,
+          permanent: true,
+        },
+        {
+          source: `/p/:slug/questions.${suffix}`,
+          destination: `${stoaOrigin}/p/:slug/questions.${suffix}`,
+          permanent: true,
+        },
+        {
+          source: `/p/:slug/retractions.${suffix}`,
+          destination: `${stoaOrigin}/p/:slug/retractions.${suffix}`,
+          permanent: true,
+        },
+        {
+          source: `/p/:slug/commentary.${suffix}`,
+          destination: `${stoaOrigin}/p/:slug/commentary.${suffix}`,
+          permanent: true,
+        },
+        {
+          source: `/p/:slug/formal.${suffix}`,
+          destination: `${stoaOrigin}/p/:slug/formal.${suffix}`,
+          permanent: true,
+        },
+      ]),
+      ...["md", "json"].map((suffix) => ({
+        source: `/p/:slug/relations/:relId.${suffix}`,
+        destination: `${stoaOrigin}/p/:slug/relations/:relId.${suffix}`,
+        permanent: true,
+      })),
+      ...["md", "json", "ndjson", "toon"].map((suffix) => ({
+        source: `/p/:slug/events.${suffix}`,
+        destination: `${stoaOrigin}/p/:slug/events.${suffix}`,
+        permanent: true,
+      })),
+      ...["md", "json"].map((suffix) => ({
+        source: `/p/:slug/checkpoints.${suffix}`,
+        destination: `${stoaOrigin}/p/:slug/checkpoints.${suffix}`,
+        permanent: true,
+      })),
+      {
+        source: "/p/:slug/export.jsonl.gz",
+        destination: `${stoaOrigin}/p/:slug/export.jsonl.gz`,
+        permanent: true,
+      },
       {
         source: "/search.md",
         destination: `${stoaOrigin}/search.md`,

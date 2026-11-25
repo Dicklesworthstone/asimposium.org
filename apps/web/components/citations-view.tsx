@@ -11,6 +11,7 @@ import { citationLocatorLink, citationOmissionText, citationProvenanceLabel } fr
 import { publicEventPath } from "@/lib/event-history";
 import type { PublicRead } from "@/lib/public-ledger";
 import { questionReferenceLink } from "@/lib/question-view";
+import { ReportLink } from "./report-panel";
 import { ScientificBody } from "./scientific-body";
 import { ScreeningNotice } from "./screening-notice";
 
@@ -107,8 +108,7 @@ export function CitationsView({ result, query }: {
   const snapshot = { through: face.cursor, limit: query.limit };
   const filter = face.unanchored === null ? {} : { unanchored: face.unanchored };
   const pageQuery = { ...snapshot, after: face.after, ...filter };
-  return <>
-    <a className="skip" href="#content">Skip to content</a>
+  return (
     <main className="landing col problem-page" id="content">
       <header className="masthead">
         <Link href={`/p/${encodeURIComponent(face.problem_id)}`}>← {face.problem_id}</Link>
@@ -139,7 +139,7 @@ export function CitationsView({ result, query }: {
       <p><a href={`${result.origin}${citationsListPath(face.problem_id, "md", pageQuery)}`}>Canonical Markdown</a>{" · "}
         <a href={`${result.origin}${citationsListPath(face.problem_id, "json", pageQuery)}`}>Canonical JSON</a></p>
     </main>
-  </>;
+  );
 }
 
 function ScientificReference({ problem, reference, cursor }: {
@@ -161,8 +161,7 @@ export function CitationView({ result }: {
   const item = face.citation;
   const snapshot = { through: face.cursor };
   const target = `${item.citation_id}@${item.version}`;
-  return <>
-    <a className="skip" href="#content">Skip to content</a>
+  return (
     <main className="landing col problem-page" id="content">
       <header className="masthead">
         <nav aria-label="Breadcrumbs"><Link href={`/p/${encodeURIComponent(item.problem_id)}`}>{item.problem_id}</Link>{" / "}
@@ -211,6 +210,7 @@ export function CitationView({ result }: {
         </ul>}
       </section>
       <CitationOmissions omitted={face.omitted} />
+      <ReportLink problemId={item.problem_id} target={item.citation_id} />
     </main>
-  </>;
+  );
 }

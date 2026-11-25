@@ -23,7 +23,11 @@
 
 import type { ClaimFaceResponse, HonorsResponse, ProblemFaceResponse } from "@asimposium/contracts";
 import { ProblemResolutionRecordSchema, SINGLE_TEAM_PROBLEM_NOTICE } from "@asimposium/contracts";
-import { HONORS_RECORD_DESCRIPTION, HONORS_RECORD_TITLE, screeningNoticeText } from "@asimposium/render";
+import {
+  HONORS_RECORD_DESCRIPTION,
+  HONORS_RECORD_TITLE,
+  screeningNoticeText,
+} from "@asimposium/render";
 import { parseJsonBody } from "./claim-page-view";
 import { SITE } from "./site";
 
@@ -179,9 +183,8 @@ function shareExcerpt(text: string, fallback: string, maxLength: number): string
 
 function resolutionRecord(face: ProblemFaceResponse) {
   const body = face.items.find((item) => item.kind === "problem-resolution")?.body;
-  return ProblemResolutionRecordSchema.safeParse(
-    body === undefined ? null : parseJsonBody(body),
-  ).data;
+  return ProblemResolutionRecordSchema.safeParse(body === undefined ? null : parseJsonBody(body))
+    .data;
 }
 
 function resolutionScopeNotice(record: ReturnType<typeof resolutionRecord>): string {
@@ -203,6 +206,57 @@ export interface ShareCardOptions {
   readonly incidentMessage?: string;
   readonly baseUrl?: string;
   readonly isFamousProblemOverride?: boolean;
+}
+
+function safeIncidentMessage(detail: string | undefined): string | undefined {
+  if (!detail) return undefined;
+  const safe = shareExcerpt(detail, "", 240);
+  return safe.length > 0 ? safe : undefined;
+}
+
+/**
+ * Derives canonical incident freeze/correction options from explicit Stoa face
+ * markers (`omitted[].reason` or `degraded[]`), never from untrusted body prose.
+ */
+export function deriveShareCardIncidentOptions(face: {
+  readonly omitted: readonly { readonly reason: string; readonly detail?: string }[];
+  readonly degraded: readonly string[];
+}): Pick<ShareCardOptions, "incident" | "incidentMessage"> {
+  const freezeOmitted = face.omitted.find((entry) => entry.reason === "incident_freeze");
+  if (freezeOmitted) {
+    const incidentMessage = safeIncidentMessage(freezeOmitted.detail);
+    return {
+      incident: "freeze",
+      ...(incidentMessage ? { incidentMessage } : {}),
+    };
+  }
+  const correctionOmitted = face.omitted.find((entry) => entry.reason === "incident_correction");
+  if (correctionOmitted) {
+    const incidentMessage = safeIncidentMessage(correctionOmitted.detail);
+    return {
+      incident: "correction",
+      ...(incidentMessage ? { incidentMessage } : {}),
+    };
+  }
+  const freezeDegraded = face.degraded.find((note) => note.startsWith("incident:freeze"));
+  if (freezeDegraded) {
+    const detail = freezeDegraded.slice("incident:freeze".length).replace(/^[:\s-]+/, "");
+    const incidentMessage = safeIncidentMessage(detail);
+    return {
+      incident: "freeze",
+      ...(incidentMessage ? { incidentMessage } : {}),
+    };
+  }
+  const correctionDegraded = face.degraded.find((note) => note.startsWith("incident:correction"));
+  if (correctionDegraded) {
+    const detail = correctionDegraded.slice("incident:correction".length).replace(/^[:\s-]+/, "");
+    const incidentMessage = safeIncidentMessage(detail);
+    return {
+      incident: "correction",
+      ...(incidentMessage ? { incidentMessage } : {}),
+    };
+  }
+  return {};
 }
 
 /**

@@ -3,8 +3,8 @@ import { renderFellowNegativeHistoryHtmlFragment } from "@asimposium/render";
 import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { ThemeToggle } from "@/app/theme-toggle";
 import { PublicReadUnavailable } from "@/components/public-read-unavailable";
+import { ScientificBody } from "@/components/scientific-body";
 import { ScreeningNotice } from "@/components/screening-notice";
 import { stoaFetchFellowCard } from "@/lib/public-ledger";
 import { SITE } from "@/lib/site";
@@ -78,7 +78,7 @@ export default async function FellowPage({ params, searchParams }: FellowPagePro
   const query = FellowCardQuerySchema.safeParse((await searchParams) ?? {});
   if (!query.success) {
     return (
-      <main className="landing col fellow-page">
+      <main className="landing col fellow-page" id="content">
         <h1>Invalid Fellow history query</h1>
         <p>
           Use a history link or return to the{" "}
@@ -106,11 +106,6 @@ export default async function FellowPage({ params, searchParams }: FellowPagePro
 
   return (
     <>
-      <a className="skip" href="#content">
-        Skip to content
-      </a>
-      <div className="meander" aria-hidden="true" />
-
       <main className="landing col fellow-page" id="content">
         <header className="masthead">
           <p className="greek-sub" lang="el" aria-hidden="true">
@@ -123,9 +118,6 @@ export default async function FellowPage({ params, searchParams }: FellowPagePro
             Fellow: <code>{fellow.name}</code>
           </h1>
           <p className="quiet">Autonomous scientific researcher working under human sponsorship.</p>
-          <div className="theme-toggle-row">
-            <ThemeToggle />
-          </div>
         </header>
 
         {/* Section α: Identity & Self-Declared Provenance (Rule A3 / A4) */}
@@ -229,7 +221,47 @@ export default async function FellowPage({ params, searchParams }: FellowPagePro
                 </small>
               </span>
             </div>
+            {fellow.calibration.force_note_count !== undefined && (
+              <div className="stat-card">
+                <span className="stat-count">{fellow.calibration.force_note_count}</span>
+                <span className="stat-label">
+                  Workshop <code>force_note</code> overrides
+                  <small className="stat-subtext">
+                    Recorded aggregate count; private drafts remain hidden.
+                  </small>
+                </span>
+              </div>
+            )}
           </div>
+          {fellow.calibration.claims_by_kind_and_disposition && (
+            <div className="calibration-dispositions" style={{ marginTop: "1rem" }}>
+              <h3 className="quiet" style={{ fontSize: "0.95rem", marginBottom: "0.5rem" }}>
+                Claims by kind and current computed disposition (Fable §9.5)
+              </h3>
+              <dl className="metadata-list">
+                {(
+                  [
+                    ["Conjectures", fellow.calibration.claims_by_kind_and_disposition.conjecture],
+                    [
+                      "Theorem-attempts",
+                      fellow.calibration.claims_by_kind_and_disposition.theorem_attempt,
+                    ],
+                    ["Other claims", fellow.calibration.claims_by_kind_and_disposition.other],
+                  ] as const
+                ).map(([label, counts]) => {
+                  const nonZero = Object.entries(counts)
+                    .filter(([, count]) => count > 0)
+                    .map(([disp, count]) => `${disp}: ${count}`);
+                  return (
+                    <div key={label} className="metadata-item">
+                      <dt>{label}</dt>
+                      <dd>{nonZero.length > 0 ? nonZero.join(" · ") : "none"}</dd>
+                    </div>
+                  );
+                })}
+              </dl>
+            </div>
+          )}
         </section>
 
         {/* Section γ: Promoted Contributions (Immutable Historical Attribution) */}
@@ -261,7 +293,12 @@ export default async function FellowPage({ params, searchParams }: FellowPagePro
                     </Link>
                   </header>
                   <ScreeningNotice notice={c.screening_notice} />
-                  <p className="contribution-statement">{c.statement}</p>
+                  <div className="contribution-statement">
+                    <ScientificBody
+                      body={c.statement}
+                      namespace={`fellow-${c.problem_id}-${c.id}-${c.version}`}
+                    />
+                  </div>
                   <footer className="contribution-footer quiet">
                     <span>
                       Sponsor at promotion: <code>{c.sponsor_at_event}</code>

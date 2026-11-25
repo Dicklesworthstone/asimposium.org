@@ -20,7 +20,7 @@ import {
 } from "@/lib/plane-status";
 import { reviewHandoffFromQuery } from "@/lib/review-handoff";
 import { readReviewHandoff } from "@/lib/review-handoff-read";
-import { LAUNCH_STAGE, SITE } from "@/lib/site";
+import { LAUNCH_STAGE } from "@/lib/site";
 import { isCanonicalSponsorId } from "@/lib/sponsor-id";
 import {
   configuredStoaOrigin,
@@ -46,7 +46,6 @@ import { consolePageHref, workshopIndexRequestFromCursor } from "@/lib/workshop-
 import { workshopPageHref } from "@/lib/workshop-page";
 
 import { EnrollmentRecoveryFence } from "../enrollment-recovery-sentinel";
-import { ThemeToggle } from "../theme-toggle";
 import { LifecycleManager, MintCard, ProposalManager } from "./cards";
 import { ConsoleAutoRefresh } from "./console-auto-refresh";
 import { DirectiveManager } from "./directive-card";
@@ -116,24 +115,13 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
 
   if (!who) {
     return (
-      <>
-        <a className="skip" href="#content">
-          Skip to content
-        </a>
-        <div className="meander" aria-hidden="true" />
-        <main className="landing col console" id="content">
-          <header className="masthead console-head">
-            <p className="greek-sub" lang="el" aria-hidden="true">
-              προπύλαιον
-            </p>
-            <h1 className="console-title">Sponsor console</h1>
-            <p className="tagline">
-              <Link href="/">← {SITE.name}</Link>
-            </p>
-            <p className="theme-toggle-row">
-              <ThemeToggle />
-            </p>
-          </header>
+      <main className="landing col console" id="content">
+        <header className="masthead console-head">
+          <p className="greek-sub" lang="el" aria-hidden="true">
+            προπύλαιον
+          </p>
+          <h1 className="console-title">Sponsor console</h1>
+        </header>
 
           <section className="card" aria-labelledby="sign-in-title">
             <h2 className="card-title" id="sign-in-title">
@@ -178,9 +166,7 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
               </button>
             </form>
           </section>
-        </main>
-        <div className="meander flip" aria-hidden="true" />
-      </>
+      </main>
     );
   }
 
@@ -317,25 +303,13 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
   }
 
   return (
-    <>
-      <a className="skip" href="#content">
-        Skip to content
-      </a>
-      <div className="meander" aria-hidden="true" />
-
-      <main className="landing col console" id="content">
-        <header className="masthead console-head">
-          <p className="greek-sub" lang="el" aria-hidden="true">
-            προπύλαιον
-          </p>
-          <h1 className="console-title">Sponsor console</h1>
-          <p className="tagline">
-            <Link href="/">← {SITE.name}</Link>
-          </p>
-          <p className="theme-toggle-row">
-            <ThemeToggle />
-          </p>
-        </header>
+    <main className="landing col console" id="content">
+      <header className="masthead console-head">
+        <p className="greek-sub" lang="el" aria-hidden="true">
+          προπύλαιον
+        </p>
+        <h1 className="console-title">Sponsor console</h1>
+      </header>
         {/* Interim liveness until Herald (W7): real re-renders while the
             sponsor watches for an agent's proposal. Renders nothing. */}
         <ConsoleAutoRefresh />
@@ -396,6 +370,11 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
           <p>
             <Link href="/console/disclosures" prefetch={false}>
               Review sponsor disclosures for an exact claim
+            </Link>
+          </p>
+          <p>
+            <Link href="/console/email-preferences" prefetch={false}>
+              Transactional email and digest preferences
             </Link>
           </p>
         </section>
@@ -821,8 +800,5 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
           </ul>
         </section>
       </main>
-
-      <div className="meander flip" aria-hidden="true" />
-    </>
   );
 }

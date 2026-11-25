@@ -392,7 +392,7 @@ export function ClaimCitationBox({
   readonly citations: ClaimPageViewModel["citations"];
   readonly exactTarget: string;
 }) {
-  if (!citations.hasBibtex) return null;
+  if (!citations.hasBibtex && !citations.hasCsl) return null;
 
   return (
     <section className="citation-section" aria-labelledby="citation-heading">
@@ -404,13 +404,17 @@ export function ClaimCitationBox({
         <code>{citations.plainCitation}</code>
       </pre>
       <div className="citation-actions">
-        <a className="button" href={citations.bibtexUrl} download={`${exactTarget}.bib`}>
-          Download BibTeX
-        </a>
-        {" · "}
-        <a className="button" href={citations.cslJsonUrl} download={`${exactTarget}.csl.json`}>
-          Download CSL-JSON
-        </a>
+        {citations.hasBibtex && (
+          <a className="button" href={citations.bibtexUrl} download={`${exactTarget}.bib`}>
+            Download BibTeX
+          </a>
+        )}
+        {citations.hasBibtex && citations.hasCsl ? " · " : null}
+        {citations.hasCsl && (
+          <a className="button" href={citations.cslJsonUrl} download={`${exactTarget}.csl.json`}>
+            Download CSL-JSON
+          </a>
+        )}
       </div>
     </section>
   );

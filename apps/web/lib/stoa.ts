@@ -89,6 +89,7 @@ import {
   SPONSOR_WORKSHOP_CURSOR_MAX_RESPONSE_BYTES,
   SPONSOR_WORKSHOP_INDEX_MAX_RESPONSE_BYTES,
   SPONSOR_WORKSHOP_MAX_RESPONSE_BYTES,
+  SPONSOR_WORKSHOP_ROOM_TICKET_MAX_RESPONSE_BYTES,
   type SponsorBootstrapResponse,
   SponsorBootstrapResponseSchema,
   type SponsorCommentaryPostRequest,
@@ -178,6 +179,10 @@ import {
   SponsorWorkshopMutationResponseSchema,
   type SponsorWorkshopRequest,
   SponsorWorkshopRequestSchema,
+  type SponsorWorkshopRoomTicketRequest,
+  SponsorWorkshopRoomTicketRequestSchema,
+  type SponsorWorkshopRoomTicketResponse,
+  SponsorWorkshopRoomTicketResponseSchema,
   type SponsorWorkshopView as SponsorWorkshopViewContract,
   SponsorWorkshopViewSchema,
   sponsorInboxPageIsValid,
@@ -231,6 +236,7 @@ const ROUTE_SPONSOR_PANIC = "/v1/sponsors/panic";
 const ROUTE_SPONSOR_TRANSFERS = "/v1/sponsors/transfers";
 const ROUTE_SPONSOR_WORKSHOP = "/v1/sponsors/workshop";
 const ROUTE_SPONSOR_WORKSHOP_CURSOR = "/v1/sponsors/workshop/cursor";
+const ROUTE_SPONSOR_WORKSHOP_ROOM_TICKET = "/v1/sponsors/workshop/room-ticket";
 const ROUTE_SPONSOR_WORKSHOP_INDEX = "/v1/sponsors/workshops";
 const ROUTE_SPONSOR_WORKSHOP_ACTION = "/v1/sponsors/workshop/action";
 const ROUTE_BOOTSTRAP = "/v1/sponsors/bootstrap";
@@ -250,6 +256,7 @@ const ROUTE_OPERATOR_REPORTS_RESOLUTION = "/v1/operators/reports/resolution";
 const ROUTE_OPERATOR_CONTENT_CONTROL = "/v1/operators/content-control";
 const ROUTE_OPERATOR_AREA_RENAME = "/v1/operators/areas/rename";
 const ROUTE_OPERATOR_AUDIT_HISTORY = "/v1/operators/audit-history";
+const ROUTE_SPONSOR_EMAIL_PREFERENCES = "/v1/sponsors/email-preferences";
 
 const ACTION_MINT = "enrollment.mint";
 const ACTION_PROPOSALS = "enrollment.proposals.list";
@@ -281,6 +288,16 @@ const ACTION_OPERATOR_REPORTS_RESOLVE = "operator.reports.resolve";
 const ACTION_OPERATOR_CONTENT_CONTROL = "operator.content.control";
 const ACTION_OPERATOR_AREA_RENAME = "operator.area.rename";
 const ACTION_OPERATOR_AUDIT_HISTORY = "operator.audit.history";
+const ACTION_EMAIL_PREFERENCES_READ = "email-preferences.read";
+const ACTION_EMAIL_PREFERENCES_WRITE = "email-preferences.write";
+
+export interface SponsorEmailPreference {
+  readonly sponsor_id: string;
+  readonly digest_opt_in: boolean;
+  readonly digest_unsubscribed_at: string | null;
+  readonly has_notification_email: boolean;
+  readonly updated_at: string | null;
+}
 
 export type StoaCall<T> =
   | { readonly ok: true; readonly data: T }
@@ -906,6 +923,35 @@ export function stoaSponsorWorkshopCursor(
         response.fellow_id !== command.fellow_id
       ) {
         throw new TypeError("workshop cursor does not match the signed request");
+      }
+      return response;
+    },
+  });
+}
+
+/** Mints a 60s single-use Ed25519 workshop room ticket over the signed service
+ * envelope (S-6). Fails closed with refused/unavailable when live rooms are down. */
+export function stoaSponsorWorkshopRoomTicket(
+  principalId: string,
+  request: SponsorWorkshopRoomTicketRequest,
+): Promise<StoaCall<SponsorWorkshopRoomTicketResponse>> {
+  const command = SponsorWorkshopRoomTicketRequestSchema.parse(request);
+  return callStoa({
+    method: "POST",
+    route: ROUTE_SPONSOR_WORKSHOP_ROOM_TICKET,
+    path: ROUTE_SPONSOR_WORKSHOP_ROOM_TICKET,
+    action: ACTION_WORKSHOP_READ,
+    principalId,
+    body: JSON.stringify(command),
+    responseMaxBytes: SPONSOR_WORKSHOP_ROOM_TICKET_MAX_RESPONSE_BYTES,
+    parse: (value) => {
+      const response = SponsorWorkshopRoomTicketResponseSchema.parse(value);
+      if (
+        response.sponsor_id !== principalId ||
+        response.problem_id !== command.problem_id ||
+        response.fellow_id !== command.fellow_id
+      ) {
+        throw new TypeError("workshop room ticket does not match the signed request");
       }
       return response;
     },
@@ -2054,5 +2100,79 @@ export function stoaChangeProblemSlowMode(
         throw new Error("Slow-mode receipt command mismatch");
       return receipt;
     },
+  });
+}
+
+function parseSponsorEmailPreference(
+  value: unknown,
+  expectedSponsorId: string,
+): SponsorEmailPreference {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("Invalid email preference payload");
+  }
+  const obj = value as Record<string, unknown>;
+  if (
+    obj.sponsor_id !== expectedSponsorId ||
+    typeof obj.digest_opt_in !== "boolean" ||
+    (obj.digest_unsubscribed_at !== null && typeof obj.digest_unsubscribed_at !== "string") ||
+    typeof obj.has_notification_email !== "boolean" ||
+    (obj.updated_at !== null && typeof obj.updated_at !== "string")
+  ) {
+    throw new Error("Email preference response contract mismatch");
+  }
+  return {
+    sponsor_id: obj.sponsor_id,
+    digest_opt_in: obj.digest_opt_in,
+    digest_unsubscribed_at: obj.digest_unsubscribed_at,
+    has_notification_email: obj.has_notification_email,
+    updated_at: obj.updated_at,
+  };
+}
+
+/** OPS.7: Read authenticated sponsor's email preferences metadata (never returns plaintext email). */
+export function stoaGetSponsorEmailPreferences(
+  sponsorId: string,
+): Promise<StoaCall<SponsorEmailPreference>> {
+  if (!isCanonicalSponsorId(sponsorId)) {
+    return Promise.resolve({ ok: false, reason: "refused", status: 403 });
+  }
+  return callStoa({
+    method: "GET",
+    route: ROUTE_SPONSOR_EMAIL_PREFERENCES,
+    path: ROUTE_SPONSOR_EMAIL_PREFERENCES,
+    action: ACTION_EMAIL_PREFERENCES_READ,
+    principalId: sponsorId,
+    principalType: "sponsor",
+    body: "",
+    parse: (value) => parseSponsorEmailPreference(value, sponsorId),
+  });
+}
+
+/** OPS.7: Update authenticated sponsor's digest opt-in and optional private notification email. */
+export function stoaUpdateSponsorEmailPreferences(
+  sponsorId: string,
+  update: {
+    readonly digest_opt_in: boolean;
+    readonly notification_email?: string | null;
+  },
+): Promise<StoaCall<SponsorEmailPreference>> {
+  if (!isCanonicalSponsorId(sponsorId) || typeof update.digest_opt_in !== "boolean") {
+    return Promise.resolve({ ok: false, reason: "refused", status: 422 });
+  }
+  const payload: { digest_opt_in: boolean; notification_email?: string | null } = {
+    digest_opt_in: update.digest_opt_in,
+  };
+  if (update.notification_email !== undefined) {
+    payload.notification_email = update.notification_email;
+  }
+  return callStoa({
+    method: "POST",
+    route: ROUTE_SPONSOR_EMAIL_PREFERENCES,
+    path: ROUTE_SPONSOR_EMAIL_PREFERENCES,
+    action: ACTION_EMAIL_PREFERENCES_WRITE,
+    principalId: sponsorId,
+    principalType: "sponsor",
+    body: JSON.stringify(payload),
+    parse: (value) => parseSponsorEmailPreference(value, sponsorId),
   });
 }

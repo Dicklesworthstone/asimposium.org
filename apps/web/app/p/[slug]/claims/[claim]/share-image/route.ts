@@ -4,7 +4,7 @@ import {
   PublicLedgerProblemIdSchema,
 } from "@asimposium/contracts";
 import { stoaFetchClaimFace } from "@/lib/public-ledger";
-import { buildClaimShareCardData } from "@/lib/share-card";
+import { buildClaimShareCardData, deriveShareCardIncidentOptions } from "@/lib/share-card";
 import { generateShareCardImageResponse } from "@/lib/share-card-render";
 
 // A historical ledger cut still obeys current public content controls.
@@ -52,7 +52,9 @@ export async function GET(
   if (result.state !== "ok") {
     return unavailableImage(result.state === "not_found" ? 404 : 503);
   }
-  const response = generateShareCardImageResponse(buildClaimShareCardData(result.data, slug));
+  const response = generateShareCardImageResponse(
+    buildClaimShareCardData(result.data, slug, deriveShareCardIncidentOptions(result.data)),
+  );
   response.headers.set("cache-control", "no-store");
   if (result.noindex) response.headers.set("x-robots-tag", "noindex, nofollow");
   return response;

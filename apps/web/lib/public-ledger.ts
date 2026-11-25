@@ -21,6 +21,8 @@ import {
   type HonorsResponse,
   HonorsResponseSchema,
   isTrustedStoaOrigin,
+  type LateProducerDegradedFace,
+  LateProducerDegradedFaceSchema,
   LedgerContractsSchema,
   NowStripQuerySchema,
   type NowStripResponse,
@@ -29,12 +31,16 @@ import {
   ProblemFaceResponseSchema,
   type ProblemsIndexResponse,
   ProblemsIndexResponseSchema,
+  PUBLIC_MOVES_PAGE_SIZE,
   PublicClaimTargetSchema,
   PublicLedgerProblemIdSchema,
-  PUBLIC_MOVES_PAGE_SIZE,
   PublicMovesQuerySchema,
   type PublicMovesResponse,
   PublicMovesResponseSchema,
+  type PublicProblemMoves,
+  PublicProblemMovesSchema,
+  type RetractionsListResponse,
+  RetractionsListResponseSchema,
   type SearchQueryRequest,
   SearchQueryRequestSchema,
   type SearchResponse,
@@ -42,10 +48,10 @@ import {
 } from "@asimposium/contracts";
 import {
   CitationReadQuerySchema,
-  citationMatchesQuery,
-  citationPath,
   type CitationsListResponse,
   CitationsListResponseSchema,
+  citationMatchesQuery,
+  citationPath,
   citationsListMatchesQuery,
   citationsListPath,
   PublicCitationTargetSchema,
@@ -60,26 +66,30 @@ import {
   claimsListPath,
 } from "@asimposium/contracts/claims-list";
 import {
+  type EventTailPage,
+  EventTailResponseSchema,
+  eventTailPath,
+} from "@asimposium/contracts/event-tail";
+import {
   HypothesesQuerySchema,
   type HypothesesResponse,
   HypothesesResponseSchema,
   HypothesisItemQuerySchema,
   PublicHypothesisIdSchema,
 } from "@asimposium/contracts/hypotheses";
-import type { PublicWatchTarget } from "@asimposium/contracts/public-watch";
 import { type ProofGapsResponse, ProofGapsResponseSchema } from "@asimposium/contracts/proof-gaps";
-import { type EventTailPage, EventTailResponseSchema, eventTailPath } from "@asimposium/contracts/event-tail";
+import type { PublicWatchTarget } from "@asimposium/contracts/public-watch";
 import {
   ReviewQueueQuerySchema,
   type ReviewQueueResponse,
   ReviewQueueResponseSchema,
 } from "@asimposium/contracts/review-queue";
-import { deadEndsMatchView } from "./dead-end-view";
 import { parseCitationViewQuery } from "./citation-view";
+import { deadEndsMatchView } from "./dead-end-view";
 import { eventHistoryMatchesQuery, parseEventHistoryQuery } from "./event-history";
-import { publicReadWatch } from "./public-watch-view";
-import { parsePublicRecord, type PublicRecord, type PublicRecordTarget } from "./public-record";
 import { parseProofGapQuery, proofGapQueryString, proofGapsMatchQuery } from "./proof-gap-view";
+import { type PublicRecord, type PublicRecordTarget, parsePublicRecord } from "./public-record";
+import { publicReadWatch } from "./public-watch-view";
 import { humanReviewQueuePath, reviewQueueMatchesQuery } from "./review-queue-view";
 import { configuredStoaOrigin } from "./stoa";
 
@@ -246,7 +256,8 @@ export async function stoaFetchPublicRecord(
     const sequence = Number(target.recordId);
     if (
       !PublicLedgerProblemIdSchema.safeParse(target.problemId).success ||
-      !Number.isSafeInteger(sequence) || sequence < 1
+      !Number.isSafeInteger(sequence) ||
+      sequence < 1
     ) {
       return { state: "unavailable", reason: "invalid_response" };
     }
@@ -430,11 +441,15 @@ export async function stoaFetchProofGaps(
     return { state: "unavailable", reason: "invalid_response" };
   const result = await readPublic(
     `/p/${encodeURIComponent(problemId)}/gaps.json${proofGapQueryString(parsed)}`,
-    stoaOrigin, ProofGapsResponseSchema, 0, "PROBLEM_NOT_FOUND",
+    stoaOrigin,
+    ProofGapsResponseSchema,
+    0,
+    "PROBLEM_NOT_FOUND",
   );
   if (result.state !== "ok") return result;
   return proofGapsMatchQuery(problemId, parsed, result.data)
-    ? result : { state: "unavailable", reason: "invalid_response" };
+    ? result
+    : { state: "unavailable", reason: "invalid_response" };
 }
 
 /** Exact hypothesis reads never infer absence from a bounded collection page. */
@@ -493,10 +508,16 @@ export async function stoaFetchProblemsIndex(
   );
   if (result.state !== "ok") return result;
   const { problems, next_after } = result.data;
-  if (
-    problems.some((entry, i) => entry.id <= (problems[i - 1]?.id ?? after ?? "")) ||
-    (next_after !== undefined && next_after !== problems.at(-1)?.id)
-  ) {
+  const seen = new Set<string>();
+  let invalidPage = false;
+  for (const entry of problems) {
+    if (seen.has(entry.id) || (after !== undefined && entry.id === after)) {
+      invalidPage = true;
+      break;
+    }
+    seen.add(entry.id);
+  }
+  if (invalidPage || (next_after !== undefined && next_after !== problems.at(-1)?.id)) {
     return { state: "unavailable", reason: "invalid_response" };
   }
   return result;
@@ -660,10 +681,14 @@ export async function stoaFetchPublicMoves(
   const result = await readPublic(`/moves.json${suffix}`, stoaOrigin, PublicMovesResponseSchema, 0);
   if (result.state !== "ok") return result;
   const discovery = result.data.discovery;
-  const ids = discovery.problems.map(problem => problem.problem_id);
-  if (new Set(ids).size !== ids.length || discovery.scanned !== ids.length ||
-    ids.some(id => id <= (parsed.data.after ?? "")) ||
-    (discovery.next_after !== null && (ids.length !== PUBLIC_MOVES_PAGE_SIZE || [...ids].sort().at(-1) !== discovery.next_after)))
+  const ids = discovery.problems.map((problem) => problem.problem_id);
+  if (
+    new Set(ids).size !== ids.length ||
+    discovery.scanned !== ids.length ||
+    ids.some((id) => id <= (parsed.data.after ?? "")) ||
+    (discovery.next_after !== null &&
+      (ids.length !== PUBLIC_MOVES_PAGE_SIZE || [...ids].sort().at(-1) !== discovery.next_after))
+  )
     return { state: "unavailable", reason: "invalid_response" };
   return result;
 }
@@ -747,17 +772,27 @@ export async function stoaFetchCitations(
   query: unknown = {},
 ): Promise<PublicRead<CitationsListResponse>> {
   const parsed = parseCitationViewQuery(query);
-  if (typeof problemId !== "string" || problemId.trim() !== problemId ||
-      !PublicLedgerProblemIdSchema.safeParse(problemId).success || parsed === null) {
+  if (
+    typeof problemId !== "string" ||
+    problemId.trim() !== problemId ||
+    !PublicLedgerProblemIdSchema.safeParse(problemId).success ||
+    parsed === null
+  ) {
     return { state: "unavailable", reason: "invalid_response" };
   }
   const result = await readPublic(
-    citationsListPath(problemId, "json", parsed), stoaOrigin, CitationsListResponseSchema,
-    0, "CITATION_NOT_FOUND", "CURSOR_INVALID", 8 * 1024 * 1024,
+    citationsListPath(problemId, "json", parsed),
+    stoaOrigin,
+    CitationsListResponseSchema,
+    0,
+    "CITATION_NOT_FOUND",
+    "CURSOR_INVALID",
+    8 * 1024 * 1024,
   );
   if (result.state !== "ok") return result;
   return citationsListMatchesQuery(problemId, parsed, result.data)
-    ? result : { state: "unavailable", reason: "invalid_response" };
+    ? result
+    : { state: "unavailable", reason: "invalid_response" };
 }
 
 /** Exact citation/version reads never float to a different source. Current
@@ -769,16 +804,88 @@ export async function stoaFetchCitation(
   query: unknown = {},
 ): Promise<PublicRead<SingleCitationResponse>> {
   const parsed = CitationReadQuerySchema.safeParse(query);
-  if (typeof problemId !== "string" || problemId.trim() !== problemId ||
-      !PublicLedgerProblemIdSchema.safeParse(problemId).success ||
-      typeof target !== "string" || target.trim() !== target ||
-      !PublicCitationTargetSchema.safeParse(target).success || !parsed.success)
+  if (
+    typeof problemId !== "string" ||
+    problemId.trim() !== problemId ||
+    !PublicLedgerProblemIdSchema.safeParse(problemId).success ||
+    typeof target !== "string" ||
+    target.trim() !== target ||
+    !PublicCitationTargetSchema.safeParse(target).success ||
+    !parsed.success
+  )
     return { state: "unavailable", reason: "invalid_response" };
   const result = await readPublic(
-    citationPath(problemId, target, "json", parsed.data), stoaOrigin, SingleCitationResponseSchema,
-    0, "CITATION_NOT_FOUND", "CURSOR_INVALID", 8 * 1024 * 1024,
+    citationPath(problemId, target, "json", parsed.data),
+    stoaOrigin,
+    SingleCitationResponseSchema,
+    0,
+    "CITATION_NOT_FOUND",
+    "CURSOR_INVALID",
+    8 * 1024 * 1024,
   );
   if (result.state !== "ok") return result;
   return citationMatchesQuery(problemId, target, parsed.data, result.data)
-    ? result : { state: "unavailable", reason: "invalid_response" };
+    ? result
+    : { state: "unavailable", reason: "invalid_response" };
+}
+
+/** Public retractions list for a problem (W5.8d / Rule P6). */
+export async function stoaFetchRetractions(
+  problemId: string,
+  stoaOrigin: string | undefined = configuredStoaOrigin(),
+): Promise<PublicRead<RetractionsListResponse>> {
+  if (
+    typeof problemId !== "string" ||
+    problemId.trim() !== problemId ||
+    !PublicLedgerProblemIdSchema.safeParse(problemId).success
+  ) {
+    return { state: "unavailable", reason: "invalid_response" };
+  }
+  const result = await readPublic(
+    `/p/${encodeURIComponent(problemId)}/retractions.json`,
+    stoaOrigin,
+    RetractionsListResponseSchema,
+    0,
+    "PROBLEM_NOT_FOUND",
+  );
+  if (result.state !== "ok") return result;
+  return result.data.problem_id === problemId
+    ? result
+    : { state: "unavailable", reason: "invalid_response" };
+}
+
+/** Problem-scoped computed scientific needs (W6.1 / GET /p/:id/moves.json). */
+export async function stoaFetchProblemMoves(
+  problemId: string,
+  stoaOrigin: string | undefined = configuredStoaOrigin(),
+): Promise<PublicRead<PublicProblemMoves>> {
+  if (
+    typeof problemId !== "string" ||
+    problemId.trim() !== problemId ||
+    !PublicLedgerProblemIdSchema.safeParse(problemId).success
+  ) {
+    return { state: "unavailable", reason: "invalid_response" };
+  }
+  const result = await readPublic(
+    `/p/${encodeURIComponent(problemId)}/moves.json`,
+    stoaOrigin,
+    PublicProblemMovesSchema,
+    0,
+    "PROBLEM_NOT_FOUND",
+  );
+  if (result.state !== "ok") return result;
+  return result.data.problem_id === problemId
+    ? result
+    : { state: "unavailable", reason: "invalid_response" };
+}
+
+/** Public statistics surface (currently late-producer degraded until OPS.4 lands). */
+export async function stoaFetchStats(
+  stoaOrigin: string | undefined = configuredStoaOrigin(),
+): Promise<PublicRead<LateProducerDegradedFace>> {
+  const result = await readPublic("/stats.json", stoaOrigin, LateProducerDegradedFaceSchema, 0);
+  if (result.state !== "ok") return result;
+  return result.data.kind === "stats"
+    ? result
+    : { state: "unavailable", reason: "invalid_response" };
 }

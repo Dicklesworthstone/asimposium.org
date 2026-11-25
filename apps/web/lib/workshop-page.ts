@@ -7,6 +7,10 @@ import {
   type SponsorWorkshopPromotionReceipt,
   type SponsorWorkshopRequest,
   SponsorWorkshopRequestSchema,
+  type SponsorWorkshopRoomTicketRequest,
+  SponsorWorkshopRoomTicketRequestSchema,
+  type SponsorWorkshopRoomTicketResponse,
+  SponsorWorkshopRoomTicketResponseSchema,
   type SponsorWorkshopView,
   SponsorWorkshopViewSchema,
 } from "@asimposium/contracts";
@@ -120,6 +124,26 @@ export function privateWorkshopCursorResponse(status: number, body: unknown): Re
   });
 }
 
+/** Rejects cross-site browser requests while honoring Host/X-Forwarded-Host when
+ * Next.js internal `request.url` normalizes loopback binds to localhost. */
+export function isSameOriginWorkshopRequest(request: Request, url: URL): boolean {
+  if (request.headers.get("sec-fetch-site") === "cross-site") return false;
+  const origin = request.headers.get("origin");
+  if (origin === null) return true;
+  let parsedOrigin: URL;
+  try {
+    parsedOrigin = new URL(origin);
+  } catch {
+    return false;
+  }
+  const rawHost = request.headers.get("x-forwarded-host") ?? request.headers.get("host");
+  const expectedHost = rawHost?.split(",")[0]?.trim() || url.host;
+  const rawProto = request.headers.get("x-forwarded-proto")?.split(",")[0]?.trim();
+  const expectedProtocol =
+    rawProto === "https" || rawProto === "http" ? `${rawProto}:` : url.protocol;
+  return parsedOrigin.host === expectedHost && parsedOrigin.protocol === expectedProtocol;
+}
+
 /** The Agora cookie authenticates only this same-origin facade. Stoa receives
  * a signed sponsor request and independently checks current ownership. */
 export async function loadWorkshopCursorResponse(
@@ -160,6 +184,49 @@ export async function loadWorkshopCursorResponse(
     return privateWorkshopCursorResponse(200, parsed.data);
   } catch {
     return privateWorkshopCursorResponse(503, { error: "Workshop checks are unavailable." });
+  }
+}
+
+/** Mints a 60s single-use Ed25519 room ticket from Stoa via the signed
+ * sponsor envelope. Agora's host-only cookie never crosses to a.asimposium.org. */
+export async function loadWorkshopRoomTicketResponse(
+  sponsorId: unknown,
+  fellowId: string,
+  problemId: string,
+  mint: (
+    sponsorId: string,
+    request: SponsorWorkshopRoomTicketRequest,
+  ) => Promise<StoaCall<SponsorWorkshopRoomTicketResponse>>,
+): Promise<Response> {
+  if (!isCanonicalSponsorId(sponsorId))
+    return privateWorkshopCursorResponse(401, { error: "Sign in to open this workshop room." });
+  const request = SponsorWorkshopRoomTicketRequestSchema.safeParse({
+    fellow_id: fellowId,
+    problem_id: problemId,
+  });
+  if (!request.success)
+    return privateWorkshopCursorResponse(400, { error: "Invalid workshop link." });
+  try {
+    const result = await mint(sponsorId, request.data);
+    if (!result.ok) {
+      const status =
+        result.reason === "refused" &&
+        (result.status === 401 || result.status === 403 || result.status === 404)
+          ? 404
+          : 503;
+      return privateWorkshopCursorResponse(status, { error: "Workshop live room is unavailable." });
+    }
+    const parsed = SponsorWorkshopRoomTicketResponseSchema.safeParse(result.data);
+    if (
+      !parsed.success ||
+      parsed.data.sponsor_id !== sponsorId ||
+      parsed.data.fellow_id !== fellowId ||
+      parsed.data.problem_id !== problemId
+    )
+      return privateWorkshopCursorResponse(503, { error: "Workshop live room is unavailable." });
+    return privateWorkshopCursorResponse(200, parsed.data);
+  } catch {
+    return privateWorkshopCursorResponse(503, { error: "Workshop live room is unavailable." });
   }
 }
 

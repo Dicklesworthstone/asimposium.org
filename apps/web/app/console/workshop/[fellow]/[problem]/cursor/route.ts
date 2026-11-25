@@ -1,24 +1,22 @@
 import { auth } from "@/auth";
 import { stoaSponsorWorkshopCursor } from "@/lib/stoa";
-import { loadWorkshopCursorResponse, privateWorkshopCursorResponse } from "@/lib/workshop-page";
+import {
+  isSameOriginWorkshopRequest,
+  loadWorkshopCursorResponse,
+  privateWorkshopCursorResponse,
+} from "@/lib/workshop-page";
 
 export const dynamic = "force-dynamic";
 
 /** Fixed private read: callers cannot select an upstream URL or principal. */
 export async function GET(
   request: Request,
-  {
-    params,
-  }: { readonly params: Promise<{ readonly fellow: string; readonly problem: string }> },
+  { params }: { readonly params: Promise<{ readonly fellow: string; readonly problem: string }> },
 ): Promise<Response> {
   const url = new URL(request.url);
   if (url.search !== "")
     return privateWorkshopCursorResponse(400, { error: "This workshop check accepts no query." });
-  const origin = request.headers.get("origin");
-  if (
-    request.headers.get("sec-fetch-site") === "cross-site" ||
-    (origin !== null && origin !== url.origin)
-  )
+  if (!isSameOriginWorkshopRequest(request, url))
     return privateWorkshopCursorResponse(403, {
       error: "Open this workshop on the sponsor console.",
     });

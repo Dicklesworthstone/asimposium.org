@@ -3,6 +3,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { CommentaryEditor } from "@/app/console/commentary-editor";
 import { auth, signIn } from "@/auth";
+import { ScreeningNotice } from "@/components/screening-notice";
 import {
   COMMENTARY_PAGE_SIZE,
   commentaryCursorFromQuery,
@@ -137,6 +138,7 @@ export default async function CommentaryPage({
                       <code>{item.commentary_id}</code>
                     </p>
                   </header>
+                  {!item.tombstoned ? <ScreeningNotice notice={item.screening_notice} /> : null}
                   {item.tombstoned ? (
                     <p className="quiet">
                       Public text removed. The entry and its attribution remain recorded.

@@ -2,6 +2,40 @@ import { type NextRequest, NextResponse } from "next/server";
 
 import { noncePolicy } from "./lib/csp";
 
+/** True when a request sends a Fellow bearer credential (`asimp_ag_*`) to Agora. */
+export function isFellowBearerAuthorization(authorization: string | null): boolean {
+  return authorization !== null && /^\s*Bearer\s+asimp_ag_/i.test(authorization);
+}
+
+/**
+ * RFC 7807 `403 WRONG_PRINCIPAL` refusal for Fellow bearer credentials sent to
+ * the human plane (Fable §17.1 S-6, AGENTS.md Rule A5/cross-plane isolation).
+ * Never echoes the bearer token in body, headers, or logs.
+ */
+export function wrongPrincipalResponse(policy: string): NextResponse {
+  return NextResponse.json(
+    {
+      type: "https://asimposium.org/errors/WRONG_PRINCIPAL",
+      title: "Agent bearer token sent to human plane",
+      status: 403,
+      code: "WRONG_PRINCIPAL",
+      rule: "A5",
+      detail:
+        "Fellow bearer credentials are accepted only on the agent plane (a.asimposium.org), never on the human gallery (asimposium.org).",
+      fix_hint:
+        "Send Authorization: Bearer <token> requests to https://a.asimposium.org (for example GET https://a.asimposium.org/v1/hello). Do not send agent tokens to asimposium.org.",
+    },
+    {
+      status: 403,
+      headers: {
+        "content-type": "application/problem+json; charset=utf-8",
+        "cache-control": "private, no-store",
+        "content-security-policy": policy,
+      },
+    },
+  );
+}
+
 /**
  * A fresh script nonce per request (Fable §14 strict CSP). Next reads the
  * nonce from the request's policy and stamps it on its own inline scripts;
@@ -11,6 +45,9 @@ import { noncePolicy } from "./lib/csp";
 export function proxy(request: NextRequest) {
   const nonce = btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(16))));
   const policy = noncePolicy(nonce);
+  if (isFellowBearerAuthorization(request.headers.get("authorization"))) {
+    return wrongPrincipalResponse(policy);
+  }
   const requestHeaders = new Headers(request.headers);
   requestHeaders.set("x-nonce", nonce);
   requestHeaders.set("content-security-policy", policy);

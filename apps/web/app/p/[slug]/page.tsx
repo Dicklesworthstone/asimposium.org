@@ -3,11 +3,11 @@ import { synthesesListPath } from "@asimposium/contracts/syntheses";
 import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { ThemeToggle } from "@/app/theme-toggle";
 import { ProblemClaimsBoard } from "@/components/problem-claims-board";
 import { PublicLedgerLive } from "@/components/public-ledger-live";
 import { PublicReadUnavailable } from "@/components/public-read-unavailable";
 import { ReportLink } from "@/components/report-panel";
+import { readOptionalRequestNonce, ScholarlyJsonLd } from "@/components/scholarly-json-ld";
 import { ShareCardPanel } from "@/components/share-card-panel";
 import { ScientificBody } from "@/components/scientific-body";
 import { ScreeningNotice } from "@/components/screening-notice";
@@ -26,7 +26,13 @@ import {
   stoaFetchCommentary,
   stoaFetchProblemFace,
 } from "@/lib/public-ledger";
-import { buildProblemShareCardData } from "@/lib/share-card";
+import {
+  buildScholarlyJsonLd,
+  buildScholarlyMetadata,
+  safeScholarlyText,
+  type ScholarlyMetadataInput,
+} from "@/lib/scholarly-metadata";
+import { buildProblemShareCardData, deriveShareCardIncidentOptions } from "@/lib/share-card";
 import { SITE } from "@/lib/site";
 import { synthesisPagePath } from "@/lib/synthesis-view";
 
@@ -60,6 +66,27 @@ function resolutionFromBody(body: string | undefined) {
   }
 }
 
+function problemScholarlyInput(
+  face: Extract<Awaited<ReturnType<typeof stoaFetchProblemFace>>, { state: "ok" }>["data"],
+  origin: string,
+  noindex?: true,
+): ScholarlyMetadataInput {
+  const shareData = buildProblemShareCardData(face, deriveShareCardIncidentOptions(face));
+  const safeTitle = safeScholarlyText(shareData.title, `Public problem ${face.problem}`);
+  return {
+    canonicalPath: `/p/${encodeURIComponent(face.problem)}`,
+    title: `${face.problem} — ${safeTitle}`,
+    description: safeScholarlyText(
+      face.preamble,
+      `Public scientific ledger digest for ${face.problem} at cursor ${face.cursor}.`,
+    ),
+    version: face.cursor,
+    status: face.problem_status,
+    stoaOrigin: origin,
+    ...(noindex ? { noindex: true } : {}),
+  };
+}
+
 export async function generateMetadata({ params }: ProblemPageProps): Promise<Metadata> {
   const { slug } = await params;
   const result = await stoaFetchProblemFace(slug);
@@ -74,9 +101,13 @@ export async function generateMetadata({ params }: ProblemPageProps): Promise<Me
     };
   }
   const face = result.data;
-  const shareData = buildProblemShareCardData(face);
+  const shareData = buildProblemShareCardData(face, deriveShareCardIncidentOptions(face));
+  const scholarly = buildScholarlyMetadata(
+    problemScholarlyInput(face, result.origin, result.noindex),
+  );
   const ogImageUrl = `/p/${encodeURIComponent(slug)}/opengraph-image`;
   return {
+    ...scholarly,
     title: `${face.items.find((item) => item.kind === "problem-title")?.body ?? face.title} — ${SITE.name}`,
     description: face.preamble,
     openGraph: {
@@ -151,21 +182,19 @@ export default async function ProblemPage({ params, searchParams }: ProblemPageP
   const stoaOrigin = result.origin;
   const mdUrl = `${stoaOrigin}/p/${encodeURIComponent(face.problem)}.md`;
   const jsonUrl = `${stoaOrigin}/p/${encodeURIComponent(face.problem)}.json`;
+  const nonce = await readOptionalRequestNonce();
+  const scholarlyJsonLd = buildScholarlyJsonLd(
+    problemScholarlyInput(face, result.origin, result.noindex),
+  );
 
   return (
     <>
-      <a className="skip" href="#content">
-        Skip to content
-      </a>
-      <div className="meander" aria-hidden="true" />
+      <ScholarlyJsonLd data={scholarlyJsonLd} nonce={nonce} />
 
       <main className="landing col problem-page" id="content">
         <header className="masthead">
           <p className="greek-sub" lang="el" aria-hidden="true">
             συμπόσιον · πρόβλημα
-          </p>
-          <p className="tagline">
-            <Link href="/">← {SITE.name}</Link>
           </p>
           <h1 className="problem-title">{title}</h1>
           <div className="auth-row">
@@ -205,9 +234,6 @@ export default async function ProblemPage({ params, searchParams }: ProblemPageP
                 </span>
               </>
             )}
-          </div>
-          <div className="theme-toggle-row">
-            <ThemeToggle />
           </div>
         </header>
 
@@ -434,6 +460,24 @@ export default async function ProblemPage({ params, searchParams }: ProblemPageP
           </Link></p>
         </section>
 
+        <section aria-labelledby="problem-moves-heading">
+          <h2 id="problem-moves-heading">Current scientific needs (moves)</h2>
+          <p>Inspect the current open scientific needs computed for this problem—independent reviews,
+            falsifiers, proof obligations, and formal checks.</p>
+          <p><Link href={`/p/${encodeURIComponent(face.problem)}/moves`} prefetch={false}>
+            Inspect current moves for {face.problem}
+          </Link></p>
+        </section>
+
+        <section aria-labelledby="retractions-heading">
+          <h2 id="retractions-heading">Retractions and concessions</h2>
+          <p>Read recorded self-corrections and externally refuted retractions along with exact
+            conceded versions and counterevidence links.</p>
+          <p><Link href={`/p/${encodeURIComponent(face.problem)}/retractions`} prefetch={false}>
+            Read recorded retractions for {face.problem}
+          </Link></p>
+        </section>
+
         {reviews.length > 0 && (
           <section aria-labelledby="statement-reviews-heading">
             <h2 id="statement-reviews-heading">Statement reviews</h2>
@@ -447,9 +491,10 @@ export default async function ProblemPage({ params, searchParams }: ProblemPageP
                 <p className="quiet">
                   <code>{item.id}</code> · ledger · untrusted data
                 </p>
-                <pre>
-                  <code>{item.body}</code>
-                </pre>
+                <ScientificBody
+                  body={item.body}
+                  namespace={`statement-review-${face.problem}-${item.id}`}
+                />
                 <ScreeningNotice notice={item.screening_notice} />
                 {item.neutralized.length > 0 && (
                   <p className="quiet">
@@ -554,9 +599,17 @@ export default async function ProblemPage({ params, searchParams }: ProblemPageP
                       </span>
                     )}
                   </header>
-                  <pre>
-                    <code>{item.body}</code>
-                  </pre>
+                  {!item.tombstoned ? <ScreeningNotice notice={item.screening_notice} /> : null}
+                  {item.body !== null ? (
+                    <ScientificBody
+                      body={item.body}
+                      namespace={`commentary-${face.problem}-${item.commentary_id}`}
+                    />
+                  ) : (
+                    <p className="quiet">
+                      <em>This commentary entry has been tombstoned.</em>
+                    </p>
+                  )}
                   {item.relates_to && item.relates_to.length > 0 && (
                     <p className="quiet">
                       relates to: {item.relates_to.map((ref) => `${ref.kind}:${ref.id}`).join(", ")}
@@ -635,7 +688,7 @@ export default async function ProblemPage({ params, searchParams }: ProblemPageP
 
         {/* Section ε: Honest Share Card & Suggested Text (W8.8a) */}
         {(() => {
-          const shareData = buildProblemShareCardData(face);
+          const shareData = buildProblemShareCardData(face, deriveShareCardIncidentOptions(face));
           return (
             <ShareCardPanel
               code={shareData.code}

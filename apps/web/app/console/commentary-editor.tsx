@@ -217,6 +217,13 @@ export function CommentaryEditor({
           {state.code ? (
             <p className="quiet">
               <code>{state.code}</code>
+              {state.caseId ? (
+                <>
+                  {" "}
+                  · Case <code>{state.caseId}</code> (
+                  <Link href="/console/appeals">view in appeals</Link>)
+                </>
+              ) : null}
             </p>
           ) : null}
           {state.fixHint ? <p>{state.fixHint}</p> : null}

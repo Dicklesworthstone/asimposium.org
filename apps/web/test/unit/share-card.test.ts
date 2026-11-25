@@ -723,8 +723,10 @@ describe("Honors / Results Share Card", () => {
       expect(data.counts.find((c) => c.label === "Entries on this page")?.value).toBe(results.length);
       expect(data.suggestedShareText).not.toMatch(/conclusively settled|SETTLED RESULTS/);
       const imageMarkup = renderToStaticMarkup(renderShareCard(data));
-      expect(imageMarkup).toContain("background-color:#2c3e50");
-      expect(imageMarkup).not.toContain("background-color:#1f6f43");
+      expect(imageMarkup).toContain("background-color:#4a4238");
+      expect(imageMarkup).not.toContain("background-color:#4b6524");
+      expect(imageMarkup).toContain("<svg");
+      expect(imageMarkup).toContain("M4 13.5h32c-1 7.2-7.6 11.6-16 11.6S5 20.7 4 13.5Z");
       expect(JSON.stringify(honors)).toBe(original);
     }
   });

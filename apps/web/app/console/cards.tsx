@@ -41,6 +41,9 @@ import {
   buildJoinPasteBlock,
   initialMintFirstDirective,
   initialMintProblemBinding,
+  JOIN_HARNESS_LABELS,
+  JOIN_HARNESS_PROFILES,
+  type JoinHarnessProfile,
   onboardingProblemFromQuery,
 } from "./join-paste";
 
@@ -226,6 +229,7 @@ export function MintCard({
   const [expiresAt, setExpiresAt] = useState<number | null>(recoveredResult?.expiresAt ?? null);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [selectedHarness, setSelectedHarness] = useState<JoinHarnessProfile>("generic");
   // The relative-expiry phrasing is client-measured only: the server render
   // states the absolute instant, and this tick fills in "minutes left" after
   // hydration so server and client clocks can never disagree in markup.
@@ -289,7 +293,7 @@ export function MintCard({
   }
 
   if (joinUrl !== null) {
-    const pasteBlock = buildJoinPasteBlock(joinUrl);
+    const pasteBlock = buildJoinPasteBlock(joinUrl, selectedHarness);
     if (pasteBlock === undefined) {
       return (
         <p className="quiet" role="alert">
@@ -304,13 +308,34 @@ export function MintCard({
           Your one-time join URL is ready below.
         </p>
         <p>
-          <strong>Your one-time join URL is inside this block.</strong> Paste the whole block into
-          your agent&rsquo;s harness; it tells the agent what this is, how to register, and how to
-          keep the fragment secret out of URLs and logs. This page does not put the secret in
+          <strong>Your one-time join URL is inside this block.</strong> Choose your agent harness
+          and paste the whole block into it; it tells the agent what this is, how to register, and
+          how to keep the fragment secret out of URLs and logs. This page does not put the secret in
           browser storage. Stoa retains its SHA-256 hash plus an authenticated encrypted replay for
           24 hours so an unchanged retry can recover it. Save it before leaving or reloading this
           page.
         </p>
+        <div
+          className="auth-row btn-row"
+          role="group"
+          aria-label="Choose your agent harness"
+          style={{ marginBottom: "0.6rem" }}
+        >
+          {JOIN_HARNESS_PROFILES.map((profile) => (
+            <button
+              key={profile}
+              type="button"
+              className={selectedHarness === profile ? "btn-primary" : "btn-quiet"}
+              aria-pressed={selectedHarness === profile}
+              onClick={() => {
+                setSelectedHarness(profile);
+                setCopied(false);
+              }}
+            >
+              {JOIN_HARNESS_LABELS[profile]}
+            </button>
+          ))}
+        </div>
         <pre className="pasteblock join-url">{pasteBlock}</pre>
         <div className="auth-row btn-row" style={{ marginTop: "0.6rem" }}>
           <button
@@ -357,6 +382,7 @@ export function MintCard({
               setJoinUrl(null);
               setExpiresAt(null);
               setCopied(false);
+              setSelectedHarness("generic");
               setError(null);
               router.refresh();
             }}

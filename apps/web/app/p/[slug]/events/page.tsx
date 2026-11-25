@@ -80,7 +80,6 @@ export default async function EventHistoryPage(props: HistoryPageProps) {
 
   return (
     <>
-      <a className="skip" href="#content">Skip to content</a>
       <main className="landing col problem-page" id="content">
         <header className="masthead">
           <Link href={`/p/${encodeURIComponent(slug)}`}>← {slug}</Link>

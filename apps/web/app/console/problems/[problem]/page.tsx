@@ -4,7 +4,8 @@ import { auth, signIn } from "@/auth";
 import { ProblemLifecycleControl } from "@/components/problem-lifecycle-control";
 import { ProblemPublicationControl } from "@/components/problem-publication-control";
 import { ProblemResearchControl } from "@/components/problem-research-control";
-import { stoaProblemGovernance } from "@/lib/problem-governance";
+import { SynthesisDraftsPanel } from "@/components/synthesis-drafts-panel";
+import { stoaListSynthesisDrafts, stoaProblemGovernance } from "@/lib/problem-governance";
 import { stoaFetchSyntheses } from "@/lib/public-syntheses";
 import { isCanonicalSponsorId } from "@/lib/sponsor-id";
 import { configuredStoaOrigin, stoaProblemPublicationPreview } from "@/lib/stoa";
@@ -101,6 +102,14 @@ export default async function ProblemPublicationPage({
       synthesisChoices = null;
     }
   }
+  let synthesisDrafts: Awaited<ReturnType<typeof stoaListSynthesisDrafts>> | undefined;
+  if (workspace !== undefined && isCanonicalSponsorId(principal)) {
+    try {
+      synthesisDrafts = await stoaListSynthesisDrafts(principal, problemId);
+    } catch {
+      synthesisDrafts = undefined;
+    }
+  }
   return (
     <main className="landing col console" id="content">
       <header className="masthead console-head">
@@ -163,6 +172,13 @@ export default async function ProblemPublicationPage({
             synthesisQuery={synthesisQuery?.list}
             selectedSynthesis={synthesisQuery?.selected}
           />
+          {synthesisDrafts?.ok && synthesisDrafts.data.drafts.length > 0 ? (
+            <SynthesisDraftsPanel
+              sponsorId={principal}
+              problemId={workspace.problem.id}
+              initialDrafts={synthesisDrafts.data.drafts}
+            />
+          ) : null}
           <ProblemLifecycleControl
             key={`workspace:${principal}:${workspace.problem.id}`}
             sponsorId={principal}

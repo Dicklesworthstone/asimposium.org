@@ -2,6 +2,7 @@ import type { Metadata, Viewport } from "next";
 import { headers } from "next/headers";
 import type { ReactNode } from "react";
 
+import { SiteFooter, SiteHeader } from "@/components/site-chrome";
 import { SITE } from "@/lib/site";
 import { reconcileEnrollmentRecoveryOwner } from "./console/actions";
 import { EnrollmentRecoverySentinel } from "./enrollment-recovery-sentinel";
@@ -95,7 +96,9 @@ export default async function RootLayout({ children }: { children: ReactNode }) 
         <EnrollmentRecoverySentinel
           reconcileEnrollmentRecoveryOwner={reconcileEnrollmentRecoveryOwner}
         />
+        <SiteHeader />
         {children}
+        <SiteFooter />
       </body>
     </html>
   );

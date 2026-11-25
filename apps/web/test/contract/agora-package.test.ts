@@ -222,7 +222,7 @@ describe("sponsor console trust boundary", () => {
     expect(cards).toMatch(
       /import\s*\{[^}]*\bbuildJoinPasteBlock\b[^}]*\}\s*from\s*["']\.\/join-paste["']/,
     );
-    expect(cards).toContain("const pasteBlock = buildJoinPasteBlock(joinUrl)");
+    expect(cards).toContain("const pasteBlock = buildJoinPasteBlock(joinUrl, selectedHarness)");
     expect(cards).not.toContain("https://a.asimposium.org/v1/hello");
     expect(joinPaste).toContain("parseStoaJoinUrl");
     expect(joinPaste).toContain("stoaHelloUrl(parsed.origin)");

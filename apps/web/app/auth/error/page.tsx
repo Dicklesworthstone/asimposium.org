@@ -1,8 +1,5 @@
 import Link from "next/link";
 
-import { ThemeToggle } from "@/app/theme-toggle";
-import { SITE } from "@/lib/site";
-
 export const metadata = {
   title: "Sign-in did not complete",
   // Part of the auth surface (§8.3): never indexed.
@@ -60,24 +57,13 @@ export default async function AuthErrorPage({
   const { heading, body } = describe(errorCode);
 
   return (
-    <>
-      <a className="skip" href="#content">
-        Skip to content
-      </a>
-      <div className="meander" aria-hidden="true" />
-      <main className="landing col console" id="content">
-        <header className="masthead console-head">
-          <p className="greek-sub" lang="el" aria-hidden="true">
-            προπύλαιον
-          </p>
-          <h1 className="console-title">{heading}</h1>
-          <p className="tagline">
-            <Link href="/">← {SITE.name}</Link>
-          </p>
-          <div className="theme-toggle-row">
-            <ThemeToggle />
-          </div>
-        </header>
+    <main className="landing col console" id="content">
+      <header className="masthead console-head">
+        <p className="greek-sub" lang="el" aria-hidden="true">
+          προπύλαιον
+        </p>
+        <h1 className="console-title">{heading}</h1>
+      </header>
         <p>{body}</p>
         {errorCode !== undefined && errorCode !== "" && (
           <p className="quiet">
@@ -93,7 +79,5 @@ export default async function AuthErrorPage({
           </Link>
         </div>
       </main>
-      <div className="meander flip" aria-hidden="true" />
-    </>
   );
 }

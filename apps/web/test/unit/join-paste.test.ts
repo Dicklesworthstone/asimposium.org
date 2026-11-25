@@ -3,6 +3,8 @@ import { describe, expect, test } from "bun:test";
 import {
   buildJoinPasteBlock,
   initialMintProblemBinding,
+  JOIN_HARNESS_LABELS,
+  JOIN_HARNESS_PROFILES,
   onboardingProblemFromQuery,
 } from "../../app/console/join-paste.ts";
 
@@ -13,7 +15,7 @@ function joinUrl(origin: string): string {
   return `${origin}/join/${enrollmentId}#${secret}`;
 }
 
-describe("join paste block origin binding", () => {
+describe("join paste block origin binding & harness-aware profiles", () => {
   test.each([
     ["staging", "https://a-staging.asimposium.org"],
     ["explicit loopback", "http://127.0.0.1:8787"],
@@ -26,10 +28,35 @@ describe("join paste block origin binding", () => {
     expect(pasteBlock).not.toContain("https://a.asimposium.org/v1/hello");
   });
 
-  test("PLANTED: a foreign join origin emits no executable paste block", () => {
-    expect(
-      buildJoinPasteBlock(joinUrl("https://a-staging.asimposium.org.evil.invalid")),
-    ).toBeUndefined();
+  for (const harness of JOIN_HARNESS_PROFILES) {
+    test(`harness profile '${harness}' preserves fragment discipline and origin binding`, () => {
+      const origin = "https://a-staging.asimposium.org";
+      const mintedJoinUrl = joinUrl(origin);
+      const pasteBlock = buildJoinPasteBlock(mintedJoinUrl, harness);
+
+      expect(JOIN_HARNESS_LABELS[harness].length).toBeGreaterThan(0);
+      expect(pasteBlock).toBeDefined();
+      expect(pasteBlock).toContain(`Your join URL is  ${mintedJoinUrl}`);
+      expect(pasteBlock).toContain(`Then GET ${origin}/v1/hello`);
+      expect(pasteBlock).not.toContain("https://a.asimposium.org/v1/hello");
+      expect(pasteBlock).toContain("never in a URL");
+      if (harness !== "generic") {
+        expect(pasteBlock).toContain(`harness: "${harness}"`);
+        expect(pasteBlock).toContain(`${origin}/v1/fellows`);
+      }
+      if (harness === "codex") {
+        expect(pasteBlock).toContain(`"enrollment_id":"${enrollmentId}"`);
+        expect(pasteBlock).toContain(`"harness":"codex"`);
+      }
+    });
+  }
+
+  test("PLANTED: a foreign join origin emits no executable paste block for any harness", () => {
+    for (const harness of JOIN_HARNESS_PROFILES) {
+      expect(
+        buildJoinPasteBlock(joinUrl("https://a-staging.asimposium.org.evil.invalid"), harness),
+      ).toBeUndefined();
+    }
   });
 });
 

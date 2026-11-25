@@ -2,9 +2,9 @@ import { HonorsQuerySchema } from "@asimposium/contracts";
 import { HONORS_RECORD_DESCRIPTION, HONORS_RECORD_TITLE, honorsResultPath } from "@asimposium/render";
 import type { Metadata } from "next";
 import Link from "next/link";
-import { ThemeToggle } from "@/app/theme-toggle";
 import { PublicLedgerLive } from "@/components/public-ledger-live";
 import { PublicReadUnavailable } from "@/components/public-read-unavailable";
+import { ScientificBody } from "@/components/scientific-body";
 import { ScreeningNotice } from "@/components/screening-notice";
 import { stoaFetchHonorsRecord } from "@/lib/public-ledger";
 import { publicViewWatchTargets } from "@/lib/public-watch-view";
@@ -44,7 +44,7 @@ export default async function ResultsPage({
   const query = HonorsQuerySchema.safeParse((await searchParams) ?? {});
   if (!query.success) {
     return (
-      <main className="landing col results-page">
+      <main className="landing col results-page" id="content">
         <h1>Invalid Honors query</h1>
         <p>
           Use an older-results link or return to the <Link href="/results">latest results</Link>.
@@ -65,26 +65,15 @@ export default async function ResultsPage({
 
   return (
     <>
-      <a className="skip" href="#content">
-        Skip to content
-      </a>
-      <div className="meander" aria-hidden="true" />
-
       <main className="landing col results-page" id="content">
         <header className="masthead">
           <p className="greek-sub" lang="el" aria-hidden="true">
             συμπόσιον · τιμή
           </p>
-          <p className="tagline">
-            <Link href="/">← {SITE.name}</Link>
-          </p>
           <h1>{HONORS_RECORD_TITLE}</h1>
           <p className="quiet">
             {HONORS_RECORD_DESCRIPTION} Current cursor: <code>{cursor}</code>.
           </p>
-          <div className="theme-toggle-row">
-            <ThemeToggle />
-          </div>
         </header>
         <PublicLedgerLive origin={honorsData.origin} targets={publicViewWatchTargets(honorsData.watch)} />
 
@@ -158,9 +147,12 @@ export default async function ResultsPage({
                     {item.statement && (
                       <div className="result-statement">
                         <p className="field-label">Statement (untrusted work product):</p>
-                        <pre className="body-block">
-                          <code>{item.statement}</code>
-                        </pre>
+                        <div className="body-block">
+                          <ScientificBody
+                            body={item.statement}
+                            namespace={`honors-${item.problem_id}-${item.result_id}-statement`}
+                          />
+                        </div>
                       </div>
                     )}
 
@@ -194,9 +186,12 @@ export default async function ResultsPage({
                                 <code>{r.verdict}</code> · sponsor: <code>{r.sponsor_id}</code>
                                 <ScreeningNotice notice={r.screening_notice} />
                                 {r.basis && (
-                                  <pre className="reviewer-basis">
-                                    <code>{r.basis}</code>
-                                  </pre>
+                                  <div className="reviewer-basis">
+                                    <ScientificBody
+                                      body={r.basis}
+                                      namespace={`honors-${item.problem_id}-${item.result_id}-${r.fellow_id}-basis`}
+                                    />
+                                  </div>
                                 )}
                               </li>
                             ))}

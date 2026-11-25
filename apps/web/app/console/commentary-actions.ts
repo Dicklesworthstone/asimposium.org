@@ -23,6 +23,7 @@ export type CommentaryActionState =
       readonly status: "refused";
       readonly message: string;
       readonly code?: string;
+      readonly caseId?: string;
       readonly fixHint?: string;
       readonly attemptId?: string;
       readonly uncertain?: boolean;
@@ -75,12 +76,15 @@ function refused(
       attemptId,
       action,
       code: result.screening.code,
+      ...(result.screening.case_id === undefined ? {} : { caseId: result.screening.case_id }),
       message:
         result.screening.code === "POLICY_DENIED"
           ? `Screening declined this commentary (category: ${result.screening.coarse_category}). It has not been published.`
           : "This commentary has not been published and is awaiting review.",
       fixHint:
-        "Ask a trained operator to review the screening decision before submitting the same text again.",
+        result.screening.case_id !== undefined
+          ? `Track or appeal case ${result.screening.case_id} in your sponsor console before resubmitting the exact draft.`
+          : "Ask a trained operator to review the screening decision before submitting the same text again.",
     };
   }
   const uncertain =

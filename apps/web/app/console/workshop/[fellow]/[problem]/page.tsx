@@ -3,6 +3,7 @@ import { WorkshopCardActions } from "@/app/console/workshop-card";
 import { WorkshopLive } from "@/app/console/workshop-live";
 import { WorkshopPublicationPreview } from "@/app/console/workshop-publication";
 import { auth } from "@/auth";
+import { ScientificBody } from "@/components/scientific-body";
 import { configuredStoaOrigin, stoaSponsorWorkshop } from "@/lib/stoa";
 import { loadWorkshopPage, workshopRevisionHref } from "@/lib/workshop-page";
 
@@ -150,8 +151,12 @@ export default async function WorkshopPage({
                         ? "Show discarded draft"
                         : "Private draft and stored publication"}
                     </summary>
-                    <div className="workshop-body whitespace-pre-wrap font-sans text-sm my-2 p-2 bg-muted/40 rounded">
-                      {object.body_md}
+                    <div className="workshop-body font-sans text-sm my-2 p-2 bg-muted/40 rounded">
+                      <ScientificBody
+                        body={object.body_md}
+                        namespace={`workshop-${object.workshop_id}`}
+                        includeSourceToggle={false}
+                      />
                     </div>
                     <WorkshopPublicationPreview object={object} />
                   </details>

@@ -3,8 +3,14 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { cache } from "react";
 import { PublicReadUnavailable } from "@/components/public-read-unavailable";
+import { readOptionalRequestNonce, ScholarlyJsonLd } from "@/components/scholarly-json-ld";
 import { SynthesisView } from "@/components/syntheses-view";
 import { stoaFetchSynthesis } from "@/lib/public-syntheses";
+import {
+  buildScholarlyJsonLd,
+  buildScholarlyMetadata,
+  type ScholarlyMetadataInput,
+} from "@/lib/scholarly-metadata";
 import { parseSynthesisTarget, synthesisPagePath } from "@/lib/synthesis-view";
 
 interface SynthesisPageProps {
@@ -28,13 +34,45 @@ async function pageInput({ params, searchParams }: SynthesisPageProps) {
     validQuery: Object.keys((await searchParams) ?? {}).length === 0 };
 }
 
+function synthesisScholarlyInput(
+  result: Extract<Awaited<ReturnType<typeof stoaFetchSynthesis>>, { state: "ok" }>,
+): ScholarlyMetadataInput {
+  const item = result.data.synthesis;
+  return {
+    canonicalPath: synthesisPagePath(item.problem_id, `${item.synthesis_id}@1`),
+    title: `${item.problem_id} — ${item.synthesis_id} (published synthesis)`,
+    description: `Immutable published research digest covering ledger history through sequence ${item.covers_through}.`,
+    version: 1,
+    status: result.data.staleness.stale ? "stale" : "current-at-read",
+    attribution: {
+      fellowId: item.authoring_principal,
+      ...(item.sponsor_id ? { sponsorId: item.sponsor_id } : {}),
+      ...(item.session_id ? { sessionId: item.session_id } : {}),
+      modelStringSelfDeclared: item.declared_model,
+      ...(item.harness ? { harness: item.harness } : {}),
+    },
+    dates: { createdAt: item.created_at },
+    stoaOrigin: result.origin,
+    ...(result.noindex ? { noindex: true } : {}),
+  };
+}
+
 export async function generateMetadata(props: SynthesisPageProps): Promise<Metadata> {
   const { slug, synthesis, id, validQuery } = await pageInput(props);
   const result = id !== null && validQuery ? await readSynthesis(slug, synthesis) : undefined;
+  if (result?.state === "ok") {
+    const scholarly = buildScholarlyMetadata(synthesisScholarlyInput(result));
+    return {
+      ...scholarly,
+      title: `${slug} — ${id ?? "Synthesis"} | ASImposium`,
+      description: "An immutable published research digest, its recorded sources and current freshness.",
+      ...(result.noindex ? { robots: { index: false, follow: false } } : {}),
+    };
+  }
   return {
     title: `${slug} — ${id ?? "Synthesis"} | ASImposium`,
     description: "An immutable published research digest, its recorded sources and current freshness.",
-    ...(result?.state !== "ok" || result.noindex ? { robots: { index: false, follow: false } } : {}),
+    robots: { index: false, follow: false },
   };
 }
 
@@ -50,5 +88,9 @@ export default async function SynthesisPage(props: SynthesisPageProps) {
   if (result.state === "not_found") notFound();
   if (result.state === "unavailable") return <PublicReadUnavailable
     title={`${slug} — ${id}`} retryPath={synthesisPagePath(slug, synthesis)} />;
-  return <SynthesisView result={result} />;
+  const nonce = await readOptionalRequestNonce();
+  return <>
+    <ScholarlyJsonLd data={buildScholarlyJsonLd(synthesisScholarlyInput(result))} nonce={nonce} />
+    <SynthesisView result={result} />
+  </>;
 }

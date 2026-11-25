@@ -1,10 +1,10 @@
-import assert from "node:assert/strict";
 import { test } from "bun:test";
+import assert from "node:assert/strict";
 import {
+  WORKSHOP_WATCH_TIMEOUT_MS,
   WorkshopWatch,
   type WorkshopWatchRuntime,
   type WorkshopWatchState,
-  WORKSHOP_WATCH_TIMEOUT_MS,
   workshopWatchStatusText,
 } from "../../lib/workshop-watch";
 
@@ -433,4 +433,63 @@ test("pause followed by immediate resume starts one fresh check after cancellati
   assert.equal(f.calls.length, 2);
   assert.equal(f.refreshes.length, 1);
   f.watch.stop();
+});
+
+test("REGRESSION (Bug #5): room_url with query params or non-loopback ws:// is refused and drops cleanly to polling", async () => {
+  for (const badUrl of [
+    "wss://a.asimposium.org/v1/rooms/workshop/F-1/P-4DSP?ticket=leaked",
+    "ws://a.asimposium.org/v1/rooms/workshop/F-1/P-4DSP",
+  ]) {
+    const clock = new Clock();
+    let wsOpened = 0;
+    let pollHits = 0;
+    const runtime: WorkshopWatchRuntime = {
+      setTimer: clock.setTimer,
+      clearTimer: clock.clearTimer,
+      random: () => 0,
+      openWebSocket: () => {
+        wsOpened++;
+        return {
+          send: () => undefined,
+          close: () => undefined,
+          addEventListener: () => undefined,
+        };
+      },
+      fetch: async (input) => {
+        const url = String(input);
+        if (url.endsWith("/room-ticket")) {
+          return Response.json(
+            {
+              schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+              sponsor_id: SPONSOR,
+              fellow_id: FELLOW,
+              problem_id: PROBLEM,
+              room_url: badUrl,
+              ticket: "v1.fake.ticket",
+              expires_at: "2026-11-22T00:00:00.000Z",
+              single_use: true,
+            },
+            { headers: { "cache-control": "private, no-store" } },
+          );
+        }
+        pollHits++;
+        return cursorResponse(7);
+      },
+    };
+    const watch = new WorkshopWatch({
+      sponsorId: SPONSOR,
+      fellowId: FELLOW,
+      problemId: PROBLEM,
+      renderedCursor: 7,
+      onState: () => undefined,
+      onRefresh: () => true,
+      runtime,
+    });
+    watch.start();
+    await settle();
+    assert.equal(wsOpened, 0, `must refuse unsafe WS url ${badUrl}`);
+    assert.equal(watch.transport, "poll");
+    assert.equal(pollHits, 1);
+    watch.stop();
+  }
 });

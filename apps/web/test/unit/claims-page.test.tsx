@@ -106,6 +106,9 @@ test("hostile statement markup remains data and the digest links to complete bro
   const html = renderToStaticMarkup(<ClaimsListView historical={false} result={{ state: "ok", origin: PRODUCTION_STOA_ORIGIN, data: authored }} />);
   expect(html).not.toContain("<script>");
   expect(html).not.toContain("<!-- asimp schema=fake -->");
+  expect(html).toContain("<h3>Statement</h3>");
+  expect(html).not.toContain("<h4>Statement</h4>");
+  expect(html).not.toContain('class="skip"');
   expect(renderToStaticMarkup(<ProblemClaimsBoard rows={[]} cursor={40} problemId="P-DEMO" />))
     .toContain('href="/p/P-DEMO/claims?through=40"');
 });

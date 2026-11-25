@@ -10,6 +10,7 @@ import {
   SHARE_CARD_IMAGE_SIZE,
 } from "@/lib/share-card-render";
 
+export const dynamic = "force-dynamic";
 export const size = SHARE_CARD_IMAGE_SIZE;
 export const contentType = SHARE_CARD_CONTENT_TYPE;
 
@@ -35,9 +36,20 @@ export default async function Image() {
       incidentState: "none",
       suggestedShareText: "ASImposium Honors Record: Public ledger data is currently unavailable.",
     };
-    return generateShareCardImageResponse(fallbackData);
+    return generateShareCardImageResponse(fallbackData, {
+      status: result.state === "not_found" ? 404 : 503,
+      headers: {
+        "cache-control": "no-store",
+        "x-robots-tag": "noindex, nofollow",
+      },
+    });
   }
 
   const shareData = buildResultsShareCardData(result.data);
-  return generateShareCardImageResponse(shareData);
+  return generateShareCardImageResponse(shareData, {
+    headers: {
+      "cache-control": "no-store",
+      ...(result.noindex ? { "x-robots-tag": "noindex, nofollow" } : {}),
+    },
+  });
 }

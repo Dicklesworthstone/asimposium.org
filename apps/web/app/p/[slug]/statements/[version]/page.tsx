@@ -84,9 +84,6 @@ export default async function StatementPage(props: StatementPageProps) {
   const snapshot = { through: face.cursor };
   return (
     <>
-      <a className="skip" href="#content">
-        Skip to content
-      </a>
       <main className="landing col problem-page" id="content">
         <header className="masthead">
           <nav aria-label="Breadcrumbs">

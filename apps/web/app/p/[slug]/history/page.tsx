@@ -70,9 +70,6 @@ export default async function StatementHistoryPage(props: StatementHistoryPagePr
   const snapshot = { through: face.cursor, after: face.after };
   return (
     <>
-      <a className="skip" href="#content">
-        Skip to content
-      </a>
       <main className="landing col problem-page" id="content">
         <header className="masthead">
           <Link href={`/p/${encodeURIComponent(face.problem_id)}`}>← {face.problem_id}</Link>

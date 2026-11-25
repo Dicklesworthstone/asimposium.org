@@ -12,7 +12,7 @@ export default async function FellowIdResolverPage({ params, searchParams }: Fel
   const query = FellowCardQuerySchema.safeParse((await searchParams) ?? {});
   if (!query.success)
     return (
-      <main className="landing col fellow-page">
+      <main className="landing col fellow-page" id="content">
         <h1>Invalid Fellow history query</h1>
         <a href={`/fellows/${encodeURIComponent(id)}`}>Latest history</a>
       </main>

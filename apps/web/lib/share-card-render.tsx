@@ -19,23 +19,23 @@ export const SHARE_CARD_CONTENT_TYPE = "image/png";
 function getStatusTheme(kind: ShareCardStatusKind): { bg: string; text: string; border: string } {
   switch (kind) {
     case "strongly-supported":
-      return { bg: "#1f6f43", text: "#ffffff", border: "#14492c" };
+      return { bg: "#4b6524", text: "#fdfaf4", border: "#344719" };
     case "corroborated":
-      return { bg: "#235882", text: "#ffffff", border: "#163a57" };
+      return { bg: "#235887", text: "#fdfaf4", border: "#183e60" };
     case "under-result-review":
-      return { bg: "#9c6500", text: "#ffffff", border: "#6b4500" };
+      return { bg: "#7f6129", text: "#fdfaf4", border: "#59441c" };
     case "disputed":
     case "refuted":
     case "malformed":
-      return { bg: "#8b2500", text: "#ffffff", border: "#5c1800" };
+      return { bg: "#a2442a", text: "#fdfaf4", border: "#732f1c" };
     case "incident":
-      return { bg: "#b31b1b", text: "#ffffff", border: "#7a1111" };
+      return { bg: "#a3261c", text: "#fdfaf4", border: "#731a13" };
     case "record":
     case "sharpening":
     case "active":
     case "open":
     default:
-      return { bg: "#2c3e50", text: "#ffffff", border: "#1a252f" };
+      return { bg: "#4a4238", text: "#fdfaf4", border: "#1f1b16" };
   }
 }
 
@@ -57,11 +57,11 @@ export function renderShareCard(data: ShareCardData): ReactElement {
         width: "100%",
         height: "100%",
         backgroundColor: "#f7f2e8",
-        color: "#14110e",
+        color: "#1f1b16",
         fontFamily: "serif, system-ui, sans-serif",
         padding: compact ? "24px" : "40px",
         boxSizing: "border-box",
-        border: "12px solid #8b3a22",
+        border: "12px solid #a2442a",
         justifyContent: "space-between",
       }}
     >
@@ -71,19 +71,35 @@ export function renderShareCard(data: ShareCardData): ReactElement {
           display: "flex",
           justifyContent: "space-between",
           alignItems: "center",
-          borderBottom: "2px solid #8b3a22",
+          borderBottom: "2px solid #a2442a",
           paddingBottom: compact ? "8px" : "16px",
           ...(compact ? { flexShrink: 0 } : {}),
         }}
       >
-        <div style={{ display: "flex", alignItems: "baseline", gap: "12px" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+          <svg width={compact ? 28 : 34} height={compact ? 28 : 34} viewBox="0 0 40 40" fill="none">
+            <path d="M4 13.5h32c-1 7.2-7.6 11.6-16 11.6S5 20.7 4 13.5Z" fill="#a2442a" />
+            <path
+              d="M7.2 16.2c-4.6.2-5.6-4.9-2.1-5.4M32.8 16.2c4.6.2 5.6-4.9 2.1-5.4"
+              stroke="#a2442a"
+              strokeWidth="1.8"
+              strokeLinecap="round"
+            />
+            <path d="M18.5 24.8h3l-.5 5.4h-2Z" fill="#a2442a" />
+            <path d="M11.5 33.4c2.4-3 14.6-3 17 0-2.6 1.2-14.4 1.2-17 0Z" fill="#a2442a" />
+            <path
+              d="M9 17.4h22M12.5 17.4v-1.8h2.4v1.8M18.8 17.4v-1.8h2.4v1.8M25.1 17.4v-1.8h2.4v1.8"
+              stroke="#f7f2e8"
+              strokeWidth="1.1"
+            />
+          </svg>
           <span
             style={{
               fontSize: compact ? 22 : 26,
               fontWeight: "bold",
-              color: "#8b3a22",
-              letterSpacing: "0.05em",
-              fontFamily: "monospace, serif",
+              color: "#a2442a",
+              letterSpacing: "0.08em",
+              fontFamily: "serif",
             }}
           >
             ASIMPOSIUM
@@ -91,7 +107,7 @@ export function renderShareCard(data: ShareCardData): ReactElement {
           <span
             style={{
               fontSize: compact ? 16 : 20,
-              color: "#736b63",
+              color: "#655b4e",
               fontStyle: "italic",
             }}
           >
@@ -104,11 +120,11 @@ export function renderShareCard(data: ShareCardData): ReactElement {
             alignItems: "center",
             gap: "8px",
             fontSize: compact ? 16 : 18,
-            backgroundColor: "#ebe5d8",
+            backgroundColor: "#efe7d8",
             padding: compact ? "3px 10px" : "4px 12px",
             borderRadius: "4px",
-            border: "1px solid #d4cbb8",
-            color: "#4a443b",
+            border: "1px solid #cbbda3",
+            color: "#4a4238",
             fontFamily: "monospace",
           }}
         >
@@ -140,12 +156,12 @@ export function renderShareCard(data: ShareCardData): ReactElement {
             style={{
               fontSize: compact ? 20 : 24,
               fontWeight: "bold",
-              color: "#8b3a22",
+              color: "#a2442a",
               fontFamily: "monospace",
-              backgroundColor: "#f0eae1",
+              backgroundColor: "#fdfaf4",
               padding: compact ? "3px 8px" : "4px 10px",
               borderRadius: "4px",
-              border: "1px solid #dfd5c5",
+              border: "1px solid #e4d9c6",
             }}
           >
             {data.code}
@@ -173,7 +189,7 @@ export function renderShareCard(data: ShareCardData): ReactElement {
           style={{
             fontSize: compact ? 28 : data.screeningNotice ? 34 : 38,
             fontWeight: "bold",
-            color: "#14110e",
+            color: "#1f1b16",
             lineHeight: compact ? 1.15 : 1.25,
             maxHeight: compact ? "65px" : "100px",
             overflow: "hidden",
@@ -190,7 +206,7 @@ export function renderShareCard(data: ShareCardData): ReactElement {
             alignItems: "center",
             fontSize: compact ? 18 : 20,
             ...(compact ? { lineHeight: 1.2 } : {}),
-            color: "#3d3730",
+            color: "#4a4238",
           }}
         >
           <span style={{ fontWeight: "bold", marginRight: "8px" }}>Status:</span>
@@ -201,12 +217,12 @@ export function renderShareCard(data: ShareCardData): ReactElement {
           <div
             style={{
               display: "flex",
-              backgroundColor: "#fff5d6",
-              border: "1px solid #b58a31",
+              backgroundColor: "#fdfaf4",
+              border: "1px solid #7f6129",
               borderRadius: "4px",
               padding: "6px 12px",
               fontSize: 16,
-              color: "#60450f",
+              color: "#4a4238",
               ...(compact ? { lineHeight: 1.25, flexShrink: 0 } : {}),
             }}
           >
@@ -218,12 +234,12 @@ export function renderShareCard(data: ShareCardData): ReactElement {
           <div
             style={{
               display: "flex",
-              backgroundColor: "#fff5d6",
-              border: "1px solid #b58a31",
+              backgroundColor: "#fdfaf4",
+              border: "1px solid #7f6129",
               borderRadius: "4px",
               padding: "6px 12px",
               fontSize: 16,
-              color: "#60450f",
+              color: "#4a4238",
               lineHeight: 1.25,
               flexShrink: 0,
             }}
@@ -237,12 +253,12 @@ export function renderShareCard(data: ShareCardData): ReactElement {
           <div
             style={{
               display: "flex",
-              backgroundColor: "#fff0f0",
-              border: "2px solid #b31b1b",
+              backgroundColor: "#fdfaf4",
+              border: "2px solid #a3261c",
               borderRadius: "4px",
               padding: compact ? "6px 10px" : "10px 16px",
               fontSize: compact ? 16 : 18,
-              color: "#7a1111",
+              color: "#a3261c",
               fontWeight: "bold",
               ...(compact ? { lineHeight: 1.25, flexShrink: 0 } : {}),
             }}
@@ -253,12 +269,12 @@ export function renderShareCard(data: ShareCardData): ReactElement {
           <div
             style={{
               display: "flex",
-              backgroundColor: "#f3ede3",
-              border: "1px solid #cfc2ad",
+              backgroundColor: "#efe7d8",
+              border: "1px solid #cbbda3",
               borderRadius: "4px",
               padding: compact ? "6px 10px" : "8px 14px",
               fontSize: compact ? 16 : 17,
-              color: "#6e4b3b",
+              color: "#4a4238",
               fontStyle: "italic",
               ...(compact ? { lineHeight: 1.25, flexShrink: 0 } : {}),
             }}
@@ -269,12 +285,12 @@ export function renderShareCard(data: ShareCardData): ReactElement {
           <div
             style={{
               display: "flex",
-              backgroundColor: "#f5f5f5",
-              border: "1px solid #d0d0d0",
+              backgroundColor: "#efe7d8",
+              border: "1px solid #cbbda3",
               borderRadius: "4px",
               padding: compact ? "6px 10px" : "8px 14px",
               fontSize: compact ? 16 : 17,
-              color: "#555555",
+              color: "#4a4238",
               ...(compact ? { lineHeight: 1.25, flexShrink: 0 } : {}),
             }}
           >
@@ -285,12 +301,12 @@ export function renderShareCard(data: ShareCardData): ReactElement {
           <div
             style={{
               display: "flex",
-              backgroundColor: "#f0f7f0",
-              border: "1px solid #bce0bc",
+              backgroundColor: "#fdfaf4",
+              border: "1px solid #4b6524",
               borderRadius: "4px",
               padding: "6px 10px",
               fontSize: 16,
-              color: "#1f6f43",
+              color: "#4b6524",
               lineHeight: 1.25,
               flexShrink: 0,
             }}
@@ -306,11 +322,11 @@ export function renderShareCard(data: ShareCardData): ReactElement {
           display: "flex",
           justifyContent: "flex-start",
           gap: compact ? "24px" : "32px",
-          borderTop: "1px solid #dfd5c5",
-          borderBottom: "1px solid #dfd5c5",
+          borderTop: "1px solid #e4d9c6",
+          borderBottom: "1px solid #e4d9c6",
           paddingTop: compact ? "6px" : "12px",
           paddingBottom: compact ? "6px" : "12px",
-          backgroundColor: "#faf7f0",
+          backgroundColor: "#fdfaf4",
           ...(compact ? { flexShrink: 0 } : {}),
         }}
       >
@@ -327,7 +343,7 @@ export function renderShareCard(data: ShareCardData): ReactElement {
             <span
               style={{
                 fontSize: compact ? 13 : 14,
-                color: "#736b63",
+                color: "#655b4e",
                 textTransform: "uppercase",
                 letterSpacing: "0.05em",
               }}
@@ -338,7 +354,7 @@ export function renderShareCard(data: ShareCardData): ReactElement {
               style={{
                 fontSize: compact ? 18 : 22,
                 fontWeight: "bold",
-                color: "#14110e",
+                color: "#1f1b16",
                 fontFamily: "monospace",
               }}
             >
@@ -356,7 +372,7 @@ export function renderShareCard(data: ShareCardData): ReactElement {
           alignItems: "center",
           paddingTop: compact ? "8px" : "12px",
           fontSize: compact ? 14 : 16,
-          color: "#736b63",
+          color: "#655b4e",
           ...(compact ? { flexShrink: 0 } : {}),
         }}
       >
@@ -370,15 +386,23 @@ export function renderShareCard(data: ShareCardData): ReactElement {
             Rule A4: Exact computed status · No marketing hype · Ledger is canonical
           </span>
         )}
-        <span style={{ fontFamily: "monospace", color: "#8b3a22" }}>asimposium.org</span>
+        <span style={{ fontFamily: "monospace", color: "#a2442a" }}>asimposium.org</span>
       </div>
     </div>
   );
 }
 
 /**
- * Generates an ImageResponse from ShareCardData.
+ * Generates an ImageResponse from ShareCardData, preserving explicit HTTP
+ * status and cache headers (e.g., 404/503 + no-store on unavailable records).
  */
-export function generateShareCardImageResponse(data: ShareCardData): ImageResponse {
-  return new ImageResponse(renderShareCard(data), SHARE_CARD_IMAGE_SIZE);
+export function generateShareCardImageResponse(
+  data: ShareCardData,
+  options?: { readonly status?: number; readonly headers?: HeadersInit },
+): ImageResponse {
+  return new ImageResponse(renderShareCard(data), {
+    ...SHARE_CARD_IMAGE_SIZE,
+    ...(options?.status !== undefined ? { status: options.status } : {}),
+    ...(options?.headers !== undefined ? { headers: options.headers } : {}),
+  });
 }

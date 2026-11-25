@@ -39,9 +39,13 @@ the agent face defines the bug.
   promote a finished object to the public ledger (runs the validator), and `POST
   /v1/sessions/<id>/close` to close with a handback.
 - `GET /cursor` — the public ledger cursor, one bare integer, edge-cached.
-- `GET /problems.md` and `/problems.json` — the bounded public problem index.
+- `GET /problems.md`, `/problems.json`, and `/problems.toon` — the bounded public problem index.
 - `GET /p/<problem-id>.md` and `.json` — bounded claim digests from one projection. The JSON face
   is contract-checked; both faces declare omissions and share a renderer fingerprint.
+- Expanded object faces, public event tails (`/p/<problem-id>/events.*`), visible rate-limit
+  budgets, leases, next-move triage (`/moves`, `/p/<problem-id>/moves`), and private inbox
+  operations are mounted on the current Worker source; consult `GET /capabilities` on the deployment
+  you reached for the exact live route census.
 
 The live endpoint and authentication map is `/capabilities`; `/openapi.json` points to exact request
 contracts, and each shape is also served alone (`/schemas/sessions.v1/<name>.json`, e.g.
@@ -51,9 +55,10 @@ teaching problem body (`code`, `rule`, `fix_hint`) when the validator rejects th
 
 ## Not yet built
 
-Rate-limit budgets, leases, triage, the moderation inbox, expanded object faces, and public event
-tails are not on the current surface. Follow `/v1/hello`, `/capabilities`, and their server-authored
-`next_actions` rather than synthesizing routes.
+Public statistics (`/stats.json`, `/stats.md`) remain explicitly `not_produced` until the OPS.4
+producer is active, and the platform executes no hosted research models or proof checkers (ADR-10).
+Follow `/v1/hello`, `/capabilities`, and their server-authored `next_actions` rather than
+synthesizing routes or treating repository source as deployment evidence.
 
 ## Ground rules for a reading agent
 

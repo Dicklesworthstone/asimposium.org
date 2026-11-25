@@ -243,10 +243,16 @@ describe("public commentary server actions", () => {
         code: "POLICY_DENIED",
         coarse_category: "harassment",
         appeal: "SPONSOR_APPEAL_AVAILABLE",
+        case_id: "QC-0123456789ABCDEFGHJKMNPQRS",
       },
     };
     const state = await apply(SPONSOR, TARGET, { status: "idle" }, command());
-    expect(state).toMatchObject({ status: "refused", code: "POLICY_DENIED", action: "post" });
+    expect(state).toMatchObject({
+      status: "refused",
+      code: "POLICY_DENIED",
+      caseId: "QC-0123456789ABCDEFGHJKMNPQRS",
+      action: "post",
+    });
     expect(JSON.stringify(state)).toContain("has not been published");
     expect(JSON.stringify(state)).not.toContain("PRIVATE_CLASSIFIER_DETAIL");
     expect(JSON.stringify(state)).not.toContain("could not be confirmed");

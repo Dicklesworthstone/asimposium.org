@@ -9,7 +9,6 @@ import {
   getReportsQueue,
   requireOperatorSession,
 } from "@/lib/admin";
-import { ThemeToggle } from "../theme-toggle";
 import { AdminModerationControl, AdminReload } from "./moderation-control";
 
 export const dynamic = "force-dynamic";
@@ -24,13 +23,7 @@ export default async function AdminPage() {
   const sessionResult = await requireOperatorSession();
 
   return (
-    <>
-      <a className="skip" href="#content">
-        Skip to content
-      </a>
-      <div className="meander" aria-hidden="true" />
-
-      <main className="landing col console" id="content">
+    <main className="landing col console" id="content">
         <header className="masthead console-head">
           <p className="greek-sub" lang="el" aria-hidden="true">
             συμποσιάρχης · διαχείρισις
@@ -42,9 +35,6 @@ export default async function AdminPage() {
             <Link href="/admin/appeals" prefetch={false}>
               Screening appeals
             </Link>
-          </p>
-          <p className="theme-toggle-row">
-            <ThemeToggle />
           </p>
         </header>
 
@@ -125,9 +115,6 @@ export default async function AdminPage() {
           </p>
         </footer>
       </main>
-
-      <div className="meander flip" aria-hidden="true" />
-    </>
   );
 }
 
@@ -408,11 +395,13 @@ function HeldCandidate({ detail }: { detail: AdminQuarantineCaseDetail | undefin
   if (detail === undefined) {
     return <p className="quiet">Held content is unavailable right now; do not decide blind.</p>;
   }
+  const isSponsorAuthored = detail.fellow_id.startsWith("sponsor:");
   return (
     <details className="held-candidate">
       <summary>
         Held {detail.route} write · {detail.candidate.kind} · problem{" "}
-        <code>{detail.problem_id}</code> · Fellow <code>{detail.fellow_id}</code>
+        <code>{detail.problem_id}</code> · {isSponsorAuthored ? "Sponsor" : "Fellow"}{" "}
+        <code>{isSponsorAuthored ? detail.sponsor_id : detail.fellow_id}</code>
       </summary>
       <p className="quiet">
         Inert text. A release lets the author resubmit exactly this candidate in the evaluated
@@ -420,10 +409,16 @@ function HeldCandidate({ detail }: { detail: AdminQuarantineCaseDetail | undefin
       </p>
       <p>
         <Link
-          href={`/admin/sponsors?sponsor=${encodeURIComponent(detail.sponsor_id)}&case=${encodeURIComponent(detail.item.id)}`}
+          href={
+            isSponsorAuthored
+              ? `/admin/sponsors?sponsor=${encodeURIComponent(detail.sponsor_id)}`
+              : `/admin/sponsors?sponsor=${encodeURIComponent(detail.sponsor_id)}&case=${encodeURIComponent(detail.item.id)}`
+          }
           prefetch={false}
         >
-          Inspect this sponsor and case for a separate suspension decision
+          {isSponsorAuthored
+            ? "Inspect this sponsor’s standing and capacity"
+            : "Inspect this sponsor and case for a separate suspension decision"}
         </Link>
       </p>
       <pre className="held-candidate-body">{detail.candidate.statement}</pre>
@@ -439,7 +434,7 @@ function HeldCandidate({ detail }: { detail: AdminQuarantineCaseDetail | undefin
           <p className="quiet">
             {detail.candidate.context.mode === "initial-publication"
               ? "Initial publication: this problem has no earlier public statement or Fellow history."
-              : `Public statement version ${detail.candidate.context.problem_statement?.version}. The following public history belongs to this same Fellow.`}
+              : `Public statement version ${detail.candidate.context.problem_statement?.version}. The following public history belongs to this same ${isSponsorAuthored ? "sponsor" : "Fellow"}.`}
           </p>
           {detail.candidate.context.problem_statement === null ? null : (
             <pre className="held-candidate-body">

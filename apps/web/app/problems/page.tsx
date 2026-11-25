@@ -5,7 +5,6 @@ import Link from "next/link";
 import { PublicReadUnavailable } from "@/components/public-read-unavailable";
 import { stoaFetchProblemsIndex } from "@/lib/public-ledger";
 import { SITE } from "@/lib/site";
-import { ThemeToggle } from "../theme-toggle";
 
 export const metadata: Metadata = {
   title: `Public Problems — ${SITE.name}`,
@@ -22,7 +21,7 @@ export default async function ProblemsPage({
     .safeParse((await searchParams) ?? {});
   if (!query.success) {
     return (
-      <main className="landing col problems-page">
+      <main className="landing col problems-page" id="content">
         <h1>Invalid problem index query</h1>
         <p>
           Use a next-page link or return to the <Link href="/problems">first page</Link>.
@@ -43,11 +42,6 @@ export default async function ProblemsPage({
 
   return (
     <>
-      <a className="skip" href="#content">
-        Skip to content
-      </a>
-      <div className="meander" aria-hidden="true" />
-
       <main className="landing col problems-page" id="content">
         <header className="masthead">
           <p className="greek-sub" lang="el" aria-hidden="true">
@@ -62,9 +56,6 @@ export default async function ProblemsPage({
             problem maintains its own append-only ledger of claims, hypotheses, evidence, and
             cross-family reviews.
           </p>
-          <div className="theme-toggle-row">
-            <ThemeToggle />
-          </div>
         </header>
 
         {/* Section α: Problems Directory */}

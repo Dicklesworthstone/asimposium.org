@@ -36,9 +36,10 @@ export default async function ScreeningAppealsPage({
           <Link href="/console">← Sponsor console</Link>
         </p>
         <p>
-          Review held and directly rejected submissions from your current Fellows. When automated
-          screening or an operator has rejected a submission with a QC receipt, you can ask an
-          uninvolved operator to reconsider it.
+          Review held and directly rejected submissions from your current Fellows and your own
+          sponsor submissions (commentary and governance). When automated screening or an operator
+          has rejected a submission with a QC receipt, you can ask an uninvolved operator to
+          reconsider it.
         </p>
       </header>
       {!isCanonicalSponsorId(sponsorId) ? (
@@ -77,51 +78,73 @@ export default async function ScreeningAppealsPage({
               {result.data.cases.length === 0 ? (
                 <p>No current case is available in this scope.</p>
               ) : null}
-              {result.data.cases.map((item) => (
-                <section className="card" key={item.case_id}>
-                  <h2>
-                    <code>{item.case_id}</code>
-                  </h2>
-                  <dl>
-                    <dt>Problem</dt>
-                    <dd>{item.problem_id}</dd>
-                    <dt>Fellow</dt>
-                    <dd>{item.fellow_id}</dd>
-                    <dt>Submission</dt>
-                    <dd>{item.route}</dd>
-                    <dt>Original review</dt>
-                    <dd>{item.state}</dd>
-                  </dl>
-                  {item.appeal ? (
-                    <div role="status">
+              {result.data.cases.map((item) => {
+                const isSponsorAuthored = item.fellow_id.startsWith("sponsor:");
+                const isCommentary = item.route === "post-commentary";
+                return (
+                  <section className="card" key={item.case_id}>
+                    <h2>
+                      <code>{item.case_id}</code>
+                    </h2>
+                    <dl>
+                      <dt>Problem</dt>
+                      <dd>{item.problem_id}</dd>
+                      <dt>{isSponsorAuthored ? "Author" : "Fellow"}</dt>
+                      <dd>
+                        {isSponsorAuthored
+                          ? isCommentary
+                            ? "Accountable sponsor (commentary)"
+                            : "Accountable sponsor (governance)"
+                          : item.fellow_id}
+                      </dd>
+                      <dt>Submission</dt>
+                      <dd>{item.route}</dd>
+                      <dt>Original review</dt>
+                      <dd>{item.state}</dd>
+                    </dl>
+                    {item.appeal ? (
+                      <div role="status">
+                        <p>
+                          Appeal <code>{item.appeal.appeal_id}</code>: {item.appeal.state}.
+                        </p>
+                        <p>
+                          {item.appeal.state === "released"
+                            ? isSponsorAuthored
+                              ? isCommentary
+                                ? "A different operator released the exact candidate. Resubmit your unchanged commentary from the problem’s commentary console; current standing and context are checked again."
+                                : "A different operator released the exact candidate. Resubmit the exact unchanged governance action from the problem console; current authority and context are checked again."
+                              : "A different operator released the exact candidate. Ask the Fellow to explicitly resubmit the original request; current authority and context are checked again."
+                            : item.appeal.state === "pending"
+                              ? "Your appeal is waiting for a different operator. Nothing has been published."
+                              : "A different operator upheld the rejection. The original decision and separate appellate record remain available to operators."}
+                        </p>
+                      </div>
+                    ) : item.state === "rejected" ? (
+                      <ScreeningAppealForm
+                        principalId={sponsorId}
+                        targetId={item.case_id}
+                        retryKey={`appeal-${crypto.randomUUID()}`}
+                      />
+                    ) : (
                       <p>
-                        Appeal <code>{item.appeal.appeal_id}</code>: {item.appeal.state}.
+                        {item.state === "pending"
+                          ? "This submission is waiting for its first operator decision. An appeal becomes available if that review rejects it."
+                          : item.state === "released"
+                            ? isSponsorAuthored
+                              ? isCommentary
+                                ? "This exact candidate was released. Resubmit your unchanged commentary explicitly from the problem’s commentary console to complete publication."
+                                : "This exact candidate was released. Resubmit the exact unchanged governance action from the problem console to complete publication."
+                              : "This exact candidate was released. The Fellow must resubmit it explicitly to complete publication."
+                            : isSponsorAuthored
+                              ? isCommentary
+                                ? "The held review has been superseded. Inspect the problem’s commentary thread for the published entry."
+                                : "The held review has been superseded. Inspect the problem’s current governance state."
+                              : "The held review has been superseded. Inspect the Fellow’s current publication receipt."}
                       </p>
-                      <p>
-                        {item.appeal.state === "released"
-                          ? "A different operator released the exact candidate. Ask the Fellow to explicitly resubmit the original request; current authority and context are checked again."
-                          : item.appeal.state === "pending"
-                            ? "Your appeal is waiting for a different operator. Nothing has been published."
-                            : "A different operator upheld the rejection. The original decision and separate appellate record remain available to operators."}
-                      </p>
-                    </div>
-                  ) : item.state === "rejected" ? (
-                    <ScreeningAppealForm
-                      principalId={sponsorId}
-                      targetId={item.case_id}
-                      retryKey={`appeal-${crypto.randomUUID()}`}
-                    />
-                  ) : (
-                    <p>
-                      {item.state === "pending"
-                        ? "This submission is waiting for its first operator decision. An appeal becomes available if that review rejects it."
-                        : item.state === "released"
-                          ? "This exact candidate was released. The Fellow must resubmit it explicitly to complete publication."
-                          : "The held review has been superseded. Inspect the Fellow’s current publication receipt."}
-                    </p>
-                  )}
-                </section>
-              ))}
+                    )}
+                  </section>
+                );
+              })}
               {result.data.has_more ? (
                 <p>
                   The newest 50 cases are shown. Use the exact-case search above for an older

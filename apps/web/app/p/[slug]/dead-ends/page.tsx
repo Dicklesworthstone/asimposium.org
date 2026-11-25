@@ -5,6 +5,8 @@ import { notFound } from "next/navigation";
 import { cache } from "react";
 import { PublicLedgerLive } from "@/components/public-ledger-live";
 import { PublicReadUnavailable } from "@/components/public-read-unavailable";
+import { ReportLink } from "@/components/report-panel";
+import { ScientificBody } from "@/components/scientific-body";
 import { ScreeningNotice } from "@/components/screening-notice";
 import { deadEndRetryLabel } from "@/lib/dead-end-view";
 import { stoaFetchDeadEnds } from "@/lib/public-ledger";
@@ -79,9 +81,6 @@ export default async function DeadEndsPage(props: DeadEndsPageProps) {
 
   return (
     <>
-      <a className="skip" href="#content">
-        Skip to content
-      </a>
       <main className="landing col problem-page" id="content">
         <header className="masthead">
           <Link href={problemPath}>← {face.problem_id}</Link>
@@ -145,34 +144,45 @@ export default async function DeadEndsPage(props: DeadEndsPageProps) {
                   <p className="quiet">No superseding record is reported in this view.</p>
                 )}
                 <h4>Approach</h4>
-                <pre>
-                  <code>{item.approach}</code>
-                </pre>
+                <ScientificBody
+                  body={item.approach}
+                  namespace={`dead-end-${item.dead_end_id}-approach`}
+                  includeSourceToggle={false}
+                />
                 <h4>Why it fails</h4>
-                <pre>
-                  <code>{item.why_it_fails}</code>
-                </pre>
+                <ScientificBody
+                  body={item.why_it_fails}
+                  namespace={`dead-end-${item.dead_end_id}-why`}
+                  includeSourceToggle={false}
+                />
                 {item.what_was_examined && (
                   <>
                     <h4>What was examined</h4>
-                    <pre>
-                      <code>{item.what_was_examined}</code>
-                    </pre>
+                    <ScientificBody
+                      body={item.what_was_examined}
+                      namespace={`dead-end-${item.dead_end_id}-examined`}
+                      includeSourceToggle={false}
+                    />
                   </>
                 )}
                 {item.scope_detection_floor && (
                   <>
                     <h4>Scope and detection floor</h4>
-                    <pre>
-                      <code>{item.scope_detection_floor}</code>
-                    </pre>
+                    <ScientificBody
+                      body={item.scope_detection_floor}
+                      namespace={`dead-end-${item.dead_end_id}-scope`}
+                      includeSourceToggle={false}
+                    />
                   </>
                 )}
                 <h4>Conditions for retrying</h4>
-                <pre>
-                  <code>{item.retry_predicate}</code>
-                </pre>
+                <ScientificBody
+                  body={item.retry_predicate}
+                  namespace={`dead-end-${item.dead_end_id}-retry`}
+                  includeSourceToggle={false}
+                />
                 <p>{deadEndRetryLabel(item.retry_when)}</p>
+                <ReportLink problemId={face.problem_id} target={item.dead_end_id} />
                 <details>
                   <summary>Recorded attribution</summary>
                   <dl>

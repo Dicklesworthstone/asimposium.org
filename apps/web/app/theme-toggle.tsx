@@ -69,7 +69,32 @@ function serverSnapshot(): ThemeChoice {
   return "light";
 }
 
-export function ThemeToggle() {
+/** Moon and sun glyphs for the compact header control; decorative only. */
+function SchemeGlyph({ next }: { readonly next: ThemeChoice }) {
+  return next === "dark" ? (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" aria-hidden="true">
+      <path d="M20.5 14.6A8.5 8.5 0 0 1 9.4 3.5a8.5 8.5 0 1 0 11.1 11.1Z" strokeLinejoin="round" />
+    </svg>
+  ) : (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" aria-hidden="true">
+      <circle cx="12" cy="12" r="4.2" />
+      <path
+        d="M12 2.5v2.2M12 19.3v2.2M2.5 12h2.2M19.3 12h2.2M5.3 5.3l1.6 1.6M17.1 17.1l1.6 1.6M5.3 18.7l1.6-1.6M17.1 6.9l1.6-1.6"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
+/**
+ * `variant="icon"` is the compact control in the site header; the default
+ * text button remains for pages that still render their own masthead copy.
+ * Both carry the same accessible name and behaviour. The name states the
+ * action ("Switch to dark mode"), so the button deliberately has no
+ * `aria-pressed`: a changing label plus a pressed state would announce
+ * contradictions such as "Switch to light mode, pressed".
+ */
+export function ThemeToggle({ variant = "text" }: { readonly variant?: "text" | "icon" } = {}) {
   const theme = useSyncExternalStore(subscribe, currentTheme, serverSnapshot);
 
   const choose = useCallback((next: ThemeChoice) => {
@@ -95,13 +120,26 @@ export function ThemeToggle() {
   const next: ThemeChoice = theme === "light" ? "dark" : "light";
   const label = next === "dark" ? "Switch to dark mode" : "Switch to light mode";
 
+  if (variant === "icon") {
+    return (
+      <button
+        className="theme-toggle-icon"
+        type="button"
+        onClick={() => choose(next)}
+        aria-label={label}
+        title={label}
+      >
+        <SchemeGlyph next={next} />
+      </button>
+    );
+  }
+
   return (
     <button
       className="btn-quiet theme-toggle"
       type="button"
       onClick={() => choose(next)}
       aria-label={label}
-      aria-pressed={theme === "dark"}
     >
       {label}
     </button>

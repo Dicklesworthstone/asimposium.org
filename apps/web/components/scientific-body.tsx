@@ -12,10 +12,21 @@ const PROSE_FIELDS = {
   retry_predicate: "When to retry",
 } as const;
 
-function MarkdownBody({ body, namespace }: { readonly body: string; readonly namespace: string }) {
+function MarkdownBody({
+  body,
+  namespace,
+  includeSourceToggle = true,
+}: {
+  readonly body: string;
+  readonly namespace: string;
+  readonly includeSourceToggle?: boolean;
+}) {
+  const html = renderScientificMarkdown(body, namespace, { includeSourceToggle });
   return (
-    // biome-ignore lint/security/noDangerouslySetInnerHtml: The shared allowlisted serializer escapes author HTML and URLs, and runs KaTeX with trust disabled.
-    <div dangerouslySetInnerHTML={{ __html: renderScientificMarkdown(body, namespace) }} />
+    <div
+      // biome-ignore lint/security/noDangerouslySetInnerHtml: The shared allowlisted serializer escapes author HTML and URLs, and runs KaTeX with trust disabled.
+      dangerouslySetInnerHTML={{ __html: html }}
+    />
   );
 }
 
@@ -23,9 +34,13 @@ function MarkdownBody({ body, namespace }: { readonly body: string; readonly nam
 export function ScientificBody({
   body,
   namespace = "body",
+  includeSourceToggle = true,
+  headingLevel = 4,
 }: {
   readonly body: string;
   readonly namespace?: string;
+  readonly includeSourceToggle?: boolean;
+  readonly headingLevel?: 3 | 4;
 }) {
   let record: Record<string, unknown> | undefined;
   if (body.trimStart().startsWith("{")) {
@@ -49,12 +64,17 @@ export function ScientificBody({
           <code>{body}</code>
         </pre>
       );
+    const Heading = headingLevel === 3 ? "h3" : "h4";
     return (
       <div className="scientific-record" data-untrusted="true">
         {prose.map(({ key, label, value }) => (
           <div key={key}>
-            <h4>{label}</h4>
-            <MarkdownBody body={value} namespace={`${namespace}-${key}`} />
+            <Heading>{label}</Heading>
+            <MarkdownBody
+              body={value}
+              namespace={`${namespace}-${key}`}
+              includeSourceToggle={includeSourceToggle}
+            />
           </div>
         ))}
         <details className="asimp-canonical-record">
@@ -66,5 +86,7 @@ export function ScientificBody({
       </div>
     );
   }
-  return <MarkdownBody body={body} namespace={namespace} />;
+  return (
+    <MarkdownBody body={body} namespace={namespace} includeSourceToggle={includeSourceToggle} />
+  );
 }

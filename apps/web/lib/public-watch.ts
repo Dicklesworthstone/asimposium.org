@@ -1,13 +1,13 @@
 import {
-  parsePublicWatchCursor,
   PUBLIC_WATCH_INTERVAL_MS,
   PUBLIC_WATCH_MAX_BACKOFF_MS,
   PUBLIC_WATCH_MAX_REFRESH_ATTEMPTS,
   PUBLIC_WATCH_REQUEST_TIMEOUT_MS,
+  type PublicWatchTarget,
+  parsePublicWatchCursor,
   publicWatchEtag,
   publicWatchOrigin,
   publicWatchRetryAfter,
-  type PublicWatchTarget,
   validPublicWatchTargets,
 } from "@asimposium/contracts/public-watch";
 
@@ -15,7 +15,12 @@ import {
 export const PUBLIC_WATCH_RECONCILE_POLLS = 6;
 
 export type PublicWatchStatus =
-  | "checking" | "current" | "refreshing" | "update-available" | "paused" | "unavailable";
+  | "checking"
+  | "current"
+  | "refreshing"
+  | "update-available"
+  | "paused"
+  | "unavailable";
 export interface PublicWatchState {
   readonly status: PublicWatchStatus;
   readonly reason?: "configuration" | "http" | "invalid_response" | "timeout" | "network";
@@ -23,22 +28,94 @@ export interface PublicWatchState {
 
 type Timer = ReturnType<typeof setTimeout>;
 export type PublicWatchFetch = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+export type PublicWatchTransport = "ws" | "sse" | "poll";
+
+export interface PublicWatchSocket {
+  send(data: string): void;
+  close(code?: number, reason?: string): void;
+  addEventListener(
+    type: "open" | "message" | "error" | "close",
+    listener: (event: unknown) => void,
+  ): void;
+}
+export interface PublicWatchEventSource {
+  close(): void;
+  addEventListener(
+    type: "resync" | "reconnect" | "closed" | "error",
+    listener: (event: unknown) => void,
+  ): void;
+}
 export interface PublicWatchRuntime {
   readonly fetch: PublicWatchFetch;
   readonly setTimer: (callback: () => void, delay: number) => Timer;
   readonly clearTimer: (timer: Timer) => void;
   readonly random: () => number;
+  readonly openWebSocket?: (url: string, protocol: string) => PublicWatchSocket;
+  readonly openEventSource?: (url: string) => PublicWatchEventSource;
 }
 const browserRuntime: PublicWatchRuntime = {
   fetch: (...args) => fetch(...args),
   setTimer: (callback, delay) => setTimeout(callback, delay),
   clearTimer: (timer) => clearTimeout(timer),
   random: () => Math.random(),
+  openWebSocket:
+    typeof WebSocket === "function" ? (url, protocol) => new WebSocket(url, protocol) : undefined,
+  openEventSource:
+    typeof EventSource === "function"
+      ? (url) => new EventSource(url, { withCredentials: false })
+      : undefined,
 };
+
+const HERALD_WS_PROTOCOL = "asimposium.room.v1";
+const HERALD_WS_HEARTBEAT_MS = 20_000;
+const HERALD_WS_FALLBACK_COOLDOWN_MS = 30_000;
+
+function singleProblemId(targets: readonly PublicWatchTarget[]): string | undefined {
+  let found: string | undefined;
+  for (const target of targets) {
+    const match = /^\/p\/([^/.]+)(?:\.json|\/)/.exec(target.path);
+    if (!match?.[1]) return undefined;
+    if (found === undefined) found = match[1];
+    else if (found !== match[1]) return undefined;
+  }
+  return found;
+}
+
+function wsUrlForOrigin(origin: string, path: string): string | undefined {
+  try {
+    const url = new URL(path, origin);
+    if (url.protocol === "https:") url.protocol = "wss:";
+    else if (url.protocol === "http:") url.protocol = "ws:";
+    else return undefined;
+    return url.toString();
+  } catch {
+    return undefined;
+  }
+}
+
+function parseResyncThrough(raw: unknown): number | undefined {
+  if (typeof raw !== "string" || raw.length > 2048) return undefined;
+  try {
+    const parsed = JSON.parse(raw) as { control?: unknown; through?: unknown };
+    if (
+      parsed.control === "resync" &&
+      typeof parsed.through === "number" &&
+      Number.isSafeInteger(parsed.through) &&
+      parsed.through >= 0
+    )
+      return parsed.through;
+  } catch {
+    return undefined;
+  }
+  return undefined;
+}
 
 type ReadFailure = NonNullable<PublicWatchState["reason"]> | "cancelled";
 class WatchReadError extends Error {
-  constructor(readonly reason: ReadFailure, readonly retryAfter?: number) {
+  constructor(
+    readonly reason: ReadFailure,
+    readonly retryAfter?: number,
+  ) {
     super(`PUBLIC_WATCH_${reason.toUpperCase()}`);
   }
 }
@@ -64,10 +141,14 @@ async function read(
   let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
   const abort = () => controller.abort();
   const aborted = new Promise<never>((_, reject) => {
-    controller.signal.addEventListener("abort", () => {
-      void reader?.cancel().catch(() => undefined);
-      reject(new WatchReadError(abortReason));
-    }, { once: true });
+    controller.signal.addEventListener(
+      "abort",
+      () => {
+        void reader?.cancel().catch(() => undefined);
+        reject(new WatchReadError(abortReason));
+      },
+      { once: true },
+    );
   });
   parent.addEventListener("abort", abort, { once: true });
   if (parent.aborted) abort();
@@ -79,13 +160,18 @@ async function read(
     if (controller.signal.aborted) throw new WatchReadError(abortReason);
     const response = await runtime.fetch(url, {
       method,
-      headers: { accept: method === "GET" ? "text/plain" : "application/json",
-        ...(etag === undefined ? {} : { "if-none-match": etag }) },
-      credentials: "omit", mode: "cors", redirect: "error",
+      headers: {
+        accept: method === "GET" ? "text/plain" : "application/json",
+        ...(etag === undefined ? {} : { "if-none-match": etag }),
+      },
+      credentials: "omit",
+      mode: "cors",
+      redirect: "error",
       // The bare global signal has its own bounded Worker Cache API entry.
       // Scientific validators must still reach their disclosure checks.
       cache: method === "GET" ? "default" : "no-cache",
-      referrerPolicy: "no-referrer", signal: controller.signal,
+      referrerPolicy: "no-referrer",
+      signal: controller.signal,
     });
     if (controller.signal.aborted) {
       void response.body?.cancel().catch(() => undefined);
@@ -135,10 +221,14 @@ async function read(
           size += chunk.value.byteLength;
         }
       }
-      const cursor = parsePublicWatchCursor(new TextDecoder("utf-8", { fatal: true }).decode(bytes.subarray(0, size)));
+      const cursor = parsePublicWatchCursor(
+        new TextDecoder("utf-8", { fatal: true }).decode(bytes.subarray(0, size)),
+      );
       if (cursor === undefined) throw new WatchReadError("invalid_response");
       return { ...result, cursor };
-    } finally { reader?.releaseLock(); }
+    } finally {
+      reader?.releaseLock();
+    }
   };
   try {
     return await Promise.race([operation(), aborted]);
@@ -187,6 +277,11 @@ export class PublicLedgerWatch {
   private refreshAttempts = 0;
   private failures = 0;
   private state: PublicWatchState | undefined;
+  private socket: PublicWatchSocket | undefined;
+  private eventSource: PublicWatchEventSource | undefined;
+  private heartbeatTimer: Timer | undefined;
+  private reconnectTimer: Timer | undefined;
+  private liveTransport: PublicWatchTransport = "poll";
 
   constructor(private readonly options: PublicWatchOptions) {
     this.runtime = options.runtime ?? browserRuntime;
@@ -194,14 +289,25 @@ export class PublicLedgerWatch {
     this.configured = publicWatchOrigin(options.origin) && validPublicWatchTargets(this.targets);
   }
 
+  /** Active liveness transport: "ws" (Herald DO), "sse" (persistent fallback), or "poll". */
+  get transport(): PublicWatchTransport {
+    return this.liveTransport;
+  }
+
   start(active = true): void {
     if (this.running) return;
     this.running = true;
     this.active = active;
-    if (!this.configured) { this.emit({ status: "unavailable", reason: "configuration" }); return; }
-    if (!active) { this.emit({ status: "paused" }); return; }
+    if (!this.configured) {
+      this.emit({ status: "unavailable", reason: "configuration" });
+      return;
+    }
+    if (!active) {
+      this.emit({ status: "paused" });
+      return;
+    }
     this.emit({ status: "checking" });
-    void this.poll();
+    this.connectLiveOrPoll();
   }
 
   stop(): void {
@@ -214,30 +320,97 @@ export class PublicLedgerWatch {
     this.active = active;
     this.invalidate();
     if (!this.running || !this.configured) return;
-    if (!active) { this.emit({ status: "paused" }); return; }
+    if (!active) {
+      this.emit({ status: "paused" });
+      return;
+    }
     this.forceProbe = true;
     this.immediate = true;
-    if (!this.polling) { this.immediate = false; void this.poll(); }
+    this.connectLiveOrPoll();
   }
 
   /** Called only with validators obtained from freshly rendered server data. */
   replaceTargets(targets: readonly PublicWatchTarget[]): void {
+    const previousProblem = singleProblemId(this.targets);
     this.targets = targets.map((target) => ({ ...target }));
-    this.configured = publicWatchOrigin(this.options.origin) && validPublicWatchTargets(this.targets);
+    this.configured =
+      publicWatchOrigin(this.options.origin) && validPublicWatchTargets(this.targets);
     this.pendingChange = undefined;
     this.refreshAttempts = 0;
     this.failures = 0;
+    const nextProblem = singleProblemId(this.targets);
+    // Keep an already-open live WS/SSE room alive across same-problem refreshes
+    // (such as Next.js router.refresh()) instead of tearing it down to polling.
+    if (
+      this.running &&
+      this.active &&
+      this.configured &&
+      (this.liveTransport === "ws" || this.liveTransport === "sse") &&
+      previousProblem !== undefined &&
+      previousProblem === nextProblem
+    ) {
+      this.forceProbe = true;
+      if (!this.polling) void this.probeTargetsOnly(this.generation);
+      return;
+    }
     this.checkNow();
   }
 
   checkNow(): void {
+    const keepLive =
+      this.running &&
+      this.active &&
+      this.configured &&
+      (this.liveTransport === "ws" || this.liveTransport === "sse");
+    if (keepLive) {
+      this.forceProbe = true;
+      this.refreshAttempts = 0;
+      if (!this.polling) void this.probeTargetsOnly(this.generation);
+      return;
+    }
     this.invalidate();
     this.forceProbe = true;
     this.refreshAttempts = 0;
     if (!this.running) return;
-    if (!this.configured) { this.emit({ status: "unavailable", reason: "configuration" }); return; }
+    if (!this.configured) {
+      this.emit({ status: "unavailable", reason: "configuration" });
+      return;
+    }
     this.immediate = true;
-    if (this.active && !this.polling) { this.immediate = false; void this.poll(); }
+    if (this.active && !this.polling) {
+      this.immediate = false;
+      void this.poll();
+    }
+  }
+
+  private closeLiveTransports(): void {
+    if (this.heartbeatTimer !== undefined) {
+      this.runtime.clearTimer(this.heartbeatTimer);
+      this.heartbeatTimer = undefined;
+    }
+    if (this.reconnectTimer !== undefined) {
+      this.runtime.clearTimer(this.reconnectTimer);
+      this.reconnectTimer = undefined;
+    }
+    if (this.socket !== undefined) {
+      const sock = this.socket;
+      this.socket = undefined;
+      try {
+        sock.close(1000, "Client paused");
+      } catch {
+        // Ignore close errors on already-closed sockets.
+      }
+    }
+    if (this.eventSource !== undefined) {
+      const es = this.eventSource;
+      this.eventSource = undefined;
+      try {
+        es.close();
+      } catch {
+        // Ignore close errors.
+      }
+    }
+    this.liveTransport = "poll";
   }
 
   private invalidate(): void {
@@ -245,10 +418,223 @@ export class PublicLedgerWatch {
     this.controller?.abort();
     if (this.timer !== undefined) this.runtime.clearTimer(this.timer);
     this.timer = undefined;
+    this.closeLiveTransports();
+  }
+
+  private connectLiveOrPoll(): void {
+    const problem = singleProblemId(this.targets);
+    if (problem !== undefined && this.runtime.openWebSocket !== undefined) {
+      if (this.tryOpenWebSocket(problem)) return;
+    }
+    if (problem !== undefined && this.runtime.openEventSource !== undefined) {
+      if (this.tryOpenEventSource(problem)) return;
+    }
+    this.liveTransport = "poll";
+    if (!this.polling) {
+      this.immediate = false;
+      void this.poll();
+    }
+  }
+
+  private scheduleHeartbeat(sock: PublicWatchSocket, generation: number): void {
+    if (this.heartbeatTimer !== undefined) this.runtime.clearTimer(this.heartbeatTimer);
+    this.heartbeatTimer = this.runtime.setTimer(() => {
+      if (!this.running || !this.active || this.generation !== generation || this.socket !== sock)
+        return;
+      try {
+        sock.send("ping");
+        this.scheduleHeartbeat(sock, generation);
+      } catch {
+        this.fallbackAfterWsFailure(generation);
+      }
+    }, HERALD_WS_HEARTBEAT_MS);
+  }
+
+  private tryOpenWebSocket(problem: string): boolean {
+    const openWs = this.runtime.openWebSocket;
+    if (!openWs) return false;
+    const since = this.cursorValue ?? 0;
+    const url = wsUrlForOrigin(
+      this.options.origin,
+      `/p/${encodeURIComponent(problem)}/room?since=${since}`,
+    );
+    if (!url) return false;
+    const generation = this.generation;
+    let sock: PublicWatchSocket;
+    try {
+      sock = openWs(url, HERALD_WS_PROTOCOL);
+    } catch {
+      return false;
+    }
+    this.socket = sock;
+    this.liveTransport = "ws";
+    let settledFailure = false;
+    const failToNext = () => {
+      if (settledFailure || !this.running || !this.active || this.generation !== generation) return;
+      settledFailure = true;
+      this.fallbackAfterWsFailure(generation);
+    };
+    sock.addEventListener("open", () => {
+      if (!this.running || !this.active || this.generation !== generation || this.socket !== sock)
+        return;
+      this.failures = 0;
+      this.scheduleHeartbeat(sock, generation);
+    });
+    sock.addEventListener("message", (event) => {
+      if (!this.running || !this.active || this.generation !== generation || this.socket !== sock)
+        return;
+      const data = (event as { data?: unknown })?.data;
+      if (data === "pong") return;
+      const through = parseResyncThrough(data);
+      if (through === undefined) return;
+      try {
+        sock.send(JSON.stringify({ ack: through }));
+      } catch {
+        failToNext();
+        return;
+      }
+      this.cursorValue = through;
+      this.forceProbe = true;
+      if (!this.polling) void this.probeTargetsOnly(generation);
+    });
+    sock.addEventListener("error", failToNext);
+    sock.addEventListener("close", failToNext);
+    return true;
+  }
+
+  private fallbackAfterWsFailure(generation: number): void {
+    if (!this.running || !this.active || this.generation !== generation) return;
+    this.closeLiveTransports();
+    const problem = singleProblemId(this.targets);
+    if (problem !== undefined && this.runtime.openEventSource !== undefined) {
+      if (this.tryOpenEventSource(problem)) return;
+    }
+    this.liveTransport = "poll";
+    this.forceProbe = true;
+    if (!this.polling) void this.poll();
+  }
+
+  private tryOpenEventSource(problem: string): boolean {
+    const openEs = this.runtime.openEventSource;
+    if (!openEs) return false;
+    const since = this.cursorValue ?? 0;
+    const url = `${this.options.origin}/p/${encodeURIComponent(problem)}/room/sse?since=${since}`;
+    const generation = this.generation;
+    let es: PublicWatchEventSource;
+    try {
+      es = openEs(url);
+    } catch {
+      return false;
+    }
+    this.eventSource = es;
+    this.liveTransport = "sse";
+    let dropped = false;
+    const dropToPolling = () => {
+      if (dropped || !this.running || !this.active || this.generation !== generation) return;
+      dropped = true;
+      this.closeLiveTransports();
+      this.liveTransport = "poll";
+      this.forceProbe = true;
+      if (!this.polling) void this.poll();
+    };
+    es.addEventListener("resync", (event) => {
+      if (
+        !this.running ||
+        !this.active ||
+        this.generation !== generation ||
+        this.eventSource !== es
+      )
+        return;
+      const through = parseResyncThrough((event as { data?: unknown })?.data);
+      if (through === undefined) return;
+      this.cursorValue = through;
+      this.forceProbe = true;
+      if (!this.polling) void this.probeTargetsOnly(generation);
+    });
+    es.addEventListener("closed", dropToPolling);
+    es.addEventListener("reconnect", () => {
+      if (dropped || !this.running || !this.active || this.generation !== generation) return;
+      dropped = true;
+      this.closeLiveTransports();
+      this.reconnectTimer = this.runtime.setTimer(() => {
+        this.reconnectTimer = undefined;
+        if (this.running && this.active && this.generation === generation) {
+          this.connectLiveOrPoll();
+        }
+      }, HERALD_WS_FALLBACK_COOLDOWN_MS);
+      this.forceProbe = true;
+      if (!this.polling) void this.probeTargetsOnly(generation);
+    });
+    es.addEventListener("error", dropToPolling);
+    return true;
+  }
+
+  /** Authoritative HEAD/ETag check triggered by a live WS or SSE push notice.
+   * Never reschedules the /cursor poll loop while a live transport owns liveness. */
+  private async probeTargetsOnly(generation: number): Promise<void> {
+    if (!this.running || !this.active || !this.configured || this.polling) return;
+    this.polling = true;
+    const controller = new AbortController();
+    this.controller = controller;
+    const valid = () => this.running && this.active && generation === this.generation;
+    // Clear before awaiting HEAD so any concurrent WS/SSE push or replaceTargets
+    // arriving during flight flips forceProbe back to true and triggers a follow-up probe.
+    this.forceProbe = false;
+    try {
+      let changed: string | undefined;
+      for (const target of this.targets) {
+        const probe = await read(
+          this.runtime,
+          `${this.options.origin}${target.path}`,
+          "HEAD",
+          target.etag,
+          controller.signal,
+        );
+        if (!valid()) return;
+        if (probe.status !== 304 && (probe.status !== 200 || probe.etag !== target.etag)) {
+          changed = `${target.path}\n${probe.status}\n${probe.etag ?? ""}`;
+          break;
+        }
+      }
+      this.checkedCursor = this.cursorValue;
+      if (changed === undefined) {
+        this.pendingChange = undefined;
+        this.refreshAttempts = 0;
+        this.emit({ status: "current" });
+      } else {
+        if (changed !== this.pendingChange) this.refreshAttempts = 0;
+        this.pendingChange = changed;
+        if (this.refreshAttempts >= PUBLIC_WATCH_MAX_REFRESH_ATTEMPTS) {
+          this.emit({ status: "update-available" });
+        } else if (this.options.onRefresh() === false) {
+          this.emit({ status: "update-available" });
+        } else {
+          this.refreshAttempts++;
+          this.emit({ status: "refreshing" });
+        }
+      }
+      this.failures = 0;
+    } catch (error) {
+      if (!valid()) return;
+      const failure = error instanceof WatchReadError ? error : new WatchReadError("network");
+      if (failure.reason === "cancelled") return;
+      this.failures++;
+      this.emit({ status: "unavailable", reason: failure.reason });
+    } finally {
+      this.polling = false;
+      if (this.controller === controller) this.controller = undefined;
+      if (valid() && this.configured && this.forceProbe && this.liveTransport !== "poll") {
+        void this.probeTargetsOnly(generation);
+      }
+    }
   }
 
   private emit(state: PublicWatchState): void {
-    if (!this.running || (this.state?.status === state.status && this.state.reason === state.reason)) return;
+    if (
+      !this.running ||
+      (this.state?.status === state.status && this.state.reason === state.reason)
+    )
+      return;
     this.state = state;
     this.options.onState(state);
   }
@@ -256,10 +642,13 @@ export class PublicLedgerWatch {
   private schedule(delay: number): void {
     if (!this.running || !this.active || !this.configured) return;
     const jitter = Math.floor(Math.max(0, Math.min(1, this.runtime.random())) * 1_000);
-    this.timer = this.runtime.setTimer(() => {
-      this.timer = undefined;
-      void this.poll();
-    }, delay === 0 ? 0 : Math.min(PUBLIC_WATCH_MAX_BACKOFF_MS, delay + jitter));
+    this.timer = this.runtime.setTimer(
+      () => {
+        this.timer = undefined;
+        void this.poll();
+      },
+      delay === 0 ? 0 : Math.min(PUBLIC_WATCH_MAX_BACKOFF_MS, delay + jitter),
+    );
   }
 
   private async poll(): Promise<void> {
@@ -274,7 +663,13 @@ export class PublicLedgerWatch {
       // Fetch the tiny integer without a conditional validator. Stoa keeps it
       // for at most five seconds in its explicit cache; a matching conditional
       // validator instead asks Stoa for an authoritative D1 revalidation.
-      const global = await read(this.runtime, `${this.options.origin}/cursor`, "GET", undefined, controller.signal);
+      const global = await read(
+        this.runtime,
+        `${this.options.origin}/cursor`,
+        "GET",
+        undefined,
+        controller.signal,
+      );
       if (!valid()) return;
       if (global.status === 200) {
         this.cursorValue = global.cursor;
@@ -284,12 +679,22 @@ export class PublicLedgerWatch {
       // Inequality, not >: cache rollback/reset is a reason to revalidate, not
       // a reason to suppress updates until an old high-water mark is reached.
       this.quietPolls++;
-      if (this.forceProbe || cursor !== this.checkedCursor || this.pendingChange !== undefined ||
-        this.quietPolls >= PUBLIC_WATCH_RECONCILE_POLLS) {
+      if (
+        this.forceProbe ||
+        cursor !== this.checkedCursor ||
+        this.pendingChange !== undefined ||
+        this.quietPolls >= PUBLIC_WATCH_RECONCILE_POLLS
+      ) {
         this.quietPolls = 0;
         let changed: string | undefined;
         for (const target of this.targets) {
-          const probe = await read(this.runtime, `${this.options.origin}${target.path}`, "HEAD", target.etag, controller.signal);
+          const probe = await read(
+            this.runtime,
+            `${this.options.origin}${target.path}`,
+            "HEAD",
+            target.etag,
+            controller.signal,
+          );
           if (!valid()) return;
           if (probe.status !== 304 && (probe.status !== 200 || probe.etag !== target.etag)) {
             changed = `${target.path}\n${probe.status}\n${probe.etag ?? ""}`;
@@ -324,13 +729,18 @@ export class PublicLedgerWatch {
       if (failure.reason === "cancelled") return;
       this.failures++;
       this.forceProbe = true;
-      delay = Math.min(PUBLIC_WATCH_MAX_BACKOFF_MS,
-        Math.max(failure.retryAfter ?? 0, PUBLIC_WATCH_INTERVAL_MS * 2 ** Math.min(this.failures, 4)));
+      delay = Math.min(
+        PUBLIC_WATCH_MAX_BACKOFF_MS,
+        Math.max(
+          failure.retryAfter ?? 0,
+          PUBLIC_WATCH_INTERVAL_MS * 2 ** Math.min(this.failures, 4),
+        ),
+      );
       this.emit({ status: "unavailable", reason: failure.reason });
     } finally {
       this.polling = false;
       if (this.controller === controller) this.controller = undefined;
-      if (this.running && this.active && this.configured) {
+      if (this.running && this.active && this.configured && this.liveTransport === "poll") {
         const immediate = this.immediate;
         this.immediate = false;
         this.schedule(immediate ? 0 : delay);
