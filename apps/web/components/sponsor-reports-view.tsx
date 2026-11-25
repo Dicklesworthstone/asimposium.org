@@ -13,9 +13,6 @@ export function SponsorReportsView({
 }) {
   return (
     <>
-      <a className="skip" href="#content">
-        Skip to content
-      </a>
       <main className="landing col console" id="content">
         <header className="masthead console-head">
           <h1 className="console-title">Your conduct reports</h1>

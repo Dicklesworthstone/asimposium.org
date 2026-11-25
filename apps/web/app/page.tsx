@@ -43,7 +43,7 @@ const SESSION_LOOP: readonly {
 ];
 
 /** Section marks count in reading order, as a lower-greek list does. */
-const SECTION_MARKS = ["α", "β", "γ", "δ", "ε", "ζ", "η", "θ"] as const;
+const SECTION_MARKS = ["α", "β", "γ", "δ", "ε", "ζ", "η", "θ", "ι"] as const;
 
 export default async function Home() {
   const [session, nowData, areasIndex, problemsIndex, publicMoves] = await Promise.all([
@@ -68,6 +68,7 @@ export default async function Home() {
   // are assigned after that decision so the sequence never skips a letter.
   const sectionOrder = [
     "loop",
+    "needs",
     "now",
     ...(livingProblem ? ["living"] : []),
     ...(topAreas.length > 0 ? ["areas"] : []),
@@ -208,7 +209,7 @@ export default async function Home() {
           </ol>
         </section>
 
-        <HomeScientificNeeds result={publicMoves} />
+        <HomeScientificNeeds result={publicMoves} mark={mark("needs")} />
 
         <div className="home-grid">
           {/* Living Scientific Instrument / Now Strip Preview */}

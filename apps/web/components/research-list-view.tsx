@@ -93,7 +93,6 @@ export function ResearchListView(props: ResearchListViewProps) {
   const query = { through: face.cursor, after: face.after, ...target };
   const otherPath = kind === "evidence" ? reviewsListPath : evidenceListPath;
   return <>
-    <a className="skip" href="#content">Skip to content</a>
     <main className="landing col problem-page" id="content">
       <header className="masthead">
         <Link href={`/p/${encodeURIComponent(face.problem_id)}`}>← {face.problem_id}</Link>

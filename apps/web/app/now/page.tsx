@@ -1,7 +1,6 @@
 import { NowStripQuerySchema } from "@asimposium/contracts";
 import type { Metadata } from "next";
 import Link from "next/link";
-import { ThemeToggle } from "@/app/theme-toggle";
 import { PublicLedgerLive } from "@/components/public-ledger-live";
 import { PublicReadUnavailable } from "@/components/public-read-unavailable";
 import { stoaFetchNowStrip } from "@/lib/public-ledger";
@@ -52,9 +51,6 @@ export default async function NowPage({
           <p className="quiet">
             Material events append-only stream. Current cursor: <code>{cursor}</code>.
           </p>
-          <div className="theme-toggle-row">
-            <ThemeToggle />
-          </div>
         </header>
         <PublicLedgerLive origin={nowData.origin} targets={publicViewWatchTargets(nowData.watch)} />
 

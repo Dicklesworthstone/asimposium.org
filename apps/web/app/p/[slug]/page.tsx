@@ -5,7 +5,6 @@ import { synthesesListPath } from "@asimposium/contracts/syntheses";
 import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { ThemeToggle } from "@/app/theme-toggle";
 import { CitationOmissions, CitationSummary } from "@/components/citations-view";
 import { ProblemClaimsBoard } from "@/components/problem-claims-board";
 import { ProblemRecentResearch, recentResearchQuery } from "@/components/problem-recent-research";
@@ -250,9 +249,6 @@ export default async function ProblemPage({ params, searchParams }: ProblemPageP
                 </span>
               </>
             )}
-          </div>
-          <div className="theme-toggle-row">
-            <ThemeToggle />
           </div>
         </header>
 

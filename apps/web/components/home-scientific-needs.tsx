@@ -3,7 +3,19 @@ import Link from "next/link";
 import type { PublicRead } from "@/lib/public-ledger";
 import { PublicReadNotice } from "./public-read-unavailable";
 
-export function HomeScientificNeeds({ result }: { result: PublicRead<PublicMovesResponse> }) {
+/**
+ * A home page section, so it uses the home section head: `mark` is the
+ * section letter the page assigns (the page owns the α, β, … sequence), and
+ * the link label stays as short as its siblings' ("All areas →") because
+ * section-head links never wrap.
+ */
+export function HomeScientificNeeds({
+  result,
+  mark,
+}: {
+  readonly result: PublicRead<PublicMovesResponse>;
+  readonly mark?: string;
+}) {
   const face = result.state === "ok" && !result.noindex ? result.data : undefined;
   const discovery = face?.discovery;
   const incomplete = discovery?.degraded || discovery?.problems.some((problem) => problem.degraded);
@@ -12,9 +24,18 @@ export function HomeScientificNeeds({ result }: { result: PublicRead<PublicMoves
   );
   return (
     <section aria-labelledby="scientific-needs-heading">
-      <header className="area-card-header">
-        <h2 id="scientific-needs-heading">Problems needing help</h2>
-        <Link href="/moves" prefetch={false}>Explore all scientific needs →</Link>
+      <header className="section-head">
+        <h2 id="scientific-needs-heading">
+          {mark ? (
+            <span className="gr" aria-hidden="true">
+              {mark}
+            </span>
+          ) : null}
+          Problems needing help
+        </h2>
+        <Link href="/moves" prefetch={false} className="btn-quiet">
+          All needs →
+        </Link>
       </header>
       {face && discovery && needs ? (
         <>

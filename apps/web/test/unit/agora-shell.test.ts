@@ -405,4 +405,29 @@ describe("W8.1 Agora Shell: Accessible Graph Table & Math Presentation (WCAG 2.2
     expect(designHtml).toContain("--clay:#a2442a");
     expect(inlineScriptHashes(designPath).length).toBe(2);
   });
+
+  test("the root layout owns the skip link and scheme switch: no page or view renders its own", async () => {
+    const { readdirSync } = await import("node:fs");
+    // Pages written for the old per-page chrome keep arriving through merges;
+    // with the transitional hide rules gone, a second skip link or switch is
+    // visible. global-error.tsx replaces the layout, so it carries its own.
+    const owners = new Set([
+      "app/layout.tsx",
+      "app/global-error.tsx",
+      "app/theme-toggle.tsx",
+      "components/site-chrome.tsx",
+    ]);
+    const perPageChrome = /className="skip"|>\s*Skip to (main )?content|<ThemeToggle\b|theme-toggle-row/;
+    const root = join(import.meta.dir, "../..");
+    const offenders: string[] = [];
+    for (const dir of ["app", "components"]) {
+      for (const entry of readdirSync(join(root, dir), { recursive: true }) as string[]) {
+        if (!entry.endsWith(".tsx")) continue;
+        const path = `${dir}/${entry.split("\\").join("/")}`;
+        if (owners.has(path)) continue;
+        if (perPageChrome.test(readFileSync(join(root, path), "utf8"))) offenders.push(path);
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
 });
