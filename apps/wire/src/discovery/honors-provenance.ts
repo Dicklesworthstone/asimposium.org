@@ -19,6 +19,7 @@ import {
   prepareDependencyClosure,
 } from "../ledger/claim-dependency-closure.ts";
 import { summarizeClaimGraph } from "../ledger/claim-graph-read.ts";
+import { scientificEvidenceClassEligible } from "../ledger/evidence-grounding.ts";
 import { readPublishedProblemResolution } from "../ledger/problem-resolution-read.ts";
 import { checkedScientificPayload } from "../ledger/scientific-checks.ts";
 import {
@@ -442,6 +443,8 @@ export async function readHonorsClaim(
   // Keep the grounded refutation-attempt publication in the trail as well as
   // the exact work products the carrying verifications checked. Unrelated
   // problem evidence never receives credit through an arbitrary first-N query.
+  // Historical class labels must pass the same eligibility as the canonical
+  // fold; an unscanned certificate cannot borrow an earned result's authority.
   for (const row of rows.slice(0, settled.index + 1)) {
     if (
       row.type !== "evidence.created" ||
@@ -455,8 +458,7 @@ export async function readHonorsClaim(
     if (
       payload.mode !== "confirmatory" ||
       payload.selected_hypothesis_id != null ||
-      payload.computed_class === "assertion" ||
-      payload.computed_class === "heuristic" ||
+      !scientificEvidenceClassEligible(payload) ||
       !check.success ||
       check.data.result !== "survived" ||
       check.data.target_digest !== publication.content_digest
@@ -473,8 +475,7 @@ export async function readHonorsClaim(
           `sha256:${source.payload_sha256}` === reference.digest &&
           body?.mode === "confirmatory" &&
           body.selected_hypothesis_id == null &&
-          body.computed_class !== "assertion" &&
-          body.computed_class !== "heuristic"
+          scientificEvidenceClassEligible(body)
         );
       }),
     );
