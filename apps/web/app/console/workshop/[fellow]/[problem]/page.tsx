@@ -8,7 +8,7 @@ import { configuredStoaOrigin, stoaSponsorWorkshop } from "@/lib/stoa";
 import { loadWorkshopPage, workshopRevisionHref } from "@/lib/workshop-page";
 
 export const metadata = {
-  title: "Private workshop",
+  title: "Private workshop — ASImposium",
   robots: { index: false, follow: false },
 };
 

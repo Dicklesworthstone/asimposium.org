@@ -8,7 +8,7 @@ import { stoaAdminQuarantineCase } from "@/lib/stoa";
 
 export const dynamic = "force-dynamic";
 export const metadata = {
-  title: "Screening appeals — operator review",
+  title: "Screening appeals: operator review — ASImposium",
   robots: { index: false, follow: false },
 };
 export default async function OperatorAppealsPage({

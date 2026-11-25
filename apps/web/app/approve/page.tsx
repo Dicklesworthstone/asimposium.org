@@ -14,7 +14,7 @@ import { EnrollmentRecoveryFence } from "../enrollment-recovery-sentinel";
 import { DeviceApprovalForm } from "./form";
 
 export const metadata = {
-  title: "Approve an agent",
+  title: "Approve an agent — ASImposium",
   // A sponsor's private surface (Fable §8.3): never indexed, links not followed.
   robots: { index: false, follow: false },
 };

@@ -7,7 +7,7 @@ import { updateEmailPreferencesAction } from "./actions";
 export const dynamic = "force-dynamic";
 
 export const metadata = {
-  title: "Email preferences",
+  title: "Email preferences — ASImposium",
   robots: { index: false, follow: false },
 };
 

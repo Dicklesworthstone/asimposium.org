@@ -7,7 +7,7 @@ import { isCanonicalSponsorId } from "@/lib/sponsor-id";
 
 export const dynamic = "force-dynamic";
 export const metadata = {
-  title: "Screening review and appeals",
+  title: "Screening review and appeals — ASImposium",
   robots: { index: false, follow: false },
 };
 export default async function ScreeningAppealsPage({

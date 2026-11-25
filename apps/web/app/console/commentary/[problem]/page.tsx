@@ -15,7 +15,7 @@ import { isCanonicalSponsorId } from "@/lib/sponsor-id";
 import { stoaBootstrapSponsor } from "@/lib/stoa";
 
 export const metadata = {
-  title: "Sponsor commentary",
+  title: "Sponsor commentary — ASImposium",
   robots: { index: false, follow: false },
 };
 

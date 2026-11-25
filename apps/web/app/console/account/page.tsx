@@ -7,7 +7,7 @@ import { isCanonicalSponsorId } from "@/lib/sponsor-id";
 import { stoaSponsorSuspensionStatus } from "@/lib/stoa";
 
 export const metadata = {
-  title: "Account data",
+  title: "Account data — ASImposium",
   robots: { index: false, follow: false },
 };
 

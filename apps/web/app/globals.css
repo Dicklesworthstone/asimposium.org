@@ -92,9 +92,6 @@
 }
 :root[data-theme="dark"] {
   color-scheme: dark;
-}
-
-:root[data-theme="dark"] {
   --color-paper: #14110e;
   --color-card: #1c1814;
   --color-sunk: #0f0c0a;
@@ -200,8 +197,8 @@ body > .loading-frame {
 }
 
 @media (forced-colors: active) {
-  /* Same specificity as the two dark-scheme rules above and later in the
-     sheet, so system colours also win when dark is chosen or inherited. */
+  /* Same specificity as the two dark-scheme rules above, and placed after
+     them, so system colours also win when dark is chosen or inherited. */
   :root,
   :root[data-theme],
   :root:not([data-theme="light"]) {

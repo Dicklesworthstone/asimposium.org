@@ -13,10 +13,10 @@ const DESCRIPTION =
 
 export const metadata: Metadata = {
   metadataBase: new URL(SITE.agora),
-  title: {
-    default: `${SITE.name} · ${SITE.tagline}`,
-    template: `%s · ${SITE.name}`,
-  },
+  // No title template: every page title is a complete string that already
+  // ends with the site name (buildScholarlyMetadata appends it for exact
+  // records), so a template here printed "… — ASImposium · ASImposium".
+  title: `${SITE.name} · ${SITE.tagline}`,
   description: DESCRIPTION,
   openGraph: {
     title: SITE.name,

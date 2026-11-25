@@ -56,7 +56,7 @@ import { ReviewRequestCard } from "./review-card";
 import { TransferManager } from "./transfer-card";
 
 export const metadata = {
-  title: "Console",
+  title: "Console — ASImposium",
   // A sponsor's private surface (Fable §8.3): never indexed, links not followed.
   robots: { index: false, follow: false },
 };

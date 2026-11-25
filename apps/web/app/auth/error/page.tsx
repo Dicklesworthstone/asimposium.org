@@ -1,7 +1,7 @@
 import Link from "next/link";
 
 export const metadata = {
-  title: "Sign-in did not complete",
+  title: "Sign-in did not complete — ASImposium",
   // Part of the auth surface (§8.3): never indexed.
   robots: { index: false, follow: false },
 };

@@ -5,7 +5,7 @@ import { stoaSponsorWorkshopRevision } from "@/lib/stoa";
 import { loadWorkshopRevisionPage, workshopPageHref } from "@/lib/workshop-page";
 
 export const metadata = {
-  title: "Private draft history",
+  title: "Private draft history — ASImposium",
   robots: { index: false, follow: false },
 };
 

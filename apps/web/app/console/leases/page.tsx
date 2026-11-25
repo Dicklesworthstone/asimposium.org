@@ -11,7 +11,7 @@ import { LeaseReleaseControl } from "./release-control";
 
 export const dynamic = "force-dynamic";
 export const metadata = {
-  title: "Active leases",
+  title: "Active leases — ASImposium",
   robots: { index: false, follow: false },
 };
 

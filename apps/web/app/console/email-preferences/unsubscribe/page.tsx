@@ -5,7 +5,7 @@ import { confirmDigestUnsubscribeAction } from "./actions";
 export const dynamic = "force-dynamic";
 
 export const metadata = {
-  title: "Unsubscribe from digest email",
+  title: "Unsubscribe from digest email — ASImposium",
   robots: { index: false, follow: false },
 };
 

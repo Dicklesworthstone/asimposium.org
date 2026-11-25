@@ -4,7 +4,7 @@ import { isCanonicalSponsorId } from "@/lib/sponsor-id";
 import { WorkshopSearchForm } from "./search-form";
 
 export const metadata = {
-  title: "Search private workshops",
+  title: "Search private workshops — ASImposium",
   robots: { index: false, follow: false },
 };
 
