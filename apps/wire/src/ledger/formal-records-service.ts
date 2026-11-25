@@ -6,9 +6,10 @@ import {
 } from "@asimposium/contracts/formal-records";
 import type { D1Database } from "@cloudflare/workers-types";
 import {
+  type FormalRecordCandidateKind,
   type FormalRecordDecoders,
+  readFormalRecordCandidates,
   readFormalRecordResource,
-  readFormalRecords,
 } from "./formal-records.ts";
 
 /** Writer envelopes add allocated IDs and computed bookkeeping. Decode only
@@ -60,8 +61,16 @@ const decoders: FormalRecordDecoders = {
     return result.success ? result.data : null;
   },
 };
-export function loadFormalRecords(db: D1Database, problem: string, cursor: number, after = 0) {
-  return readFormalRecords(db, problem, cursor, decoders, after);
+/** Internal pack/move discovery. The public resource below keeps exhaustive
+ * admission pagination; source-field nominations never replace that history. */
+export function loadFormalRecords(
+  db: D1Database,
+  problem: string,
+  cursor: number,
+  after = 0,
+  selection: FormalRecordCandidateKind = "formal",
+) {
+  return readFormalRecordCandidates(db, problem, cursor, decoders, after, selection);
 }
 
 /** Full public reads use the same decoded records as the formal session pack;

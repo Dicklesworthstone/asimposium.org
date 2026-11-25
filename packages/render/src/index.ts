@@ -18,6 +18,7 @@ export {
   renderCommentaryMarkdown,
 } from "./commentary.ts";
 export {
+  fellowReviewOutcomeText,
   renderAreaDetailHtmlFragment,
   renderAreaDetailMarkdown,
   renderAreasIndexHtmlFragment,
@@ -49,6 +50,12 @@ export {
   renderHypothesisEvidenceMarkdown,
 } from "./hypothesis-evidence.ts";
 export {
+  integrityNoticeEventPath,
+  integrityNoticesPath,
+  renderIntegrityNoticesHtml,
+  renderIntegrityNoticesMarkdown,
+} from "./integrity-notices.ts";
+export {
   bucketizePackBudget,
   type ComposedPack,
   type ComposedPackItem,
@@ -73,6 +80,12 @@ export {
   prepareProjection,
 } from "./prepare.ts";
 export {
+  renderProblemRosterMarkdown,
+  rosterIncrementPath,
+  rosterIncrementSummary,
+  rosterOmissionText,
+} from "./problem-roster.ts";
+export {
   publicMovesPagePath,
   renderPublicMovesHtml,
   renderPublicMovesMarkdown,
@@ -80,6 +93,14 @@ export {
   renderPublicProblemMovesMarkdown,
 } from "./public-moves.ts";
 export { MEDIA_TYPES, renderAllFaces, renderHtmlFragmentFace, renderProjection } from "./render.ts";
+export {
+  RESEARCH_LIST_NOTICE,
+  RESEARCH_LIST_OMISSIONS,
+  renderEvidenceListHtml,
+  renderEvidenceListMarkdown,
+  renderReviewListHtml,
+  renderReviewListMarkdown,
+} from "./research-lists.ts";
 export {
   renderReviewQueueHtml,
   renderReviewQueueMarkdown,

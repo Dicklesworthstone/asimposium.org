@@ -1,11 +1,28 @@
 import { afterEach, beforeEach, expect, mock, test } from "bun:test";
-import { type ClaimFaceResponse, type HypothesisEvidenceItemResponse, PRODUCTION_STOA_ORIGIN } from "@asimposium/contracts";
+import { type ClaimFaceResponse, type DeadEndsListResponse, type HypothesisEvidenceItemResponse, PRODUCTION_STOA_ORIGIN } from "@asimposium/contracts";
 import { renderToStaticMarkup } from "react-dom/server";
 import { parsePublicRecord, resolvePublicRecord } from "../../lib/public-record";
 
 mock.module("server-only", () => ({}));
-const { stoaFetchPublicRecord } = await import("../../lib/public-ledger");
+const { stoaFetchDeadEnds, stoaFetchPublicRecord } = await import("../../lib/public-ledger");
 const { default: PublicRecordPage, generateMetadata } = await import("../../app/r/[...slug]/page");
+const { default: DeadEndsPage, generateMetadata: deadEndsMetadata } = await import("../../app/p/[slug]/dead-ends/page");
+
+function deadEnd(): DeadEndsListResponse {
+  return {
+    schema: "https://a.asimposium.org/schemas/dead-ends.v1.json",
+    problem_id: "P-DEMO",
+    dead_ends: [{
+      dead_end_id: "DE-7", problem_id: "P-DEMO", seq: 12,
+      approach: "Enumerate every finite boundary case.",
+      why_it_fails: "The proposed bound omits an admissible case.",
+      retry_predicate: "Revisit after a justified bound is established.",
+      author_fellow_id: "F-AUTHOR", created_at: "2026-10-18T12:00:00.000Z",
+      superseded_by: "DE-19",
+    }],
+    omitted: ["Other dead ends are omitted from this exact-target view."],
+  };
+}
 
 function evidence(): HypothesisEvidenceItemResponse {
   return {
@@ -132,6 +149,77 @@ test("registered hypothesis aliases reuse the existing human reader and preserve
   }
   const invalid = renderToStaticMarkup(await PublicRecordPage({ ...alias, searchParams: Promise.resolve({ through: "019" }) }));
   expect(invalid).toContain("Invalid hypothesis cursor");
+  expect(request).not.toHaveBeenCalled();
+});
+
+test("the registered dead-end alias reaches its typed reader without losing the exact target", async () => {
+  const request = mock(async () => Response.json(deadEnd()));
+  globalThis.fetch = request as unknown as typeof fetch;
+  const alias = { params: Promise.resolve({ slug: ["p", "P-DEMO", "dead-ends", "DE-7"] }) };
+  for (const query of [{}, { include_superseded: "true" }]) {
+    let destination: string | undefined;
+    try {
+      await PublicRecordPage({ ...alias, searchParams: Promise.resolve(query) });
+    } catch (error) {
+      destination = (error as { digest?: string }).digest;
+    }
+    expect(destination).toContain("/p/P-DEMO/dead-ends?target=DE-7");
+  }
+  for (const query of [{ target: "DE-19" }, { through: "12" }, { include_superseded: ["true", "false"] }]) {
+    const html = renderToStaticMarkup(await PublicRecordPage({ ...alias, searchParams: Promise.resolve(query) }));
+    expect(html).toContain("Invalid dead-end view");
+  }
+  expect(request).not.toHaveBeenCalled();
+});
+
+test("an exact dead-end page requests the selected publication and preserves current supersession", async () => {
+  const calls: string[] = [];
+  globalThis.fetch = mock(async (input: string | URL | Request, options?: RequestInit) => {
+    calls.push(String(input));
+    expect(options?.credentials).toBe("omit");
+    expect((options as RequestInit & { next: { revalidate: number } }).next.revalidate).toBe(0);
+    return Response.json(deadEnd(), { headers: { "x-robots-tag": "noindex, nofollow" } });
+  }) as unknown as typeof fetch;
+  const selected = { params: Promise.resolve({ slug: "P-DEMO" }), searchParams: Promise.resolve({ target: "DE-7" }) };
+  const html = renderToStaticMarkup(await DeadEndsPage(selected));
+  expect(html).toContain("Enumerate every finite boundary case.");
+  expect(html).toContain("Superseded by");
+  expect(html).toContain("DE-19");
+  expect(html).toContain('href="/p/P-DEMO/dead-ends?target=DE-19"');
+  expect(html).toContain(`href="${PRODUCTION_STOA_ORIGIN}/p/P-DEMO/dead-ends.json?target=DE-7"`);
+  expect(html).toContain(`href="${PRODUCTION_STOA_ORIGIN}/p/P-DEMO/dead-ends.md?target=DE-7"`);
+  expect(calls).toEqual([`${PRODUCTION_STOA_ORIGIN}/p/P-DEMO/dead-ends.json?target=DE-7`]);
+  expect((await deadEndsMetadata(selected)).robots).toEqual({ index: false, follow: false });
+});
+
+test("exact dead-end reads never replace a missing or mismatched publication with the list", async () => {
+  const selected = { params: Promise.resolve({ slug: "P-DEMO" }), searchParams: Promise.resolve({ target: "DE-7" }) };
+  for (const rows of [[], [{ ...deadEnd().dead_ends[0]!, dead_end_id: "DE-8" }], [...deadEnd().dead_ends, { ...deadEnd().dead_ends[0]!, dead_end_id: "DE-8" }]]) {
+    globalThis.fetch = mock(async () => Response.json({ ...deadEnd(), dead_ends: rows })) as unknown as typeof fetch;
+    expect(await stoaFetchDeadEnds("P-DEMO", undefined, { target: "DE-7" })).toEqual({ state: "unavailable", reason: "invalid_response" });
+    const html = renderToStaticMarkup(await DeadEndsPage(selected));
+    expect(html).toContain("Public ledger data is temporarily unavailable");
+    expect(html).toContain('action="/p/P-DEMO/dead-ends"');
+    expect(html).toContain('name="target" value="DE-7"');
+  }
+  for (const code of ["DEAD_END_NOT_FOUND", "PROBLEM_NOT_FOUND"]) {
+    globalThis.fetch = mock(async () => Response.json({ status: 404, code }, { status: 404 })) as unknown as typeof fetch;
+    expect((await stoaFetchDeadEnds("P-DEMO", undefined, { target: "DE-7" })).state).toBe("not_found");
+    await expect(DeadEndsPage(selected)).rejects.toThrow("NEXT_HTTP_ERROR_FALLBACK;404");
+  }
+  globalThis.fetch = mock(async () => Response.json({ status: 404, code: "ROUTE_NOT_FOUND" }, { status: 404 })) as unknown as typeof fetch;
+  expect(await stoaFetchDeadEnds("P-DEMO", undefined, { target: "DE-7" })).toEqual({ state: "unavailable", reason: "http" });
+});
+
+test("invalid or repeated dead-end selectors never silently fall back to a different view", async () => {
+  const request = mock(async () => Response.json(deadEnd()));
+  globalThis.fetch = request as unknown as typeof fetch;
+  for (const query of [{ target: "../../private" }, { target: ["DE-7", "DE-8"] }, { through: "12" }, { unknown: "value" }]) {
+    const selected = { params: Promise.resolve({ slug: "P-DEMO" }), searchParams: Promise.resolve(query) };
+    const html = renderToStaticMarkup(await DeadEndsPage(selected));
+    expect(html).toContain("Choose a dead-end history view");
+    expect((await deadEndsMetadata(selected)).robots).toEqual({ index: false, follow: false });
+  }
   expect(request).not.toHaveBeenCalled();
 });
 

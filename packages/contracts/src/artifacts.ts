@@ -56,6 +56,7 @@ import {
   type FellowRegistrationRequest,
   type FellowToken,
   type HelloAssignment,
+  type HelloInboxSummary,
   type HelloOpenSession,
   type HelloUnreadReview,
   type MintEnrollmentRequest,
@@ -321,7 +322,8 @@ function formatJson(value: unknown): string {
 function requestAwareJsonSchema(schema: z.ZodObject) {
   const document = z.toJSONSchema(schema);
   for (const [name, contract] of Object.entries(schema.shape)) {
-    if (!name.endsWith("_request") && !name.endsWith("_query")) continue;
+    if (!name.endsWith("_request") && !name.endsWith("_query") && !name.endsWith("_submission"))
+      continue;
     const { $schema: _dialect, ...input } = z.toJSONSchema(contract, { io: "input" });
     if (document.properties === undefined) throw new Error("CONTRACT_PROPERTIES_MISSING");
     document.properties[name] = input;
@@ -411,6 +413,7 @@ function generatedEnrollmentTypes(): string {
     "FellowToken",
     "HelloAssignment",
     "HelloOpenSession",
+    "HelloInboxSummary",
     "HelloUnreadReview",
     "MintEnrollmentRequest",
     "MintEnrollmentResponse",
@@ -472,6 +475,7 @@ function generatedEnrollmentTypes(): string {
     FellowToken: FellowToken;
     HelloAssignment: HelloAssignment;
     HelloOpenSession: HelloOpenSession;
+    HelloInboxSummary: HelloInboxSummary;
     HelloUnreadReview: HelloUnreadReview;
     MintEnrollmentRequest: MintEnrollmentRequest;
     MintEnrollmentResponse: MintEnrollmentResponse;
@@ -967,7 +971,7 @@ export function generatedArtifacts(): readonly GeneratedArtifact[] {
     {
       relativePath: "generated/directives.types.ts",
       content:
-        "// Generated from src/directives.ts. Do not edit.\nexport type { SponsorDirectiveVerb, SponsorDirectiveRequest, SponsorDirectiveReceipt, SponsorDirectiveListResponse, ActiveDirectiveQuery, ActiveDirectiveResponse } from '../src/directives.ts';\n",
+        "// Generated from src/directives.ts. Do not edit.\nexport type { SponsorDirectiveVerb, SponsorDirectiveRequest, SponsorDirectiveReceipt, SponsorDirectiveListResponse, ActiveDirectiveQuery, ActiveDirectiveResponse, InitialSponsorInstruction } from '../src/directives.ts';\n",
     },
     {
       relativePath: "generated/dead-ends.schema.json",

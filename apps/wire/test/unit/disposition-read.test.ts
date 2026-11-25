@@ -51,6 +51,142 @@ describe("the claim-disposition fold (W5.4 read side)", () => {
     },
   });
 
+  test("resolved counterevidence restores only support with its own surviving challenge", () => {
+    const creation: VersionedClaimTimelineEvent = {
+      kind: "claim-created",
+      sequence: 1,
+      version: 1,
+    };
+    const support = review(2, 1, "confirm");
+    const challenge: VersionedClaimTimelineEvent = {
+      kind: "falsification-attempt",
+      sequence: 3,
+      targetVersion: 1,
+      attemptId: "E-CHECK",
+      attemptedFalsifier: "An odd doubled integer.",
+      capableOfFailure: "Odd output fails.",
+      result: "survived",
+      evidenceReferences: ["E-DATA"],
+    };
+    const counterevidence: VersionedClaimTimelineEvent = {
+      kind: "refuting-evidence",
+      sequence: 4,
+      targetVersion: 1,
+      evidenceId: "E-COUNTER",
+    };
+    const resolution: VersionedClaimTimelineEvent = {
+      ...review(5, 1, "inform"),
+      kind: "review-created",
+      targetVersion: 1,
+      sequence: 5,
+      carriesWeight: true,
+      verdict: "inform",
+      resolvedRefutationEvidenceId: "E-COUNTER",
+      review: {
+        review_id: "R-5",
+        reviewer_id: "F-5",
+        tier: "T2",
+        cross_family: true,
+        full_write_up: false,
+      },
+    };
+    const restored = computeCurrentClaimDisposition([
+      creation,
+      support,
+      challenge,
+      counterevidence,
+      resolution,
+    ]);
+    expect(restored.disposition).toBe("corroborated");
+    expect(restored.context.recorded_refutation_attempts).toBe(1);
+    expect(restored.context.verified_reviews).toHaveLength(1);
+    expect(restored.lastTransition).toEqual({
+      sequence: 5,
+      from: "open",
+      to: "corroborated",
+      cause: "review-created",
+    });
+    expect(
+      computeCurrentClaimDisposition([creation, support, counterevidence, resolution]),
+    ).toMatchObject({
+      disposition: "open",
+      context: { recorded_refutation_attempts: 0 },
+    });
+    expect(
+      computeCurrentClaimDisposition([
+        { ...creation, targetClaimId: "C-2" },
+        counterevidence,
+        resolution,
+      ]),
+    ).toMatchObject({
+      disposition: "reduced-to",
+      lastTransition: { sequence: 5, from: "open", to: "reduced-to" },
+    });
+  });
+
+  test("resolution targets are version pinned and cannot remove later or unrelated objections", () => {
+    const creation: VersionedClaimTimelineEvent = {
+      kind: "claim-created",
+      sequence: 1,
+      version: 1,
+    };
+    const evidence: VersionedClaimTimelineEvent = {
+      kind: "refuting-evidence",
+      sequence: 2,
+      targetVersion: 1,
+      evidenceId: "E-1",
+    };
+    const resolution: VersionedClaimTimelineEvent = {
+      kind: "review-created",
+      sequence: 3,
+      targetVersion: 1,
+      carriesWeight: true,
+      verdict: "inform",
+      review: {
+        review_id: "R-3",
+        reviewer_id: "F-3",
+        tier: "T2",
+        cross_family: true,
+        full_write_up: false,
+      },
+      resolvedRefutationEvidenceId: "E-1",
+    };
+    for (const changed of [
+      { ...resolution, targetVersion: 2 },
+      { ...resolution, resolvedRefutationEvidenceId: "E-2" },
+      { ...resolution, carriesWeight: false },
+      { ...resolution, review: { ...resolution.review, tier: "T0" as const } },
+    ])
+      expect(computeCurrentClaimDisposition([creation, evidence, changed]).disposition).toBe(
+        "disputed",
+      );
+    expect(
+      computeCurrentClaimDisposition([
+        creation,
+        evidence,
+        resolution,
+        { ...evidence, sequence: 4, evidenceId: "E-2" },
+      ]).disposition,
+    ).toBe("disputed");
+    expect(
+      computeCurrentClaimDisposition([
+        creation,
+        evidence,
+        { kind: "claim-reduced", sequence: 3, targetVersion: 1, targetClaimId: "C-9" },
+        { ...resolution, sequence: 4 },
+      ]).disposition,
+    ).toBe("open");
+    expect(
+      computeCurrentClaimDisposition([
+        creation,
+        evidence,
+        { kind: "claim-revised", sequence: 3, version: 2 },
+        { ...evidence, sequence: 4, targetVersion: 2, evidenceId: "E-2" },
+        { ...resolution, sequence: 5 },
+      ]).disposition,
+    ).toBe("disputed");
+  });
+
   test("the recorded cause distinguishes an author concession from an independent refutation", () => {
     const folded = computeCurrentClaimDisposition([
       { kind: "claim-created", sequence: 1, version: 1 },

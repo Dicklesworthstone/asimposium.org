@@ -6,9 +6,9 @@ import {
   type PublicHypothesis,
 } from "@asimposium/contracts/hypotheses";
 import { renderToStaticMarkup } from "react-dom/server";
-import { HypothesesView } from "../../components/hypotheses-view";
 
 mock.module("server-only", () => ({}));
+const { HypothesesView } = await import("../../components/hypotheses-view");
 const { stoaFetchHypotheses, stoaFetchHypothesis } = await import("../../lib/public-ledger");
 const { default: HypothesesPage, generateMetadata } = await import("../../app/p/[slug]/hypotheses/page");
 const { default: HypothesisPage } = await import("../../app/p/[slug]/hypotheses/[hypothesis]/page");
@@ -142,6 +142,8 @@ test("human cards retain falsifiers, refutations, both attributions and a pinned
   killed.status = "killed";
   killed.last_event = { ...killed.publication, event_id: "EV-12", seq: 12, fellow_id: "F-REFUTER" };
   killed.kill = { hypothesis_id: "H-2", killed_by_evidence_id: "E-9", reason: "The boundary case violates the proposed bound." };
+  killed.screening_notice = { category: "off-topic", action: "published-with-warning", notice: "off-scope" };
+  killed.last_event_screening_notice = { category: "dual-use-boundary", action: "published-with-warning", notice: "screening-warning" };
   const html = renderToStaticMarkup(
     <HypothesesView
       result={{ state: "ok", origin: PRODUCTION_STOA_ORIGIN, data: face({
@@ -156,6 +158,10 @@ test("human cards retain falsifiers, refutations, both attributions and a pinned
   expect(html).toContain("F-AUTHOR");
   expect(html).toContain("F-REFUTER");
   expect(html).toContain("Recorded refutation");
+  const refutation = html.slice(html.indexOf('<section aria-label="Recorded refutation of H-2"'));
+  expect(refutation).toContain('data-screening-notice="screening-warning"');
+  expect(refutation).not.toContain('data-screening-notice="off-scope"');
+  expect(refutation.indexOf('data-screening-notice="screening-warning"')).toBeLessThan(refutation.indexOf(killed.kill.reason));
   expect(html).toContain('href="/r/p/P-DEMO/evidence/E-9"');
   expect(html).toContain("with current visibility and withdrawal");
   expect(html).not.toContain("/evidence/E-9.md?through=");
@@ -177,6 +183,7 @@ test("every route lifecycle retains its distinct standing, explanation and attri
     const route = item();
     route.status = entry.status;
     route.last_event = { ...route.publication, event_id: "EV-18", seq: 18, fellow_id: "F-COORDINATOR" };
+    route.last_event_screening_notice = { category: "dual-use-boundary", action: "published-with-warning", notice: "screening-warning" };
     route.lifecycle = {
       action: entry.action,
       hypothesis_id: route.hypothesis_id,
@@ -193,6 +200,7 @@ test("every route lifecycle retains its distinct standing, explanation and attri
     expect(html).toContain(`Reason for ${entry.action} remains on the original route.`);
     expect(html).toContain("Reduce to a finite bound");
     expect(html).toContain("Route decision attribution");
+    expect(html).toContain('data-screening-notice="screening-warning"');
     expect(html).toContain("F-COORDINATOR");
     expect(html).toContain('href="/r/p/P-DEMO/events/18"');
     expect(html).toContain('href="/p/P-DEMO/events?since=1&amp;limit=50&amp;through=40"');

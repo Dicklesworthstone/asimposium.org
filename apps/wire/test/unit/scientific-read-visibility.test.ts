@@ -18,7 +18,13 @@ import {
   type ScientificRow,
 } from "../../src/ledger/scientific-disposition.ts";
 import { withdrawScientificInput } from "../../src/ledger/scientific-withdrawals.ts";
-import { iso, SESSION, sha, withdrawalFixture } from "./scientific-withdrawal-fixture.ts";
+import {
+  claimDigest,
+  iso,
+  SESSION,
+  sha,
+  withdrawalFixture,
+} from "./scientific-withdrawal-fixture.ts";
 
 type Fixture = ReturnType<typeof withdrawalFixture>;
 type Source = ReturnType<Fixture["source"]>;
@@ -57,7 +63,7 @@ function support(f: Fixture) {
   const check = f.source("evidence", "E-2", {
     computed_class: "computation",
     falsification_check: {
-      target_digest: `sha256:${sha("statement")}`,
+      target_digest: claimDigest(),
       attempted_falsifier: "Search for n=0 violating the bound.",
       capable_of_failure: "The observed output could exceed it.",
       result: "survived",
@@ -159,7 +165,7 @@ for (const kind of ["evidence", "review"] as const) {
     }));
 }
 
-for (const verdict of ["refute", "fails-to-reproduce"]) {
+for (const verdict of ["refute", "fails-to-reproduce", "cannot-verify", "confirm"]) {
   for (const visibility of ["hidden", "redacted", "withdrawn-hidden"]) {
     test(`an impression-only ${verdict} stays contested without gaining weight when ${visibility}`, () =>
       using(async (f) => {
@@ -207,7 +213,9 @@ for (const rubric of ["statement-defect", "statement-fails-review"]) {
     test(`${visibility} ${rubric} review cannot clear malformed standing without revision`, () =>
       using(async (f) => {
         const review = f.source("review", "R-defect", { rubric: [rubric] });
-        assert.equal((await fold(f)).disposition, "malformed");
+        const before = await fold(f);
+        assert.equal(before.disposition, "malformed");
+        assert.equal(reviewStateFromRecordedReviews(before.reviewFacets), "contested");
         const cut = review.event.seq;
         if (visibility === "redacted")
           f.sql
@@ -236,6 +244,7 @@ for (const rubric of ["statement-defect", "statement-fails-review"]) {
         }
         const after = await fold(f);
         assert.equal(after.disposition, "malformed");
+        assert.equal(reviewStateFromRecordedReviews(after.reviewFacets), "contested");
         assert.equal(after.stale, true);
         assert.equal((await fold(f, cut)).disposition, "malformed");
         f.append(
@@ -246,6 +255,7 @@ for (const rubric of ["statement-defect", "statement-fails-review"]) {
           {
             claim_id: "C-1",
             base_version: 1,
+            kind: "conjecture",
             statement: "A precise revised statement.",
           },
           "fellow-b",
@@ -254,7 +264,7 @@ for (const rubric of ["statement-defect", "statement-fails-review"]) {
         );
         f.sql
           .query("INSERT INTO claim_versions VALUES('P-DEMO','C-1',2,?,?,'conjecture')")
-          .run(`sha256:${sha("revision")}`, "A precise revised statement.");
+          .run(claimDigest("A precise revised statement."), "A precise revised statement.");
         const revised = await fold(f);
         assert.equal(revised.currentVersion, 2);
         assert.equal(revised.disposition, "open");
@@ -309,6 +319,7 @@ test("a hidden old version stays stale on its own read without contaminating a f
       {
         claim_id: "C-1",
         base_version: 1,
+        kind: "conjecture",
         statement: "The revised precise bound.",
       },
       "fellow-b",
@@ -317,7 +328,7 @@ test("a hidden old version stays stale on its own read without contaminating a f
     );
     f.sql
       .query("INSERT INTO claim_versions VALUES('P-DEMO','C-1',2,?,?,'conjecture')")
-      .run(`sha256:${sha("revision")}`, "The revised precise bound.");
+      .run(claimDigest("The revised precise bound."), "The revised precise bound.");
     control(f, "C-1@1");
     const current = await fold(f);
     assert.equal(current.currentVersion, 2);
@@ -364,7 +375,7 @@ function addDependencyRoot(f: Fixture) {
           version: 1,
           event_id: "E-claim",
           payload_digest: digest,
-          content_digest: `sha256:${sha("statement")}`,
+          content_digest: claimDigest(),
         },
       ],
     },
@@ -373,7 +384,10 @@ function addDependencyRoot(f: Fixture) {
   f.sql.query("INSERT INTO claims VALUES('P-DEMO','C-2',?)").run(root.seq);
   f.sql
     .query("INSERT INTO claim_versions VALUES('P-DEMO','C-2',1,?,?,'lemma')")
-    .run(`sha256:${sha("root")}`, "The conclusion depends on the original bound.");
+    .run(
+      claimDigest("The conclusion depends on the original bound.", "lemma"),
+      "The conclusion depends on the original bound.",
+    );
 }
 
 async function dependencyStanding(f: Fixture) {

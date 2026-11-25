@@ -299,7 +299,8 @@ describe("cursor-aware orientation context", () => {
       expect(statement(pack)).toMatchObject({ content_omitted: "whole-formulation-size-limit" });
       for (const field of ["statement", "scope", "out_of_scope", "success_criteria"])
         expect(statement(pack)).not.toHaveProperty(field);
-      expect(pack.actions.some((action) => action.url === "/v1/problems/P-DEMO")).toBe(true);
+      expect(statement(pack).read_url).toBe("/p/P-DEMO/statements/2.json?through=2");
+      expect(pack.actions.some((action) => action.url === statement(pack).read_url)).toBe(true);
       const detail = await publicDetail(f.db);
       expect(detail.status).toBe(200);
       expect(((await detail.json()) as { problem: unknown }).problem).toMatchObject(
@@ -573,7 +574,11 @@ describe("cursor-aware orientation context", () => {
       });
       expect(statement(pack)).not.toHaveProperty("statement");
       expect(pack.omitted.some((entry) => entry.reason === "item_too_large")).toBe(true);
-      expect(pack.actions.some((action) => action.url === "/v1/problems/P-DEMO")).toBe(true);
+      expect(pack.actions.some((action) => action.url === statement(pack).read_url)).toBe(true);
+      expect(pack.omitted).toContainEqual({
+        reason: "item_too_large",
+        detail: `problem-formulation: read ${statement(pack).read_url}`,
+      });
     } finally {
       f.sql.close();
     }

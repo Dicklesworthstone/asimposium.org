@@ -21,7 +21,7 @@ import {
 } from "@asimposium/render";
 import type { D1Database } from "@cloudflare/workers-types";
 import { eventContentHiddenSql, hiddenByContentControlSql } from "../krater/public-content";
-import { publicationScreeningNotice } from "../screening/publication-notice";
+import { publicationScreeningNotice } from "../screening/publication-notice.ts";
 import { sha256Hex } from "../split/policy";
 
 /**
@@ -118,7 +118,7 @@ interface QuestionReadRow {
   created_at: string;
   payload_json: string | null;
   payload_sha256: string;
-  screening_provenance: string | null;
+  screening_provenance_json: string | null;
   last_event_id: string;
   last_type: string;
   last_actor_fellow_id: string | null;
@@ -200,8 +200,10 @@ export async function loadProblemQuestions(
         AND length(CAST(ec.payload_json AS BLOB)) <= ${QUESTION_CONTENT_BYTES}
         THEN ec.payload_json END AS payload_json,
       e.payload_sha256,
-      CASE WHEN length(CAST(s.provenance_json AS BLOB)) > 4096 THEN ''
-        ELSE s.provenance_json END AS screening_provenance,
+      CASE WHEN screening.event_id IS NOT NULL
+        THEN CASE WHEN length(CAST(screening.provenance_json AS BLOB)) <= 4096
+          THEN screening.provenance_json ELSE '' END
+        END AS screening_provenance_json,
       h.id AS last_event_id,
       h.type AS last_type,
       h.actor_fellow_id AS last_actor_fellow_id,
@@ -225,17 +227,17 @@ export async function loadProblemQuestions(
                          AND ec.payload_sha256 = e.payload_sha256
     LEFT JOIN event_content hc ON hc.event_id = h.id
                          AND hc.payload_sha256 = h.payload_sha256
-    LEFT JOIN screening_publications s ON s.event_id = e.id
+    LEFT JOIN screening_publications screening ON screening.event_id = e.id
     ), budgeted AS (
       SELECT *, SUM(COALESCE(length(CAST(payload_json AS BLOB)), 0)
         + COALESCE(length(CAST(last_payload_json AS BLOB)), 0)
-        + COALESCE(length(CAST(screening_provenance AS BLOB)), 0))
+        + COALESCE(length(CAST(screening_provenance_json AS BLOB)), 0))
         OVER (ORDER BY seq ROWS UNBOUNDED PRECEDING) AS content_bytes
       FROM sources
     )
     SELECT question_id, problem_id, seq, creations, event_id,
       actor_fellow_id, actor_sponsor_id, actor_session_id, model_string_self_declared,
-      harness, created_at, payload_sha256, screening_provenance, last_event_id, last_type,
+      harness, created_at, payload_sha256, screening_provenance_json, last_event_id, last_type,
       last_actor_fellow_id, last_payload_sha256, withheld,
       CASE WHEN content_bytes <= ${QUESTION_READ_BYTES} THEN payload_json END AS payload_json,
       CASE WHEN content_bytes <= ${QUESTION_READ_BYTES} THEN last_payload_json END AS last_payload_json,
@@ -384,9 +386,13 @@ export async function loadProblemQuestions(
       unavailable();
       continue;
     }
-    let notice: QuestionItem["screening_notice"];
+    // The question keeps the notice of its exact original publication, even
+    // after an answer, lease or withdrawal changes its recorded status. No
+    // authored field or later lifecycle receipt can replace this authority.
+    // A malformed receipt withholds this record rather than erasing a warning.
+    let screeningNotice: QuestionItem["screening_notice"];
     try {
-      notice = publicationScreeningNotice(row.screening_provenance);
+      screeningNotice = publicationScreeningNotice(row.screening_provenance_json);
     } catch {
       unavailable();
       continue;
@@ -398,7 +404,7 @@ export async function loadProblemQuestions(
       target_refs: source.data.target_refs,
       blocking: source.data.blocking ?? null,
       body_md: source.data.body_md,
-      ...(notice === undefined ? {} : { screening_notice: notice }),
+      ...(screeningNotice === undefined ? {} : { screening_notice: screeningNotice }),
       author_fellow_id: row.actor_fellow_id,
       sponsor_id: row.actor_sponsor_id ?? undefined,
       session_id: row.actor_session_id ?? undefined,
@@ -461,6 +467,10 @@ export function renderQuestionsMarkdown(
   for (const q of questions) {
     parts.push(`## Question \`${q.question_id}\``);
     parts.push("");
+    if (q.screening_notice !== undefined) {
+      parts.push(screeningNoticeText(q.screening_notice));
+      parts.push("");
+    }
     parts.push(`- **Status**: ${q.status}`);
     parts.push(`- **Author**: ${safeInlineProse(q.author_fellow_id)}`);
     if (q.sponsor_id) {
@@ -550,6 +560,10 @@ export function renderQuestionsHtmlFragment(
   for (const q of questions) {
     parts.push('    <li class="asimp-question-entry">');
     parts.push(`      <h3>Question <code>${escapeHtml(q.question_id)}</code></h3>`);
+    if (q.screening_notice !== undefined)
+      parts.push(
+        `      <p class="asimp-screening-notice">${escapeHtml(screeningNoticeText(q.screening_notice))}</p>`,
+      );
     parts.push('      <ul class="asimp-metadata">');
     parts.push(
       `        <li><strong>Status:</strong> <span class="asimp-status asimp-status-${escapeHtml(q.status)}">${escapeHtml(q.status)}</span></li>`,

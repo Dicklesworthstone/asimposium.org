@@ -56,7 +56,10 @@ export const ProofGapRecordSchema = z
     last_event: ProofGapEventSchema,
     content: GapFileRequestSchema.nullable(),
     closed_by: z.string().max(80).nullable(),
+    /** The filing's screening context, separate from any later settlement. */
     screening_notice: ScreeningPublicationNoticeSchema.optional(),
+    /** Response-only context for the exact readable closing/withdrawal event. */
+    last_event_screening_notice: ScreeningPublicationNoticeSchema.optional(),
   })
   .strict();
 export type ProofGapRecord = z.infer<typeof ProofGapRecordSchema>;

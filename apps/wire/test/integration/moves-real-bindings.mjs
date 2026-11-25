@@ -8,6 +8,7 @@ import {
 } from "@asimposium/contracts/formalization-friction";
 import { StatementResponseSchema } from "@asimposium/contracts/statements";
 import { hasExactFirstClaimFormulation } from "../../../../e2e/gauntlet/reference-agent.mjs";
+import { checkCeremonyBreaker } from "../../src/mega-commands/materiality.ts";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 
 // W9.4 moves engine (beads asimposiumorg-z8y / asimposiumorg-codz) on real
@@ -69,6 +70,21 @@ await runLocalWorkerJourney(async (context) => {
     },
     other,
   );
+
+  // The clearing review happened during sharpening even though it activated
+  // the problem. Historical materiality must survive that status transition.
+  const activated = await env.DB.prepare("SELECT status, public_seq FROM problems WHERE id = ?")
+    .bind(problem)
+    .first();
+  assert.equal(activated.status, "active");
+  const activationWindow = await checkCeremonyBreaker(
+    env.DB,
+    problem,
+    activated.public_seq,
+    activated.status,
+  );
+  assert.equal(activationWindow.objectEventCountInWindow, 2);
+  assert.equal(activationWindow.degraded, false);
 
   // Empty frontier: the author is asked for a first claim.
   const empty = await next(author);
@@ -940,6 +956,47 @@ await runLocalWorkerJourney(async (context) => {
     !gapFocus.contract.request.path.endsWith("/review"),
     "an author is not sent to self-review",
   );
+
+  // A later review of an active statement is process work. Its unavailable
+  // source must not become affirmative evidence for a process-only history.
+  const lateReviewer = await enroll("moves-late-reviewer", "usr_moves_late_reviewer");
+  const lateReviewSession = (
+    await call("/v1/sessions", { problem_id: focusProblem, intent: "review" }, lateReviewer, 201)
+  ).session_id;
+  await call(
+    `/v1/problems/${focusProblem}/statement-review`,
+    {
+      session_id: lateReviewSession,
+      statement_version: 1,
+      verdict: "statement-clear",
+      basis: "The active formulation retains an exact finite domain and falsifier.",
+    },
+    lateReviewer,
+  );
+  await focused(other, focusReviewSession, "review", [`${current.claim_id}@2`]);
+  const lateReviewEvent = await env.DB.prepare(
+    "SELECT id FROM events WHERE problem_id = ? AND type = 'problem.statement-reviewed' ORDER BY seq DESC LIMIT 1",
+  )
+    .bind(focusProblem)
+    .first();
+  await fixtures.redactPublicContent(lateReviewEvent.id);
+  const uncertainHistory = await call(`/v1/p/${focusProblem}/next`, undefined, other);
+  assert.equal(uncertainHistory.degraded, true);
+  assert.equal(uncertainHistory.primary_move.move, "review");
+  assert.ok(!moveNames(uncertainHistory).includes("back-to-the-object"));
+  const uncertainPack = PackResponseSchema.parse(
+    await call(
+      `/v1/sessions/${focusReviewSession}/pack?profile=working&max_tokens=8000`,
+      undefined,
+      other,
+    ),
+  );
+  const uncertainMoves = JSON.parse(
+    uncertainPack.items.find((item) => item.id === "SYS-working-moves").body,
+  );
+  assert.deepEqual(uncertainMoves.primary_move, uncertainHistory.primary_move);
+  assert.equal(uncertainMoves.degraded, true);
+  assert.ok(uncertainPack.omitted.some((item) => item.reason === "moves_degraded"));
 
   // P11 forbids new exact duplicates, but revision can legitimately release
   // an old statement for another claim. Historical matching text must not

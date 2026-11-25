@@ -2,6 +2,7 @@ import {
   ProblemGovernanceEventSchema,
   ProblemStatementReviewEventSchema,
 } from "@asimposium/contracts";
+import { statementHistoryPath, statementVersionPath } from "@asimposium/contracts/statements";
 import {
   neutralizeUntrustedBody,
   type PackActionCandidate,
@@ -38,29 +39,33 @@ async function readFormulation(
   problem: string,
   cursor: number,
 ): Promise<OrientationPackSection> {
-  const source = `/v1/problems/${problem}`;
   const section: OrientationPackSection = {
     candidates: [],
     omitted: [],
-    actions: [
-      {
-        method: "GET",
-        url: source,
-        why: "Read the complete current problem formulation, including declared scope, exclusions and success criteria; recheck its version before a statement-sensitive write.",
-        public_read: true,
-      },
-    ],
+    actions: [],
   };
   try {
     const event = await readPublishedProblemFormulation(db, problem, cursor);
     if (event === undefined) throw new Error("formulation commitment unavailable");
+    // Pin to the publication itself so unrelated activity leaves the pack's
+    // standing prefix and the recovered statement unchanged.
+    const source = statementVersionPath(problem, event.problem.current_statement_version, "json", {
+      through: event.publication.seq,
+    });
+    section.actions.push({
+      method: "GET",
+      url: source,
+      why: "Read this exact published statement, falsifier and research boundaries. Use a fresh pack before writing against a later formulation.",
+      public_read: true,
+    });
     const reference = {
       problem_id: problem,
       statement_version: event.problem.current_statement_version,
       publication: event.publication,
       source_fellow_id: event.source_fellow_id,
       acting_principal: event.acting_principal,
-      current_problem_url: source,
+      current_problem_url: `/v1/problems/${problem}`,
+      read_url: source,
     };
     let body = JSON.stringify({
       ...reference,
@@ -98,6 +103,12 @@ async function readFormulation(
       why_included: "the complete committed problem formulation at this pack's cursor",
     });
   } catch {
+    section.actions.push({
+      method: "GET",
+      url: statementHistoryPath(problem, "json", { through: cursor }),
+      why: "Inspect available published formulations through this pack's cursor.",
+      public_read: true,
+    });
     section.omitted.push({
       reason: "problem_formulation_unavailable",
       detail:

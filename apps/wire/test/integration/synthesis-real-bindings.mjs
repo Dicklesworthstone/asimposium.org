@@ -604,6 +604,7 @@ await runLocalWorkerJourney(
           "code",
         ]);
         assert.match(parsedDenied.case_id ?? "", /^QC-[0-9A-HJKMNP-TV-Z]{26}$/);
+        assert.match(denied.case_id, /^QC-[0-9A-HJKMNP-TV-Z]{26}$/);
         assert.ok(!JSON.stringify(denied).includes("LOCAL_POLICY_CANARY"));
       }
     }

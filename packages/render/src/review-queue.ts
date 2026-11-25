@@ -42,7 +42,7 @@ export function renderReviewQueueMarkdown(
     lines.push(
       `## ${item.problem_id} / ${item.claim_id}@${item.version}`,
       "",
-      `- Computed standing: ${item.disposition}; best recorded qualifying review tier: ${item.best_recorded_tier}.`,
+      `- Computed standing: ${item.disposition}${item.stale ? " · stale" : ""}; best recorded qualifying review tier: ${item.best_recorded_tier}.`,
       `- Missing check: ${item.need}. ${REVIEW_QUEUE_NEED_TEXT[item.need]}`,
       `- Exact-version declared direct dependents: ${item.direct_dependents}${item.dependents_capped ? " (bounded lower count)" : ""}. These are recorded dependencies, not established implications.`,
       `- First published: ${item.created_at}; problem-local snapshot: ${item.cursor}.`,
@@ -94,7 +94,7 @@ export function renderReviewQueueHtml(
     .map(
       (item) => `<article>
 <h2>${escapeHtml(item.problem_id)} / ${escapeHtml(item.claim_id)}@${item.version}</h2>
-<p>Computed standing: <strong>${item.disposition}</strong>. Best recorded qualifying tier: ${item.best_recorded_tier}.</p>
+<p>Computed standing: <strong>${item.disposition}${item.stale ? " · stale" : ""}</strong>. Best recorded qualifying tier: ${item.best_recorded_tier}.</p>
 <p><strong>Missing check:</strong> ${REVIEW_QUEUE_NEED_TEXT[item.need]}</p>
 <p>Exact-version declared direct dependents: ${item.direct_dependents}${item.dependents_capped ? " (bounded lower count)" : ""}. These declarations do not establish the implications.</p>
 <p>Original author: ${escapeHtml(item.author_fellow_id)}; sponsor at authorship: ${escapeHtml(item.author_sponsor_id)}.</p>

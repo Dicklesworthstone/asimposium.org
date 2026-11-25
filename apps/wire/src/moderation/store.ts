@@ -172,6 +172,9 @@ export interface ScreeningCaseInput {
     readonly context: ScreeningPublicationContextInput;
   };
   readonly coarseCategory: string;
+  /** The reason for private custody pending human review. A machine-rejected
+   * submission uses quarantine without claiming a human rejection; its
+   * classifier path and model/policy provenance remain recorded separately. */
   readonly outcome: "quarantine" | "allow-with-warning" | "provider-unavailable";
   readonly decisionPath: string;
   readonly providerStatus: string;
@@ -1045,6 +1048,7 @@ export interface ReportInput {
 
 export interface FiledReport {
   readonly reportId: string;
+  readonly reportedTarget: string;
   readonly deduplicated: boolean;
   readonly status: "pending" | "dismissed" | "upheld";
   readonly targetHidden: boolean;
@@ -1077,9 +1081,10 @@ export async function fileReport(db: D1Database, input: ReportInput): Promise<Fi
   // while the target is not already hidden, and never over an operator's
   // explicit restore (an operator decision outranks report volume).
   const crossesThreshold = `
-    ${HIDEABLE_TARGET_KINDS.has(input.targetKind) ? "1" : "0"} = 1 AND
+    ${HIDEABLE_TARGET_KINDS.has(input.targetKind) && input.reason !== "integrity" ? "1" : "0"} = 1 AND
     (SELECT COUNT(DISTINCT r.reporter_sponsor_id) FROM reports r
-      WHERE r.problem_id = ? AND r.target_ref = ? AND r.status = 'pending') >= ${COMMUNITY_HIDE_THRESHOLD}
+      WHERE r.problem_id = ? AND r.target_ref = ? AND r.status = 'pending'
+        AND r.reason <> 'integrity') >= ${COMMUNITY_HIDE_THRESHOLD}
     AND EXISTS (SELECT 1 FROM reports WHERE report_id = ?)
     AND COALESCE((SELECT c.visibility FROM content_controls c
                    WHERE c.problem_id = ? AND c.target_ref = ? ORDER BY c.version DESC LIMIT 1), 'visible') = 'visible'
@@ -1163,6 +1168,7 @@ export async function fileReport(db: D1Database, input: ReportInput): Promise<Fi
   if ((inserted?.results.length ?? 0) > 0) {
     return {
       reportId,
+      reportedTarget: input.source?.requestedRef ?? input.targetRef,
       deduplicated: false,
       status: "pending",
       targetHidden: hidden === "hidden",
@@ -1170,10 +1176,10 @@ export async function fileReport(db: D1Database, input: ReportInput): Promise<Fi
   }
   const existing = await db
     .prepare(
-      "SELECT report_id, status FROM reports WHERE problem_id = ? AND target_ref = ? AND reporter_sponsor_id = ?",
+      "SELECT report_id, status, COALESCE(source_ref, target_ref) AS reported_target FROM reports WHERE problem_id = ? AND target_ref = ? AND reporter_sponsor_id = ?",
     )
     .bind(input.problemId, input.targetRef, input.reporterSponsorId)
-    .first<{ report_id: string; status: FiledReport["status"] }>();
+    .first<{ report_id: string; status: FiledReport["status"]; reported_target: string }>();
   // The budget check lives in the inserting statement, so concurrent Fellow
   // and sponsor requests cannot each spend the same remaining slot. A lost
   // insert is either a previously accepted sponsor/target (which must still
@@ -1191,6 +1197,7 @@ export async function fileReport(db: D1Database, input: ReportInput): Promise<Fi
   }
   return {
     reportId: existing.report_id,
+    reportedTarget: existing.reported_target,
     deduplicated: true,
     status: existing.status,
     targetHidden: hidden === "hidden",
@@ -1216,10 +1223,13 @@ export async function listPendingReports(
     db
       .prepare(
         `SELECT report_id, problem_id, target_kind, target_ref, reason, reporter_class, status, created_at
-           FROM reports WHERE status = 'pending' ORDER BY created_at ASC, report_id ASC LIMIT ?`,
+           FROM reports WHERE status = 'pending'
+             AND NOT EXISTS (SELECT 1 FROM integrity_cases i WHERE i.report_id = reports.report_id)
+           ORDER BY created_at ASC, report_id ASC LIMIT ?`,
       )
       .bind(Math.max(1, Math.min(limit, 100))),
-    db.prepare("SELECT COUNT(*) AS n FROM reports WHERE status = 'pending'"),
+    db.prepare(`SELECT COUNT(*) AS n FROM reports WHERE status = 'pending'
+      AND NOT EXISTS (SELECT 1 FROM integrity_cases i WHERE i.report_id = reports.report_id)`),
   ]);
   return {
     rows: (rows?.results ?? []) as ReportRow[],
@@ -1228,9 +1238,10 @@ export async function listPendingReports(
 }
 
 /**
- * Resolve the selected report and the same-category pending reports observed
- * with it. Different reasons, including safety versus scientific integrity,
- * are separate decisions. Reports arriving after that read remain pending.
+ * Resolve the selected report and same-category reports observed against
+ * that exact publication. The community tally spans the object's history,
+ * but reviewing an earlier revision cannot settle a later allegation.
+ * Legacy unpinned reports retain their separate, unpinned cohort.
  * A dismissal restores community-hidden content only after every report is
  * dismissed; an upheld report establishes an operator hold.
  */
@@ -1245,14 +1256,25 @@ export async function resolveReport(
   command?: OperatorCommand,
 ): Promise<
   | { readonly ok: true; readonly auditEventId: string; readonly resolvedAt: string }
-  | { readonly ok: false; readonly reason: "not-found" | "not-pending" }
+  | {
+      readonly ok: false;
+      readonly reason:
+        | "not-found"
+        | "not-pending"
+        | "integrity-case-required"
+        | "integrity-case-owned";
+    }
 > {
   const report = await db
     .prepare(
       `SELECT r.report_id, r.problem_id, r.target_kind, r.target_ref, r.reason, r.status,
+        EXISTS (SELECT 1 FROM integrity_cases i WHERE i.report_id = r.report_id) AS integrity_case_linked,
         (SELECT json_group_array(peer.report_id) FROM reports peer
           WHERE peer.problem_id = r.problem_id AND peer.target_ref = r.target_ref
-            AND peer.reason = r.reason AND peer.status = 'pending') AS cohort_json
+            AND peer.target_kind = r.target_kind AND peer.reason = r.reason
+            AND peer.source_event_id IS r.source_event_id AND peer.source_digest IS r.source_digest
+            AND peer.status = 'pending'
+            AND NOT EXISTS (SELECT 1 FROM integrity_cases i WHERE i.report_id = peer.report_id)) AS cohort_json
        FROM reports r WHERE r.report_id = ?`,
     )
     .bind(input.reportId)
@@ -1264,8 +1286,12 @@ export async function resolveReport(
       reason: string;
       status: string;
       cohort_json: string;
+      integrity_case_linked: number;
     }>();
   if (report === null) return { ok: false, reason: "not-found" };
+  if (report.integrity_case_linked === 1) return { ok: false, reason: "integrity-case-owned" };
+  if (report.reason === "integrity" && input.resolution === "uphold")
+    return { ok: false, reason: "integrity-case-required" };
   if (report.status !== "pending") return { ok: false, reason: "not-pending" };
   const status = input.resolution === "uphold" ? "upheld" : "dismissed";
   const resolvedAt = new Date().toISOString();
@@ -1285,7 +1311,9 @@ export async function resolveReport(
       .prepare(
         `UPDATE reports SET status = ?, resolved_at = ?, resolved_by = ?, resolution_reason = ?
           WHERE report_id = ? AND problem_id = ? AND target_ref = ? AND target_kind = ?
-            AND reason = ? AND status = 'pending'`,
+            AND reason = ? AND status = 'pending'
+            AND NOT EXISTS (SELECT 1 FROM integrity_cases i WHERE i.report_id = reports.report_id)
+            AND (reason <> 'integrity' OR ? = 'dismiss')`,
       )
       .bind(
         status,
@@ -1297,6 +1325,7 @@ export async function resolveReport(
         report.target_ref,
         report.target_kind,
         report.reason,
+        input.resolution,
       ),
     operatorAuditStatement(
       db,
@@ -1320,7 +1349,9 @@ export async function resolveReport(
       .prepare(
         `UPDATE reports SET status = ?, resolved_at = ?, resolved_by = ?, resolution_reason = ?
           WHERE problem_id = ? AND target_ref = ? AND reason = ? AND status = 'pending'
-            AND report_id IN (SELECT value FROM json_each(?)) AND ${audited.sql}`,
+            AND report_id IN (SELECT value FROM json_each(?))
+            AND NOT EXISTS (SELECT 1 FROM integrity_cases i WHERE i.report_id = reports.report_id)
+            AND ${audited.sql}`,
       )
       .bind(
         status,

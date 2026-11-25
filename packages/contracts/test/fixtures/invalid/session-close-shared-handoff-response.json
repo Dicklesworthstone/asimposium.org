@@ -1,0 +1,11 @@
+{
+  "session_id": "S-01HZX3E2P5Y6Q7R8S9T0V1W2X3",
+  "closed_at": "2026-11-23T12:00:00.000Z",
+  "promoted": [],
+  "shared_handoff": {
+    "synthesis_id": "SYNTH-HANDOFF1",
+    "event_id": "E-HANDOFF1",
+    "seq": 12,
+    "read_url": "/p/P-DEMO/syntheses/SYNTH-HANDOFF1.json"
+  }
+}

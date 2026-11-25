@@ -14,6 +14,7 @@ test("public cursor and face validators are visible cross-origin without credent
     "/p/P-DEMO.json",
     "/p/P-DEMO/claims/C-1%402.json?through=3",
     "/reviews.json",
+    "/p/P-DEMO/events.json?since=0&limit=200&through=42",
   ]) {
     const response = await publicWatchFetch(
       request(path),
@@ -136,4 +137,17 @@ test("the wrapper does not buffer the next handler's streamed public response", 
   assert.equal(response.body, body);
   await response.body?.cancel();
   assert.equal(cancelled, 1);
+});
+
+test("event history CORS does not authorize long polling or unbounded windows", async () => {
+  for (const path of [
+    "/p/P-DEMO/events.json",
+    "/p/P-DEMO/events.json?since=0&limit=200&through=42&wait=25",
+    "/p/P-DEMO/events.json?since=0&limit=200&through=201",
+  ]) {
+    const original = new Response("public", { headers: { etag: '"events"' } });
+    const response = await publicWatchFetch(request(path), () => original);
+    assert.equal(response, original);
+    assert.equal(response.headers.get("access-control-allow-origin"), null);
+  }
 });

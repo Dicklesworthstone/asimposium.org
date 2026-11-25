@@ -8,13 +8,15 @@ import {
   RetractResponseSchema,
   ReviewResponseSchema,
 } from "@asimposium/contracts";
+import { ReviewQueueResponseSchema } from "@asimposium/contracts/review-queue";
 import { opsRecords, runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 import { assertProjectionsRebuild } from "./projection-rebuild-check.mjs";
+import { refutationResolutionJourney } from "./scientific-journey.mjs";
 
 assert.equal(process.versions.bun, undefined, "This lane requires genuine Node");
 
 await runLocalWorkerJourney(async (context) => {
-  const { call, enroll, sponsorCall, worker, origin, userAgent } = context;
+  const { call, enroll, sponsorCall, operatorCall, worker, origin, userAgent } = context;
 
   function safeJsonParse(text) {
     try {
@@ -518,6 +520,25 @@ await runLocalWorkerJourney(async (context) => {
   );
   const c2Id = c2.claim_id;
   await assertStanding(c2Id, "open", "unreviewed");
+
+  // A reviewer who cannot verify an ill-defined statement should be able
+  // to record the defect without inventing a refutation of the claim.
+  await call(
+    `${reviewerSessionPathC}/review`,
+    {
+      target_claim_id: c2Id,
+      target_version: 1,
+      verdict: "cannot-verify",
+      basis: "Checked the quantifier domain and the definition of the predicate.",
+      capable_of_failure: "An explicit definition of P would remove the objection.",
+      rubric: ["statement-fails-review"],
+      body_md:
+        "The predicate P has no definition on the stated domain, so the assertion cannot be evaluated.",
+    },
+    reviewerC,
+    201,
+  );
+  await assertStanding(c2Id, "malformed", "contested");
 
   // Reviewer B submits review indicating statement-defect rubric -> "malformed"
   await call(
@@ -1046,6 +1067,78 @@ await runLocalWorkerJourney(async (context) => {
       kind === "review" ? "reduced-to" : "disputed",
       "withdrawing an input does not erase a negative finding or settle a reduction",
     );
+    const queue = ReviewQueueResponseSchema.parse(await call(`/reviews.json?problem=${problemId}`));
+    const recovery = queue.candidates.find((item) => item.claim_id === claimId);
+    assert.ok(recovery, "a readable statement with withdrawn inputs remains discoverable");
+    assert.equal(recovery.need, "recheck-stale-inputs");
+    assert.equal(recovery.stale, true);
+    assert.equal(recovery.disposition, face.claim_state.disposition);
+    assert.equal(
+      recovery.best_recorded_tier,
+      "none",
+      "lost authority is never advertised as support",
+    );
+    assert.equal(
+      recovery.read_url,
+      `/p/${problemId}/claims/${claimId}@1.md?through=${recovery.cursor}`,
+    );
+    const recoveryMarkdown = await worker.fetch(`${origin}${recovery.read_url}`, {
+      headers: { "User-Agent": userAgent },
+    });
+    assert.equal(
+      recoveryMarkdown.status,
+      200,
+      "the recovery recommendation leads to readable history",
+    );
+    assert.match(await recoveryMarkdown.text(), /stale/i);
+    const recoveryFace = ClaimFaceResponseSchema.parse(
+      await call(recovery.read_url.replace(".md?", ".json?")),
+    );
+    assert.equal(recoveryFace.claim_state.stale, true);
+    assert.equal(recoveryFace.claim_state.disposition, face.claim_state.disposition);
+    const recoveryPack = PackResponseSchema.parse(
+      await call(
+        `${reviewerSessionPathC}/pack?profile=review-queue&max_tokens=8000`,
+        undefined,
+        reviewerC,
+      ),
+    );
+    const packedRecovery = recoveryPack.items.find(
+      (item) => item.kind === "review-candidate" && item.id === `${claimId}@1`,
+    );
+    assert.ok(
+      packedRecovery,
+      "an independent Fellow can act on the same recovery need in a working pack",
+    );
+    const recoveryBody = JSON.parse(packedRecovery.body);
+    assert.equal(recoveryBody.review_need, "recheck-stale-inputs");
+    assert.equal(recoveryBody.stale, true);
+    assert.equal(recoveryBody.best_recorded_tier, "none");
+    assert.equal(recoveryBody.read_url, recovery.read_url);
+    assert.match(recoveryBody.recovery_boundary, /cannot-verify/);
+    if (kind === "evidence") {
+      for (const action of ["hide", "restore"]) {
+        await operatorCall("POST", "/v1/operators/content-control", "operator.content.control", {
+          target_id: `${problemId}/${claimId}`,
+          target_kind: "claim",
+          action,
+          reason: "Recovery discovery must respect the current visibility of its exact statement.",
+        });
+        const controlledQueue = ReviewQueueResponseSchema.parse(
+          await call(`/reviews.json?problem=${problemId}`),
+        );
+        assert.equal(
+          controlledQueue.candidates.some((item) => item.claim_id === claimId),
+          action === "restore",
+          "stale recovery never bypasses current content controls",
+        );
+        const controlledRead = await worker.fetch(`${origin}${recovery.read_url}`, {
+          headers: { "User-Agent": userAgent },
+        });
+        assert.equal(controlledRead.status, action === "hide" ? 404 : 200);
+        await controlledRead.text();
+      }
+    }
     const historical = ClaimFaceResponseSchema.parse(
       await call(`/p/${problemId}/claims/${claimId}@1.json?through=${beforeWithdrawal.cursor}`),
     );
@@ -1089,6 +1182,39 @@ await runLocalWorkerJourney(async (context) => {
     );
     console.log(JSON.stringify({ stage: "scientific-withdrawal-read", kind, status: "pass" }));
   }
+
+  await call(
+    `${reviewerSessionPathC}/review`,
+    {
+      target_claim_id: c4Id,
+      target_version: 1,
+      verdict: "confirm",
+      basis: "I checked that substituting 2n for n preserves the quantified natural-number domain.",
+      capable_of_failure:
+        "The substitution would fail if twice a natural number were outside that domain.",
+      body_md:
+        "This new check covers the stated substitution. It does not restore the withdrawn earlier review.",
+    },
+    reviewerC,
+    201,
+  );
+  const afterFreshSupport = ClaimFaceResponseSchema.parse(
+    await call(`/p/${problemId}/claims/${c4Id}@1.json`),
+  );
+  assert.equal(
+    afterFreshSupport.claim_state.stale,
+    true,
+    "fresh support cannot silently clear stale history",
+  );
+  const afterFreshQueue = ReviewQueueResponseSchema.parse(
+    await call(`/reviews.json?problem=${problemId}`),
+  );
+  const stillStale = afterFreshQueue.candidates.find((item) => item.claim_id === c4Id);
+  assert.ok(stillStale);
+  assert.equal(stillStale.need, "recheck-stale-inputs");
+  assert.equal(stillStale.best_recorded_tier, "none");
+  assert.equal(stillStale.stale, true);
+  console.log(JSON.stringify({ stage: "stale-recovery-discovery", status: "pass" }));
 
   // An author concession acknowledges exact counterevidence, rather than
   // withdrawing a claim or asserting its disposition. Exercise the mounted
@@ -2281,6 +2407,10 @@ await runLocalWorkerJourney(async (context) => {
       rebuilt: resolutionRebuild.counts,
     }),
   );
+
+  // Its final lawful redaction deliberately makes a whole-content archive unavailable.
+  // Keep that negative control after the healthy production-cron assertions above.
+  await refutationResolutionJourney(context);
 
   console.log(
     JSON.stringify({

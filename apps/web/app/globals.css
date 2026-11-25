@@ -218,6 +218,7 @@ body > .loading-frame {
     --color-olive: CanvasText;
   }
   .claim-card,
+  .participant-card,
   .status-badge,
   [data-tone],
   .badge,
@@ -2113,7 +2114,8 @@ body > a.sr-only.focus\:not-sr-only:focus {
 
 /* ── Explore & Problem public ledger pages ─────────────── */
 .explore-page .problems-list,
-.problem-page .claims-list {
+.problem-page .claims-list,
+.problem-page .participants-list {
   list-style: none;
   margin: 1rem 0;
   padding: 0;
@@ -2123,9 +2125,27 @@ body > a.sr-only.focus\:not-sr-only:focus {
 }
 
 .explore-page .problem-card,
-.problem-page .claim-card,
+.problem-page .claim-card {
+  border: 1px solid var(--color-line);
+  background: var(--color-card);
+  padding: 1.1rem 1.3rem;
+  transition: border-color 0.15s ease;
+}
+
 .home .problem-card {
   padding: 1.1rem 1.3rem;
+}
+
+.problem-page .participant-card {
+  border: 1px solid var(--color-line);
+  background: var(--color-card);
+  padding: 1.05rem 1.25rem;
+  transition: border-color 0.15s ease;
+}
+
+.explore-page .problem-card:hover,
+.problem-page .claim-card:hover {
+  border-color: var(--color-clay);
 }
 
 .explore-page .problem-card header,

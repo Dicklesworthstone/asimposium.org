@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { ProblemSlowModeBudgetSchema } from "./enrollment.ts";
+import { ProblemSlowModeBudgetSchema, SponsorIdSchema } from "./enrollment.ts";
 import { ProblemIdSchema } from "./sessions.ts";
 
 /**
@@ -61,6 +61,90 @@ export const ReportResponseSchema = z
   })
   .strict();
 export type ReportResponse = z.infer<typeof ReportResponseSchema>;
+
+/** Private, bounded history for the sponsor accountable when a report was filed. */
+export const SPONSOR_REPORTS_PAGE_LIMIT = 20;
+export const SPONSOR_REPORTS_MAX_LIMIT = 50;
+export const SPONSOR_REPORTS_MAX_RESPONSE_BYTES = 32 * 1024;
+const ReportTimestampSchema = z.string().datetime({ precision: 3 });
+export const SponsorReportsCursorSchema = z
+  .object({
+    created_at: ReportTimestampSchema,
+    report_id: ReportResponseSchema.shape.report_id,
+  })
+  .strict();
+export type SponsorReportsCursor = z.infer<typeof SponsorReportsCursorSchema>;
+export const SponsorReportsRequestSchema = z
+  .object({
+    before: SponsorReportsCursorSchema.optional(),
+    limit: z
+      .number()
+      .int()
+      .min(1)
+      .max(SPONSOR_REPORTS_MAX_LIMIT)
+      .default(SPONSOR_REPORTS_PAGE_LIMIT),
+  })
+  .strict();
+export type SponsorReportsRequest = z.infer<typeof SponsorReportsRequestSchema>;
+export const SponsorReportSummarySchema = z
+  .object({
+    report_id: ReportResponseSchema.shape.report_id,
+    problem_id: ProblemIdSchema,
+    target: ReportRequestSchema.shape.target,
+    reason: ReportReasonSchema,
+    reporter_class: z.enum(["sponsor", "fellow"]),
+    status: ReportResponseSchema.shape.status,
+    created_at: ReportTimestampSchema,
+    resolved_at: ReportTimestampSchema.nullable(),
+  })
+  .strict();
+export type SponsorReportSummary = z.infer<typeof SponsorReportSummarySchema>;
+export const SponsorReportsResponseSchema = z
+  .object({
+    schema: z.literal(REPORTS_SCHEMA_ID),
+    sponsor_id: SponsorIdSchema,
+    reports: z.array(SponsorReportSummarySchema).max(SPONSOR_REPORTS_MAX_LIMIT),
+    has_more: z.boolean(),
+    next_cursor: SponsorReportsCursorSchema.nullable(),
+  })
+  .strict();
+export type SponsorReportsResponse = z.infer<typeof SponsorReportsResponseSchema>;
+
+/** Bind an authenticated page to its request; reject incomplete or reordered readback. */
+export function sponsorReportsMatchRequest(
+  sponsorId: string,
+  request: SponsorReportsRequest,
+  page: SponsorReportsResponse,
+): boolean {
+  if (
+    page.sponsor_id !== sponsorId ||
+    page.reports.length > request.limit ||
+    page.has_more !== (page.next_cursor !== null) ||
+    (page.has_more && page.reports.length !== request.limit)
+  )
+    return false;
+  let previous = request.before;
+  const ids = new Set<string>();
+  for (const report of page.reports) {
+    if (
+      ids.has(report.report_id) ||
+      (report.status === "pending") !== (report.resolved_at === null) ||
+      (previous !== undefined &&
+        (report.created_at > previous.created_at ||
+          (report.created_at === previous.created_at && report.report_id >= previous.report_id)))
+    )
+      return false;
+    ids.add(report.report_id);
+    previous = report;
+  }
+  const last = page.reports.at(-1);
+  return (
+    page.next_cursor === null ||
+    (last !== undefined &&
+      page.next_cursor.created_at === last.created_at &&
+      page.next_cursor.report_id === last.report_id)
+  );
+}
 
 /** Public moderation log actions, in quarantine notation. */
 export const MODERATION_LOG_ACTIONS = [
@@ -239,6 +323,8 @@ export const ModerationContractsSchema = z
   .object({
     report_request: ReportRequestSchema,
     report_response: ReportResponseSchema,
+    sponsor_reports_request: SponsorReportsRequestSchema,
+    sponsor_reports_response: SponsorReportsResponseSchema,
     moderation_log_response: ModerationLogResponseSchema,
     problem_slow_mode_request: ProblemSlowModeRequestSchema,
     problem_slow_mode_state: ProblemSlowModeStateSchema,
@@ -257,6 +343,8 @@ export function generateReportsSchema(): string {
       properties: {
         report_request: z.toJSONSchema(ReportRequestSchema),
         report_response: z.toJSONSchema(ReportResponseSchema),
+        sponsor_reports_request: z.toJSONSchema(SponsorReportsRequestSchema),
+        sponsor_reports_response: z.toJSONSchema(SponsorReportsResponseSchema),
         moderation_log_response: z.toJSONSchema(ModerationLogResponseSchema),
         problem_slow_mode_request: z.toJSONSchema(ProblemSlowModeRequestSchema),
         problem_slow_mode_state: z.toJSONSchema(ProblemSlowModeStateSchema),

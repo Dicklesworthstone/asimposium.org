@@ -707,6 +707,11 @@ await runLocalWorkerJourney(
       note: SOURCE_NOTE,
     });
     await reviseSource(3);
+    const newerReport = await report(reporterD, 201, {
+      target: `${sourceClaim.claim_id}@3`,
+      reason: "integrity",
+      note: "Inspect the revised publication independently.",
+    });
     const controlPublished = (targetRef, kind, action) =>
       operatorCall("POST", "/v1/operators/content-control", "operator.content.control", {
         target_id: `${problem}/${targetRef}`,
@@ -751,6 +756,18 @@ await runLocalWorkerJourney(
       note: "A retry cannot replace the source.",
     });
     assert.equal(sameReport.report_id, sourceReport.report_id);
+    assert.equal(sameReport.target, `${sourceClaim.claim_id}@1`);
+    const familyHistory = await sponsorCall(
+      "usr_mod_c",
+      "POST",
+      "/v1/sponsors/reports/list",
+      "sponsor.reports.list",
+      {},
+    );
+    assert.equal(
+      familyHistory.reports.find((entry) => entry.report_id === sourceReport.report_id)?.target,
+      sameReport.target,
+    );
     assert.deepEqual(await reportDetail(sourceReport.report_id), retained);
     for (const token of [undefined, reporterC]) {
       const refused = await call(
@@ -771,6 +788,10 @@ await runLocalWorkerJourney(
     assert.ok(!JSON.stringify(privateQueue).includes(SOURCE_ORIGINAL));
     await resolve(sourceReport.report_id, "dismiss", "Reviewed the exact original publication.");
     assert.equal((await reportDetail(sourceReport.report_id)).report.status, "dismissed");
+    const pendingRevision = await reportDetail(newerReport.report_id);
+    assert.equal(pendingRevision.report.status, "pending");
+    assert.equal(pendingRevision.source.object_version, 3);
+    await resolve(newerReport.report_id, "dismiss", "Separately reviewed the revised publication.");
     await controlPublished(sourceClaim.claim_id, "claim", "restore");
 
     // 7e. The same moderation workflow protects a published hypothesis.
@@ -1298,6 +1319,81 @@ await runLocalWorkerJourney(
     assert.deepEqual(await postureOf(POSTURE_OWNER), [], "a clearance resets the count");
     const cleared = await flaggedPromote(BENIGN, 201);
     assert.match(cleared.claim_id, /^C-/);
+
+    // Historical refusals are immutable fixtures; the reads and publication
+    // path below run through real Worker HTTP/D1 with the normal clock.
+    // Sparse old refusals do not engage the posture, but a seven-day cluster
+    // stays engaged until an explicit clearance even after every row ages out.
+    const agedFellow = (await call("/v1/hello", undefined, reviewer)).fellow.fellow_id;
+    const agedOwner = "usr_mod_reviewer";
+    const dayMs = 24 * 60 * 60 * 1000;
+    const historicalAt = (daysAgo) => new Date(Date.now() - daysAgo * dayMs).toISOString();
+    const oldRefusal = (index, createdAt) =>
+      env.DB.prepare(
+        `INSERT INTO screening_refusals
+          (refusal_id, fellow_id, sponsor_id, problem_id, outcome, coarse_category,
+           input_digest, created_at) VALUES (?, ?, ?, ?, 'reject', 'injection', ?, ?)`,
+      )
+        .bind(
+          `SR-aged-posture-${index}`,
+          agedFellow,
+          agedOwner,
+          problem,
+          createHash("sha256").update(`historical-refusal-${index}`).digest("hex"),
+          createdAt,
+        )
+        .run();
+    for (const [index, daysAgo] of [90, 80, 70].entries()) {
+      await oldRefusal(index, historicalAt(daysAgo));
+    }
+    assert.deepEqual(await postureOf(agedOwner), [], "sparse historical refusals never latch");
+    const clusterStart = historicalAt(30);
+    await oldRefusal(3, clusterStart);
+    await oldRefusal(4, historicalAt(29));
+    await oldRefusal(5, historicalAt(28));
+    const agedPostures = await postureOf(agedOwner);
+    assert.equal(agedPostures.length, 1, "an aged active posture remains in the sponsor console");
+    assert.equal(agedPostures[0].fellow_id, agedFellow);
+    assert.equal(agedPostures[0].quarantine_first, true);
+    assert.equal(agedPostures[0].since, clusterStart);
+    const agedDraft = await call(
+      `/v1/sessions/${reviewSession}/workshop`,
+      { type: "claim-draft", title: "Aged posture", body_md: "Private deliberate work." },
+      reviewer,
+      201,
+    );
+    const agedCandidate = {
+      workshop_id: agedDraft.workshop_id,
+      kind: "conjecture",
+      statement: "For every nonnegative integer n, (n + 1)^2 = n^2 + 2*n + 1.",
+      falsifier: "A nonnegative integer for which expanding the square changes the value.",
+    };
+    const beforeAgedHold = await events();
+    const agedHold = await call(
+      `/v1/sessions/${reviewSession}/promote`,
+      agedCandidate,
+      reviewer,
+      202,
+    );
+    assert.equal(agedHold.posture, "quarantine-first", "time alone cannot authorize publication");
+    assert.equal(await events(), beforeAgedHold, "an aged posture hold appends no public event");
+    assert.equal(await refusalCount(agedFellow), 6, "held writes reveal no further verdicts");
+    await sponsorCall(
+      agedOwner,
+      "POST",
+      "/v1/sponsors/screening-posture/clear",
+      "sponsor.posture.clear",
+      { fellow_id: agedFellow, reason: "Reviewed the original cluster and corrected the task." },
+    );
+    assert.deepEqual(await postureOf(agedOwner), [], "an explicit clearance retires old clusters");
+    const agedReleased = await call(
+      `/v1/sessions/${reviewSession}/promote`,
+      agedCandidate,
+      reviewer,
+      201,
+    );
+    assert.match(agedReleased.claim_id, /^C-/);
+    assert.equal(await events(), beforeAgedHold + 1);
 
     // 9. The public log: quarantine notation only.
     const log = await call("/moderation/log.json", undefined, undefined, 200);

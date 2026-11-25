@@ -3,6 +3,7 @@ import {
   ProtocolConflictReceiptSchema,
   ProtocolConflictRecordSchema,
 } from "@asimposium/contracts/directives";
+import { enrollmentProtocolConflictsJourney } from "./enrollment-protocol-conflicts-journey.mjs";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 
 // Fable §8.2: an actual signed sponsor instruction, received by an enrolled
@@ -241,6 +242,22 @@ await runLocalWorkerJourney(
     assert.deepEqual(await call(path, body, author, 200, key), receipt);
     assert.deepEqual(await state(), closed);
 
+    await enrollmentProtocolConflictsJourney({
+      call,
+      enroll,
+      sponsorCall,
+      env,
+      fixtures,
+      worker,
+      origin,
+      userAgent,
+      problem,
+      sponsor,
+      author,
+      foreign,
+      foreignSession,
+    });
+
     // A cached public record must recheck visibility before replying 304.
     await sponsorCall(sponsor, "POST", `/v1/sponsors/problems/${problem}/hide`, "problem.hide", {
       problem_id: problem,
@@ -264,6 +281,6 @@ console.log(
     kind: "protocol-conflicts-real-bindings",
     status: "pass",
     coverage:
-      "received signed directive; current Fellow/session authority; secret/policy screening; atomic ledger/source/notice/quota; private-source exclusion; public JSON/Markdown/history; durable free replay; hide-aware ETag revalidation",
+      "received signed directive and approved enrollment instruction; reduced/scoped/foreign sources; pending and accepted transfer/rebind; current Fellow/session authority; secret/policy screening and post-screen revocation rollback; atomic ledger/source/notice/quota; private-source exclusion; public JSON/Markdown/history; durable free replay; global source per-problem uniqueness; hide-aware ETag revalidation",
   }),
 );

@@ -37,7 +37,9 @@ const TOKEN = "test-fixture-token-not-a-real-credential";
 function fixture(timeout = 4000) {
   const sql = new Database(":memory:");
   sql.exec(
-    "CREATE TABLE problems(id TEXT PRIMARY KEY, public_seq INTEGER, status TEXT); INSERT INTO problems VALUES ('P-DEMO',1,'active'),('P-PRIVATE',0,'private-draft')",
+    `CREATE TABLE problems(id TEXT PRIMARY KEY, public_seq INTEGER, status TEXT);
+    CREATE TABLE content_controls(problem_id TEXT, target_ref TEXT, visibility TEXT, version INTEGER);
+    INSERT INTO problems VALUES ('P-DEMO',1,'active'),('P-PRIVATE',0,'private-draft')`,
   );
   const queries: string[] = [];
   const db: HeraldDatabase = {
@@ -326,6 +328,47 @@ describe("Herald production controller ports", () => {
     }
   });
   for (const refresh of ["nudge", "ack", "alarm"] as const) {
+    test(`moderation closes an existing room on ${refresh} and restoration permits a new connection`, async () => {
+      const f = fixture();
+      try {
+        await f.connect();
+        const socket = f.sockets[0];
+        assert.ok(socket);
+        f.setNow(NOW + 1000);
+        if (refresh === "alarm") {
+          await f.controller.webSocketMessage(socket, '{"ack":1}');
+          f.hibernate();
+          f.setNow(NOW + 60_000);
+        }
+        // Moderation can change visibility without moving the public cursor.
+        f.sql.exec("INSERT INTO content_controls VALUES ('P-DEMO', 'problem', 'hidden', 1)");
+        if (refresh === "nudge") assert.equal((await f.nudge()).status, 204);
+        else if (refresh === "ack") await f.controller.webSocketMessage(socket, '{"ack":1}');
+        else await f.controller.alarm();
+        assert.equal(socket.closed, 1008, "hidden problems cannot retain room connections");
+        assert.equal(socket.sent.length, 1, "no cursor is announced after withdrawal");
+        // An ACK closes the socket synchronously; its already-scheduled alarm
+        // retires when it next observes the empty room.
+        if (refresh === "ack") {
+          f.setNow(NOW + 60_000);
+          await f.controller.alarm();
+        }
+        assert.equal(f.alarm(), null);
+        const pairs = f.pairCount();
+        const hidden = await f.connect();
+        const missing = await f.connect("/p/P-MISSING/room");
+        assert.equal(hidden.status, 404);
+        assert.equal(await hidden.text(), await missing.text());
+        assert.equal(f.pairCount(), pairs, "a hidden problem does not construct a socket");
+        f.sql.exec("INSERT INTO content_controls VALUES ('P-DEMO', 'problem', 'visible', 2)");
+        assert.equal((await f.connect()).status, 200);
+        const notice = f.sockets.at(-1)?.sent[0];
+        assert.ok(notice);
+        assert.equal(JSON.parse(notice).through, 1, "restore uses the unchanged canonical head");
+      } finally {
+        f.sql.close();
+      }
+    });
     test(`dormancy evicts on ${refresh}, refuses reconnects, and material reactivation reopens the room`, async () => {
       const f = fixture();
       try {

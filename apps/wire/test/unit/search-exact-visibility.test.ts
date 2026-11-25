@@ -10,7 +10,6 @@ describe("exact search visibility and outage recovery", () => {
   const fixtures: ReturnType<typeof searchPaginationFixture>[] = [];
   function fixture() {
     const f = searchPaginationFixture();
-    f.sqlite.exec("CREATE TABLE outbox(kind TEXT, state TEXT)");
     fixtures.push(f);
     return f;
   }
@@ -21,7 +20,7 @@ describe("exact search visibility and outage recovery", () => {
 
   test("exact ID and canonical URL retain the public title, without duplicates", async () => {
     const f = fixture();
-    f.problem("P-A17", "active", 0, "P-A17 graph coloring bounds");
+    f.publishedProblem("P-A17", "active", 0, "P-A17 graph coloring bounds");
     for (const q of ["P-A17", "https://asimposium.org/p/P-A17"]) {
       const response = await executeSearch(f.db, request(q));
       assert.equal(response.total_matches, 1);
@@ -33,9 +32,9 @@ describe("exact search visibility and outage recovery", () => {
 
   test("hidden, unlisted and private exact references have the same no-match face as absence", async () => {
     const f = fixture();
-    f.problem("P-HIDDEN", "active", 0, "Hidden canary");
-    f.problem("P-UNLISTED", "active", 1, "Unlisted canary");
-    f.problem("P-PRIVATE", "private-draft", 0, "Private canary");
+    f.publishedProblem("P-HIDDEN", "active", 0, "Hidden canary");
+    f.publishedProblem("P-UNLISTED", "active", 1, "Unlisted canary");
+    f.publishedProblem("P-PRIVATE", "private-draft", 0, "Private canary");
     f.sqlite.exec("INSERT INTO content_controls VALUES('P-HIDDEN','problem','hidden',1)");
     const absent = await executeSearch(f.db, request("P-ABSENT"));
     for (const id of ["P-HIDDEN", "P-UNLISTED", "P-PRIVATE"]) {
@@ -46,9 +45,27 @@ describe("exact search visibility and outage recovery", () => {
     }
   });
 
+  for (const [label, change] of [
+    ["uncommitted source bytes", "UPDATE event_content SET payload_json='{}'"],
+    [
+      "disagreeing projections",
+      "UPDATE claims SET statement='projected words'; UPDATE public_claim_fts SET statement='projected words'",
+    ],
+    ["incorrect source version", "UPDATE events SET type='claim.revised',object_version=3"],
+  ] as const) {
+    test(`neither exact nor lexical discovery cites ${label}`, async () => {
+      const f = fixture();
+      f.claim("C-1", "original words", "P-A17");
+      f.sqlite.exec(change);
+      for (const q of ["P-A17#C-1", "words"]) {
+        await assert.rejects(executeSearch(f.db, request(q)));
+      }
+    });
+  }
+
   test("a later restore makes the exact reference readable again", async () => {
     const f = fixture();
-    f.problem("P-A17", "active", 0, "Restored research");
+    f.publishedProblem("P-A17", "active", 0, "Restored research");
     f.sqlite.exec(`INSERT INTO content_controls VALUES
       ('P-A17','problem','hidden',1), ('P-A17','problem','visible',2)`);
     assert.equal(
@@ -57,18 +74,19 @@ describe("exact search visibility and outage recovery", () => {
     );
   });
 
-  test("legacy exact references without titles fall back to their ID", async () => {
+  test("problem projections without a published formulation are not discovery authority", async () => {
     const f = fixture();
-    for (const title of [null, "   "]) {
+    for (const title of [null, "   ", "Unpublished title canary"]) {
       f.problem("P-A17", "active", 0, title);
       f.sqlite.query("UPDATE problems SET title=? WHERE id='P-A17'").run(title);
-      assert.equal((await executeSearch(f.db, request("P-A17"))).items[0]?.title, "P-A17");
+      assert.equal((await executeSearch(f.db, request("P-A17"))).total_matches, 0);
+      assert.equal((await executeSearch(f.db, request("title canary"))).total_matches, 0);
     }
   });
 
   test("an unchanged exact reference survives a lexical failure with an explicit omission", async () => {
     const f = fixture();
-    f.problem("P-A17", "active", 0, "Public research");
+    f.publishedProblem("P-A17", "active", 0, "Public research");
     f.setHook((sql) => {
       if (sql === SEARCH_CLAIM_KEYS_SQL) throw new Error("fixture lexical outage");
     });
@@ -83,11 +101,11 @@ describe("exact search visibility and outage recovery", () => {
     ["hidden", "INSERT INTO content_controls VALUES('P-A17','problem','hidden',1)"],
     ["unlisted", "UPDATE problems SET unlisted=1 WHERE id='P-A17'"],
     ["private", "UPDATE problems SET status='private-draft' WHERE id='P-A17'"],
-    ["renamed", "UPDATE problems SET title='Changed public research' WHERE id='P-A17'"],
+    ["version-drifted", "UPDATE problems SET current_statement_version=2 WHERE id='P-A17'"],
   ] as const) {
     test(`a ${label} problem cannot escape through the lexical-outage fallback`, async () => {
       const f = fixture();
-      f.problem("P-A17", "active", 0, "Public research");
+      f.publishedProblem("P-A17", "active", 0, "Public research");
       f.setHook((sql) => {
         if (sql === SEARCH_CLAIM_KEYS_SQL) {
           f.sqlite.exec(mutation);
@@ -112,7 +130,7 @@ describe("exact search visibility and outage recovery", () => {
 
   test("a failed exact recheck does not return the initially readable copy", async () => {
     const f = fixture();
-    f.problem("P-A17", "active", 0, "Public research");
+    f.publishedProblem("P-A17", "active", 0, "Public research");
     let failed = false;
     f.setHook((sql) => {
       if (sql === SEARCH_CLAIM_KEYS_SQL) {
@@ -126,7 +144,7 @@ describe("exact search visibility and outage recovery", () => {
 
   test("visibility changes on a healthy lexical path also fail closed", async () => {
     const f = fixture();
-    f.problem("P-A17", "active", 0, "Public research");
+    f.publishedProblem("P-A17", "active", 0, "Public research");
     let changed = false;
     f.setHook((sql) => {
       if (sql === SEARCH_PROBLEM_KEYS_SQL && !changed) {
@@ -144,4 +162,28 @@ describe("exact search visibility and outage recovery", () => {
     });
     await assert.rejects(executeSearch(f.db, request("research")), /lexical outage/);
   });
+
+  for (const target of ["object", "version", "event", "redaction"] as const) {
+    test(`a withdrawn ${target} formulation cannot supply an exact or title search result`, async () => {
+      const f = fixture();
+      f.problem("P-A17", "active", 0, "Withdrawn scientific title canary");
+      const source = f.formulation("P-A17", "The exact published scientific question.");
+      if (target === "redaction") {
+        f.sqlite
+          .query("UPDATE event_content SET redacted_at='withdrawn' WHERE event_id=?")
+          .run(source.eventId);
+      } else {
+        const ref =
+          target === "object" ? "P-A17" : target === "version" ? "P-A17@1" : `#${source.seq}`;
+        f.sqlite.query("INSERT INTO content_controls VALUES('P-A17',?,'hidden',1)").run(ref);
+      }
+      for (const q of ["P-A17", "https://asimposium.org/p/P-A17", "scientific title"]) {
+        const result = await executeSearch(f.db, request(q));
+        assert.equal(result.total_matches, 0);
+        assert.deepEqual(result.items, []);
+        assert.equal(result.cursor, undefined);
+        assert.doesNotMatch(JSON.stringify(result.items), /Withdrawn|canary/);
+      }
+    });
+  }
 });

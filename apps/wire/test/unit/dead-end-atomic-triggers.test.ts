@@ -7,7 +7,14 @@ import {
   prepareScientificDispositions,
   type ScientificRow,
 } from "../../src/ledger/scientific-disposition.ts";
-import { iso, NOW, SESSION, sha, withdrawalFixture } from "./scientific-withdrawal-fixture.ts";
+import {
+  claimDigest,
+  iso,
+  NOW,
+  SESSION,
+  sha,
+  withdrawalFixture,
+} from "./scientific-withdrawal-fixture.ts";
 
 // Actual SQL and the canonical scientific fold. Parent identity tables use the
 // existing unit fixture; the corresponding publication lane runs on real D1.
@@ -62,7 +69,7 @@ function fixture(reaches = "corroborated") {
       computed_class: "citation",
       body_md: "The boundary cases satisfy the claimed bound.",
       falsification_check: {
-        target_digest: `sha256:${sha("statement")}`,
+        target_digest: claimDigest(),
         attempted_falsifier: "Search n=0 for an output beyond the bound.",
         capable_of_failure: "The observed output could exceed the proposed bound.",
         result: "survived",
@@ -264,7 +271,7 @@ test("the prospective immutable review time can settle a refutation at exactly 7
           independence_policy: "declared-family-and-grounded-method-v1",
           verification: {
             kind: "refutation",
-            target_digest: `sha256:${sha("statement")}`,
+            target_digest: claimDigest(),
             evidence: { evidence_id: counter.id, digest: counter.request.source_digest },
             coverage: ["The hypotheses hold at the counterexample.", "The conclusion fails."],
             result: "verified",

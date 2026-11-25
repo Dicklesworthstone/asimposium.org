@@ -280,6 +280,82 @@
             "minimum": 0,
             "maximum": 9007199254740991
           },
+          "initial_instruction": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "directive_id": {
+                    "type": "string",
+                    "minLength": 35,
+                    "maxLength": 35,
+                    "pattern": "^EI-[a-f0-9]{32}$"
+                  },
+                  "source_kind": {
+                    "type": "string",
+                    "const": "enrollment-instruction"
+                  },
+                  "verb": {
+                    "type": "string",
+                    "const": "initial"
+                  },
+                  "fellow_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 80,
+                    "pattern": "^[^\\u0000]*$"
+                  },
+                  "sponsor_id": {
+                    "type": "string",
+                    "allOf": [
+                      {
+                        "pattern": "^[^\\u0000]*$"
+                      },
+                      {
+                        "pattern": "^usr_[A-Za-z0-9_-]{1,60}$"
+                      }
+                    ]
+                  },
+                  "problem_id": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "pattern": "^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "text": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 2000,
+                    "pattern": "^[^\\u0000]*$"
+                  },
+                  "created_at": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  }
+                },
+                "required": [
+                  "directive_id",
+                  "source_kind",
+                  "verb",
+                  "fellow_id",
+                  "sponsor_id",
+                  "problem_id",
+                  "text",
+                  "created_at"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "focus": {
             "anyOf": [
               {
@@ -628,6 +704,82 @@
             "type": "integer",
             "minimum": 0,
             "maximum": 9007199254740991
+          },
+          "initial_instruction": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "directive_id": {
+                    "type": "string",
+                    "minLength": 35,
+                    "maxLength": 35,
+                    "pattern": "^EI-[a-f0-9]{32}$"
+                  },
+                  "source_kind": {
+                    "type": "string",
+                    "const": "enrollment-instruction"
+                  },
+                  "verb": {
+                    "type": "string",
+                    "const": "initial"
+                  },
+                  "fellow_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 80,
+                    "pattern": "^[^\\u0000]*$"
+                  },
+                  "sponsor_id": {
+                    "type": "string",
+                    "allOf": [
+                      {
+                        "pattern": "^[^\\u0000]*$"
+                      },
+                      {
+                        "pattern": "^usr_[A-Za-z0-9_-]{1,60}$"
+                      }
+                    ]
+                  },
+                  "problem_id": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "pattern": "^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "text": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 2000,
+                    "pattern": "^[^\\u0000]*$"
+                  },
+                  "created_at": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  }
+                },
+                "required": [
+                  "directive_id",
+                  "source_kind",
+                  "verb",
+                  "fellow_id",
+                  "sponsor_id",
+                  "problem_id",
+                  "text",
+                  "created_at"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "focus": {
             "anyOf": [
@@ -982,6 +1134,82 @@
             "minimum": 0,
             "maximum": 9007199254740991
           },
+          "initial_instruction": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "directive_id": {
+                    "type": "string",
+                    "minLength": 35,
+                    "maxLength": 35,
+                    "pattern": "^EI-[a-f0-9]{32}$"
+                  },
+                  "source_kind": {
+                    "type": "string",
+                    "const": "enrollment-instruction"
+                  },
+                  "verb": {
+                    "type": "string",
+                    "const": "initial"
+                  },
+                  "fellow_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 80,
+                    "pattern": "^[^\\u0000]*$"
+                  },
+                  "sponsor_id": {
+                    "type": "string",
+                    "allOf": [
+                      {
+                        "pattern": "^[^\\u0000]*$"
+                      },
+                      {
+                        "pattern": "^usr_[A-Za-z0-9_-]{1,60}$"
+                      }
+                    ]
+                  },
+                  "problem_id": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "pattern": "^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "text": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 2000,
+                    "pattern": "^[^\\u0000]*$"
+                  },
+                  "created_at": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  }
+                },
+                "required": [
+                  "directive_id",
+                  "source_kind",
+                  "verb",
+                  "fellow_id",
+                  "sponsor_id",
+                  "problem_id",
+                  "text",
+                  "created_at"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "focus": {
             "anyOf": [
               {
@@ -1331,6 +1559,82 @@
             "type": "integer",
             "minimum": 0,
             "maximum": 9007199254740991
+          },
+          "initial_instruction": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "directive_id": {
+                    "type": "string",
+                    "minLength": 35,
+                    "maxLength": 35,
+                    "pattern": "^EI-[a-f0-9]{32}$"
+                  },
+                  "source_kind": {
+                    "type": "string",
+                    "const": "enrollment-instruction"
+                  },
+                  "verb": {
+                    "type": "string",
+                    "const": "initial"
+                  },
+                  "fellow_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 80,
+                    "pattern": "^[^\\u0000]*$"
+                  },
+                  "sponsor_id": {
+                    "type": "string",
+                    "allOf": [
+                      {
+                        "pattern": "^[^\\u0000]*$"
+                      },
+                      {
+                        "pattern": "^usr_[A-Za-z0-9_-]{1,60}$"
+                      }
+                    ]
+                  },
+                  "problem_id": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "pattern": "^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "text": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 2000,
+                    "pattern": "^[^\\u0000]*$"
+                  },
+                  "created_at": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  }
+                },
+                "required": [
+                  "directive_id",
+                  "source_kind",
+                  "verb",
+                  "fellow_id",
+                  "sponsor_id",
+                  "problem_id",
+                  "text",
+                  "created_at"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "focus": {
             "anyOf": [
@@ -1664,10 +1968,20 @@
     "type": "object",
     "properties": {
       "directive_id": {
-        "type": "string",
-        "minLength": 36,
-        "maxLength": 36,
-        "pattern": "^DIR-[a-f0-9]{32}$"
+        "anyOf": [
+          {
+            "type": "string",
+            "minLength": 36,
+            "maxLength": 36,
+            "pattern": "^DIR-[a-f0-9]{32}$"
+          },
+          {
+            "type": "string",
+            "minLength": 35,
+            "maxLength": 35,
+            "pattern": "^EI-[a-f0-9]{32}$"
+          }
+        ]
       },
       "rule_cited": {
         "type": "string",

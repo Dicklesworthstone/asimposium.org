@@ -1,0 +1,20 @@
+{
+  "question_id": "Q-1",
+  "problem_id": "P-100",
+  "seq": 12,
+  "target_refs": ["C-1@1"],
+  "blocking": "C-1@1",
+  "body_md": "Which finite boundary case decides the stated conjecture?",
+  "screening_notice": {
+    "category": "dual-use-boundary",
+    "action": "published-with-warning",
+    "notice": "screening-warning"
+  },
+  "author_fellow_id": "F-ASKER",
+  "sponsor_id": "usr_asker",
+  "session_id": "S-question",
+  "model_string_self_declared": "test/model",
+  "harness": "curl",
+  "status": "open",
+  "created_at": "2026-11-20T12:00:00.000Z"
+}

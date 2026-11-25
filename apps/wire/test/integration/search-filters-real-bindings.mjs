@@ -232,6 +232,29 @@ async function searchFiltersJourney({
   assert.ok(text.includes(claims[0]) || text.includes(claims[1]));
   assert.ok(!text.includes("PRIVATE_FILTER_WORKSHOP_CANARY"));
   assert.ok(text.includes("area=combinatorics") && text.includes("status=active"));
+  // Keep the initial discovery link and advance the same claim through the
+  // production revision route. Its new exact lookup and old citation must
+  // lead to their respective statements even after the head moves.
+  const lexicalClaim = first.items[0];
+  assert.equal(lexicalClaim.version, 1);
+  const revisionText = `For ${term}, every nonempty finite path has exactly two endpoints.`;
+  await call(
+    `/v1/sessions/${session.session_id}/revise`,
+    {
+      claim_id: lexicalClaim.id,
+      base_version: 1,
+      kind: "conjecture",
+      statement: revisionText,
+      falsifier: "A nonempty finite simple path with a different endpoint count.",
+    },
+    author,
+    201,
+  );
+  const revisedClaim = (await search({ q: `${active}#${lexicalClaim.id}`, kind: "claim" }))
+    .items[0];
+  assert.equal(revisedClaim.version, 2);
+  assert.equal(revisedClaim.statement, revisionText);
+  assert.equal(revisedClaim.read_url, `/p/${active}/claims/${lexicalClaim.id}@2.md`);
   console.log(JSON.stringify({ stage: "search-filter-reads-verified" }));
 
   await sponsorCall(
@@ -265,8 +288,11 @@ async function searchFiltersJourney({
   await follow(exactProblem, `/p/${active}.md`);
   await follow(exactClaim, `/p/${active}/claims/${claims[0]}@1.md`);
   await follow(fellow, `/fellows/${fellow.id}.md`);
-  const lexicalClaim = first.items[0];
-  await follow(lexicalClaim, `/p/${active}/claims/${lexicalClaim.id}.md`);
+  const oldText = await follow(lexicalClaim, `/p/${active}/claims/${lexicalClaim.id}@1.md`);
+  assert.ok(oldText.includes(lexicalClaim.statement));
+  assert.ok(!oldText.includes(revisionText));
+  const newText = await follow(revisedClaim, `/p/${active}/claims/${lexicalClaim.id}@2.md`);
+  assert.ok(newText.includes(revisionText));
   assert.ok(text.includes(`](${lexicalClaim.read_url})`));
 
   const formulationQuery = { q: "incidence matrix", kind: "problem", area: "algebra" };
@@ -309,7 +335,7 @@ async function searchFiltersJourney({
     status: "pass",
     claims: claims.length,
     undiscoverable_problems_checked: 2,
-    result_readers_checked: 5,
+    result_readers_checked: 6,
   };
 }
 

@@ -1,5 +1,8 @@
 import { type FellowCardQuery, FellowCardQuerySchema } from "@asimposium/contracts";
-import { renderFellowNegativeHistoryHtmlFragment } from "@asimposium/render";
+import {
+  fellowReviewOutcomeText,
+  renderFellowNegativeHistoryHtmlFragment,
+} from "@asimposium/render";
 import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
@@ -360,6 +363,21 @@ export default async function FellowPage({ params, searchParams }: FellowPagePro
                     </Link>
                   </p>
                   <ScreeningNotice notice={r.screening_notice} />
+                  {r.outcome !== undefined && (
+                    <p className="quiet" data-review-outcome={r.outcome.status}>
+                      {fellowReviewOutcomeText(r)}
+                      {r.outcome.status === "available" && (
+                        <>
+                          {" "}
+                          <Link
+                            href={`/p/${encodeURIComponent(r.problem_id)}/claims/${encodeURIComponent(r.target_claim_id)}@${r.target_version}?through=${r.outcome.through}`}
+                          >
+                            Read target at this cut
+                          </Link>
+                        </>
+                      )}
+                    </p>
+                  )}
                   <p className="quiet">
                     Tier: <code>{r.tier}</code> · Basis: {r.basis} · Sponsor:{" "}
                     <code>{r.sponsor_at_event}</code>

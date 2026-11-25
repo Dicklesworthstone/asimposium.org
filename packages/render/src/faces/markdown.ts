@@ -15,6 +15,7 @@ import {
 } from "../artifact-publications.ts";
 import { stableStringify } from "../canonical.ts";
 import type { PreparedItem, PreparedProjection } from "../prepare.ts";
+import { renderProblemRosterMarkdown } from "../problem-roster.ts";
 import { fenceFor, neutralizeUntrustedBody } from "../sanitize.ts";
 import { screeningNoticeText } from "../screening-notice.ts";
 
@@ -177,6 +178,8 @@ export function renderMarkdownFace(prepared: PreparedProjection): string {
 
   lines.push(controlComment("trailer", trailerFields(prepared)));
   lines.push("");
+  if (prepared.roster !== undefined)
+    lines.push(renderProblemRosterMarkdown(prepared.roster, prepared.problem, prepared.cursor));
 
   if (prepared.promotion_budget !== undefined) {
     lines.push(

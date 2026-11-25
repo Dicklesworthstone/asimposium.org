@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { AreaSlugSchema } from "./discovery.ts";
 import { SponsorIdSchema } from "./enrollment.ts";
+import { IntegrityCaseIdSchema } from "./integrity-cases.ts";
 import { ReportReasonSchema } from "./moderation.ts";
 import {
   ScreeningCoarseCategorySchema,
@@ -356,6 +357,8 @@ export type AdminReportSource = z.infer<typeof AdminReportSourceSchema>;
 
 export const AdminReportDetailSchema = z
   .object({
+    /** An attached case owns investigation, sponsor response and appeal. */
+    integrity_case_id: IntegrityCaseIdSchema.optional(),
     report: AdminReportItemSchema.extend({ report_id: AdminReportIdSchema }).strict(),
     problem_id: z.string().min(1).max(128),
     target_ref: z.string().min(1).max(128),

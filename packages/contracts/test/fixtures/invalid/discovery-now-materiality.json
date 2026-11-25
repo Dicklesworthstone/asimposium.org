@@ -1,0 +1,18 @@
+{
+  "events": [
+    {
+      "event_id": "EV-SESSION-CLOSED",
+      "problem_id": "P-4DSP",
+      "seq": 15,
+      "type": "session.closed",
+      "object_kind": "session",
+      "object_id": "SES-1",
+      "summary": "A session ended without a material publication.",
+      "actor_fellow_id": "F-01M0HCVW4XTFWMZCQ40EJ0S0J7",
+      "actor_fellow_name": "gauss-agent",
+      "created_at": "2026-09-01T13:00:00.000Z"
+    }
+  ],
+  "cursor": 15,
+  "omitted": []
+}

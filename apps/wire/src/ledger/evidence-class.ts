@@ -18,6 +18,8 @@
  *  - Exploratory mode is accepted, labeled, and cannot drive promotion.
  */
 
+import { type FormalArtifact, FormalArtifactSchema } from "@asimposium/contracts";
+
 export type EvidenceClass = "assertion" | "heuristic" | "citation" | "computation" | "certified";
 
 export interface EvidenceInput {
@@ -46,6 +48,23 @@ export interface EvidenceAssessment {
   readonly flags: readonly string[];
 }
 
+/** The same conservative scan governs publication, source readers and
+ * verification. Passing it is only a shape check, never compilation or proof
+ * that the declaration is equivalent to the claim (Fable §6.5). */
+export function scanFormalArtifact(value: unknown): FormalArtifact | null {
+  const parsed = FormalArtifactSchema.safeParse(value);
+  if (!parsed.success) return null;
+  const artifact = parsed.data;
+  if (
+    /\b(?:sorry|sorryAx|admit|axiom)\b/u.test(artifact.source) ||
+    /\b(?:sorry|sorryAx|admit)\b/u.test(artifact.axiom_report) ||
+    !artifact.source.includes(artifact.declaration) ||
+    !artifact.axiom_report.includes(artifact.declaration)
+  )
+    return null;
+  return artifact;
+}
+
 /** Compute the evidence class from its shape. Pure — the same shape, the same class. */
 export function assessEvidenceClass(input: EvidenceInput): EvidenceAssessment {
   const flags: string[] = [];
@@ -60,25 +79,32 @@ export function assessEvidenceClass(input: EvidenceInput): EvidenceAssessment {
   const hasLocator =
     input.source.kind === "locator" &&
     input.source.locator !== undefined &&
-    input.source.locator.length > 0;
-  const hasExcerpt = input.source.excerpt !== undefined && input.source.excerpt.length > 0;
+    input.source.locator.trim().length > 0;
+  const hasExcerpt = input.source.excerpt !== undefined && input.source.excerpt.trim().length > 0;
 
   if (input.certifiedArtifact !== undefined) {
-    // Certified requires the shape check AND an independent review confirming it.
-    if (
+    // A certificate label is not a scan (P2). Only the digest returned by the
+    // server's qualifying artifact scan earns computation; independent review
+    // is the additional condition for certified. Without a scan, retain only
+    // whatever ordinary source or computational evidence was actually supplied.
+    const scanned =
       input.certifiedArtifact.shapeCheckDigest !== undefined &&
-      input.certifiedArtifact.independentReviewConfirmed === true
-    ) {
-      return { class: "certified", flags };
+      /^sha256:[a-f0-9]{64}$/.test(input.certifiedArtifact.shapeCheckDigest);
+    if (scanned) {
+      if (input.certifiedArtifact.independentReviewConfirmed === true) {
+        return { class: "certified", flags };
+      }
+      flags.push("certified_requires_shape_check_plus_independent_review");
+      return { class: "computation", flags };
     }
-    flags.push("certified_requires_shape_check_plus_independent_review");
-    return { class: "computation", flags };
+    flags.push("certificate_without_shape_check");
   }
 
   if (input.computation !== undefined) {
     // P5: no stated domain or detection floor → coerced to heuristic, recorded.
     const hasFloor =
-      input.computation.domainOrFloor !== undefined && input.computation.domainOrFloor.length > 0;
+      input.computation.domainOrFloor !== undefined &&
+      input.computation.domainOrFloor.trim().length > 0;
     if (!hasFloor) {
       flags.push("p5_no_detection_floor_coerced_to_heuristic");
       return { class: "heuristic", flags };

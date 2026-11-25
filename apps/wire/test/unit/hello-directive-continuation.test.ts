@@ -5,11 +5,11 @@ import {
   TriageResponseSchema,
 } from "@asimposium/contracts";
 import { Hono } from "hono";
+import { D1EnrollmentStore } from "../../src/enrollment/d1-store.ts";
 import { createEnrollmentRouter } from "../../src/enrollment/router.ts";
 import {
   AesGcmEnrollmentReplayProtector,
   EnrollmentService,
-  InMemoryEnrollmentStore,
 } from "../../src/enrollment/service.ts";
 import { ContractFixtureMovesProvider } from "../../src/mega-commands/provider.ts";
 import { createMegaCommandsRouter } from "../../src/mega-commands/router.ts";
@@ -29,7 +29,7 @@ function fixture() {
   const service = new EnrollmentService({
     stoaOrigin: ORIGIN,
     agoraOrigin: "https://asimposium.org",
-    store: new InMemoryEnrollmentStore(),
+    store: new D1EnrollmentStore(db),
     replayProtector: new AesGcmEnrollmentReplayProtector(new Uint8Array(32)),
   });
   const triageMoves: Record<string, NextMoveCandidate | null> = {};

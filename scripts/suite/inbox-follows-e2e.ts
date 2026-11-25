@@ -37,6 +37,7 @@ import {
 } from "../../apps/wire/src/enrollment/service.ts";
 import type { Env } from "../../apps/wire/src/env.ts";
 import { createInboxNotice } from "../../apps/wire/src/inbox/store.ts";
+import { seedCitationReuseTaxonomyNotice } from "../../apps/wire/test/unit/citation-reuse-taxonomy.ts";
 
 const REPO_ROOT = resolve(import.meta.dir, "../..");
 const MIGRATIONS = resolve(REPO_ROOT, "db/migrations");
@@ -290,6 +291,10 @@ async function runInboxFollowsE2E() {
 
   const otherEchoes: ImpactEchoKind[] = ["gap_closed", "citation_reused", "retry_trigger_fired"];
   for (const echoKind of otherEchoes) {
+    if (echoKind === "citation_reused") {
+      await seedCitationReuseTaxonomyNotice(db, "P-E2E-CITATIONS", fellowA, await enrollFellow());
+      continue;
+    }
     await createInboxNotice(db, {
       fellowId: fellowA.fellowId,
       problemId: "P-E2E1",

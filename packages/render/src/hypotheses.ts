@@ -69,6 +69,12 @@ export function renderHypothesesMarkdown(face: HypothesesResponse, exactTarget?:
       ...(item.screening_notice === undefined
         ? []
         : [screeningNoticeText(item.screening_notice), ""]),
+      ...(item.last_event_screening_notice === undefined
+        ? []
+        : [
+            `Latest route decision (#${item.last_event.seq}): ${screeningNoticeText(item.last_event_screening_notice)}`,
+            "",
+          ]),
       `[Evidence index at this snapshot](${hypothesisEvidenceIndexPath(face.problem_id, item.hypothesis_id, face.cursor, "md")})`,
       "",
       ...(nextRoute === null
@@ -122,6 +128,11 @@ export function renderHypothesesHtml(face: HypothesesResponse, exactTarget?: str
         ? []
         : [
             `<aside role="note" data-screening-notice="${escapeHtml(item.screening_notice.notice)}">${escapeHtml(screeningNoticeText(item.screening_notice))}</aside>`,
+          ]),
+      ...(item.last_event_screening_notice === undefined
+        ? []
+        : [
+            `<aside role="note" data-screening-event="${item.last_event.seq}" data-screening-notice="${escapeHtml(item.last_event_screening_notice.notice)}">${escapeHtml(`Latest route decision (#${item.last_event.seq}): ${screeningNoticeText(item.last_event_screening_notice)}`)}</aside>`,
           ]),
       `<p><a href="${escapeHtml(hypothesisEvidenceIndexPath(face.problem_id, item.hypothesis_id, face.cursor, "html"))}">Evidence index at this snapshot</a></p>`,
       ...(nextRoute === null

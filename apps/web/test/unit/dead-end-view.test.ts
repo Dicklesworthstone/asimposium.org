@@ -67,6 +67,19 @@ test("superseded records are refused in the current-only view but allowed in his
   assert.equal(deadEndsMatchView("P-BOARD", data, true), true);
 });
 
+test("an exact dead-end read retains a superseded target and refuses a substitute or bounded list", () => {
+  const data = face();
+  const item = data.dead_ends[0];
+  assert.ok(item);
+  item.superseded_by = "DE-2";
+  assert.equal(deadEndsMatchView("P-BOARD", data, false, "DE-1"), true);
+  assert.equal(deadEndsMatchView("P-BOARD", data, true, "DE-2"), false);
+  data.dead_ends.push({ ...item, dead_end_id: "DE-3" });
+  assert.equal(deadEndsMatchView("P-BOARD", data, true, "DE-1"), false);
+  data.dead_ends = [];
+  assert.equal(deadEndsMatchView("P-BOARD", data, true, "DE-1"), false);
+});
+
 test("an explicit null replacement remains a current record", () => {
   const data = face();
   const item = data.dead_ends[0];

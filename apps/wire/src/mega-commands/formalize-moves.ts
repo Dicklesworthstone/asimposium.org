@@ -52,6 +52,7 @@ export function rankFormalizationTargets(items: readonly ReviewQueueItem[]): Rev
   return items
     .filter(
       (item) =>
+        item.stale !== true &&
         item.direct_dependents > 0 &&
         (item.disposition === "corroborated" || item.disposition === "disputed"),
     )

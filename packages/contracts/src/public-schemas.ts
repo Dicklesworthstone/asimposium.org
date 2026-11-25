@@ -52,10 +52,13 @@ import { generateDiscriminationSchema } from "./discrimination.ts";
 import { generateFormalRecordsSchema } from "./formal-records.ts";
 import { generateFrictionSchema } from "./formalization-friction.ts";
 import { generateHypothesesSchema } from "./hypotheses-schema.ts";
+import { generateIntegrityCasesSchema } from "./integrity-cases.ts";
 import { generateReportsSchema } from "./moderation.ts";
 import { generateProofGapsSchema } from "./proof-gaps-schema.ts";
+import { generateResearchListsSchema } from "./research-lists.ts";
 import { generateReviewRequestsSchema } from "./review-requests-artifact.ts";
 import { generateScientificWithdrawalsSchema } from "./scientific-withdrawals.ts";
+import { generateSponsorActivitySchema } from "./sponsor-activity.ts";
 import { generateSponsorFollowsSchema } from "./sponsor-follows.ts";
 import { generateStatementsSchema } from "./statements.ts";
 import { generateWorkshopSearchSchema } from "./workshop-search.ts";
@@ -73,11 +76,14 @@ export const INLINE_PUBLIC_SCHEMA_IDS = Object.freeze([
   "formal-records",
   "formalization-friction",
   "hypotheses",
+  "integrity-cases",
   "proof-gaps",
   "reports",
+  "research-lists",
   "review-requests",
   "scientific-withdrawals",
   "screening-appeals",
+  "sponsor-activity",
   "sponsor-follows",
   "sponsor-suspensions",
   "statements",
@@ -105,6 +111,7 @@ export const PUBLIC_SCHEMA_IDS = Object.freeze([
   "formalization-friction",
   "hypotheses",
   "inbox",
+  "integrity-cases",
   "internal-health",
   "ledger",
   "moves",
@@ -114,6 +121,7 @@ export const PUBLIC_SCHEMA_IDS = Object.freeze([
   "questions",
   "readiness",
   "reports",
+  "research-lists",
   "retractions",
   "review-queue",
   "review-requests",
@@ -122,6 +130,7 @@ export const PUBLIC_SCHEMA_IDS = Object.freeze([
   "screening",
   "screening-appeals",
   "sessions",
+  "sponsor-activity",
   "sponsor-follows",
   "sponsor-suspensions",
   "statements",
@@ -306,6 +315,12 @@ const PUBLIC_SCHEMAS: readonly PublicSchemaDocument[] = Object.freeze([
     body: canonicalSchemaText(inboxSchemaModule, "generated/inbox.schema.json"),
   }),
   Object.freeze({
+    id: "integrity-cases",
+    served_at: "/schemas/integrity-cases.v1.json",
+    media_type: "application/schema+json; charset=utf-8",
+    body: generateIntegrityCasesSchema(),
+  }),
+  Object.freeze({
     id: "internal-health",
     served_at: "/schemas/internal.health.v1.json",
     media_type: "application/schema+json; charset=utf-8",
@@ -360,6 +375,12 @@ const PUBLIC_SCHEMAS: readonly PublicSchemaDocument[] = Object.freeze([
     body: generateReportsSchema(),
   }),
   Object.freeze({
+    id: "research-lists",
+    served_at: "/schemas/research-lists.v1.json",
+    media_type: "application/schema+json; charset=utf-8",
+    body: generateResearchListsSchema(),
+  }),
+  Object.freeze({
     id: "retractions",
     served_at: "/schemas/retractions.v1.json",
     media_type: "application/schema+json; charset=utf-8",
@@ -406,6 +427,12 @@ const PUBLIC_SCHEMAS: readonly PublicSchemaDocument[] = Object.freeze([
     served_at: "/schemas/sessions.v1.json",
     media_type: "application/schema+json; charset=utf-8",
     body: canonicalSchemaText(sessionsSchemaModule, "generated/sessions.schema.json"),
+  }),
+  Object.freeze({
+    id: "sponsor-activity",
+    served_at: "/schemas/sponsor-activity.v1.json",
+    media_type: "application/schema+json; charset=utf-8",
+    body: generateSponsorActivitySchema(),
   }),
   Object.freeze({
     id: "sponsor-follows",

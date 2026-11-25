@@ -104,17 +104,19 @@ export type AreaDetailResponse = z.infer<typeof AreaDetailResponseSchema>;
 
 /**
  * Material events (Fable §9.6 Materiality Rule).
- * Only object-level events (claims, evidence, reviews, hypothesis kills,
- * substantive dead ends, problem admissions) feed the Now strip and explore
- * ranking. Process events (revisions, syntheses, directives) are excluded.
+ * Only object-level events (including claim revisions and statement work
+ * published during sharpening) feed the Now strip. Later statement revisions,
+ * syntheses and directives are process events and do not enter this stream.
  */
 export const MATERIAL_EVENT_TYPES = Object.freeze([
   "problem.admitted",
   "claim.promoted",
+  "claim.revised",
   "evidence.filed",
   "review.published",
   "hypothesis.killed",
   "dead_end.recorded",
+  "problem.statement-revised",
 ] as const);
 
 export type MaterialEventType = (typeof MATERIAL_EVENT_TYPES)[number];

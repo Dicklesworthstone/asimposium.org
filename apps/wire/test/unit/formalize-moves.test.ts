@@ -155,6 +155,23 @@ test("formalization ranks verified consequence before review need and excludes u
   );
 });
 
+test("stale recovery work cannot exhaust formalization assessments ahead of clean science", async () => {
+  const recovery = Array.from({ length: FORMALIZE_MAX_ASSESSMENTS }, (_, index) =>
+    item(index + 1, {
+      direct_dependents: 32,
+      disposition: "disputed",
+      stale: true,
+      need: "recheck-stale-inputs",
+      best_recorded_tier: "none",
+    }),
+  );
+  const f = source([page([...recovery, item(5)])]);
+  const result = await run(f.source);
+  assert.deepEqual(result.move?.refs, [p, "C-5@2"]);
+  assert.deepEqual(f.assessCalls, [[db, p, 200, "C-5@2"]]);
+  assert.equal(result.degraded, false);
+});
+
 test("equal consequence prefers a dispute, then age, then stable ASCII identity", () => {
   const input = [
     item(2),

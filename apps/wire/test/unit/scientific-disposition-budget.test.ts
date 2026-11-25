@@ -2,11 +2,15 @@ import { Database } from "bun:sqlite";
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import type { D1Database } from "@cloudflare/workers-types";
+import { loadHonorsRecord } from "../../src/discovery/honors-service.ts";
 import { claimContentDigest } from "../../src/krater/claim-version.ts";
 import {
+  DEFAULT_SCIENTIFIC_READ_BUDGET,
   foldScientificRows,
   prepareScientificDispositions,
+  readScientificDispositions,
   type ScientificReadBudget,
+  ScientificReadBudgetExceededError,
   type ScientificRow,
 } from "../../src/ledger/scientific-disposition.ts";
 
@@ -19,6 +23,10 @@ const bytes = (text: string | null) => (text === null ? 0 : new TextEncoder().en
 async function fixture() {
   const sql = new Database(":memory:");
   sql.exec(`
+    CREATE TABLE public_cursor(singleton INTEGER, cursor INTEGER);
+    INSERT INTO public_cursor VALUES(1,10000);
+    CREATE TABLE problems(id TEXT PRIMARY KEY, public_seq INTEGER, status TEXT, unlisted INTEGER);
+    INSERT INTO problems VALUES('P-DEMO',10000,'active',0);
     CREATE TABLE events(id TEXT PRIMARY KEY, problem_id TEXT, seq INTEGER, type TEXT,
       object_kind TEXT, object_id TEXT, object_version INTEGER, payload_sha256 TEXT,
       created_at TEXT, actor_fellow_id TEXT, actor_sponsor_id TEXT, UNIQUE(problem_id,seq));
@@ -48,15 +56,22 @@ async function fixture() {
   `);
   const db = {
     prepare(query: string) {
-      return {
-        bind(...values: (string | number | null)[]) {
-          return { all: async () => ({ success: true, results: sql.query(query).all(...values) }) };
-        },
-      };
+      const prepared = (values: (string | number | null)[]) => ({
+        all: async () => ({ success: true, results: sql.query(query).all(...values) }),
+        first: async () => sql.query(query).get(...values),
+      });
+      return { ...prepared([]), bind: (...values: (string | number | null)[]) => prepared(values) };
     },
   } as unknown as D1Database;
   let sequence = 0;
-  function event(type: string, kind: string, object: string, payload: unknown, author = "author") {
+  function event(
+    type: string,
+    kind: string,
+    object: string,
+    payload: unknown,
+    author = "author",
+    version = 1,
+  ) {
     const seq = ++sequence;
     const id = `EV-${seq}`;
     const body = JSON.stringify(payload),
@@ -70,7 +85,7 @@ async function fixture() {
         type,
         kind,
         object,
-        1,
+        version,
         digest,
         "2026-10-27T12:00:00.000Z",
         `F-${author}`,
@@ -91,7 +106,33 @@ async function fixture() {
   return {
     sql,
     db,
-    evidence(body: string, direction = "supports") {
+    async revision(version: number) {
+      const revised = { ...claim, statement: `Revised statement ${version}.` };
+      event(
+        "claim.revised",
+        "claim",
+        "C-1",
+        { claim_id: "C-1", base_version: version - 1, ...revised },
+        "author",
+        version,
+      );
+      sql
+        .query("INSERT INTO claim_versions VALUES('P-DEMO','C-1',?,?,?)")
+        .run(
+          version,
+          await claimContentDigest(revised, async (text) => hash(text)),
+          revised.statement,
+        );
+    },
+    evidence(
+      body: string,
+      direction = "supports",
+      target: { kind: "claim" | "hypothesis"; id: string; version: number | null } = {
+        kind: "claim",
+        id: "C-1",
+        version: 1,
+      },
+    ) {
       const evidenceId = `E-${sequence + 1}`;
       const source = event(
         "evidence.created",
@@ -101,27 +142,54 @@ async function fixture() {
           kind: "computation",
           mode: "confirmatory",
           computed_class: "computation",
-          bears_on_kind: "claim",
-          bears_on_id: "C-1",
-          bears_on_version: 1,
+          bears_on_kind: target.kind,
+          bears_on_id: target.id,
+          bears_on_version: target.version ?? undefined,
           direction,
           body_md: body,
         },
         "examiner",
       );
       sql
-        .query("INSERT INTO evidence VALUES(?,'P-DEMO',?,?,'claim','C-1',1,?)")
-        .run(source.id, evidenceId, source.seq, direction);
+        .query("INSERT INTO evidence VALUES(?,'P-DEMO',?,?,?,?,?,?)")
+        .run(source.id, evidenceId, source.seq, target.kind, target.id, target.version, direction);
       return { ...source, evidenceId };
     },
-    async read(budget?: ScientificReadBudget, cursor = sequence) {
+    review(targetVersion = 1) {
+      const reviewId = `R-${sequence + 1}`;
+      const payload = {
+        target_claim_id: "C-1",
+        target_version: targetVersion,
+        verdict: "refute",
+        basis: "Checked the stated domain and found an admissible counterexample.",
+        capable_of_failure: "The witness could fail one of the stated hypotheses.",
+        rubric: [],
+        body_md: "The recorded witness satisfies the hypotheses but fails the conclusion.",
+      };
+      const source = event("review.created", "review", reviewId, payload, "reviewer");
+      sql
+        .query("INSERT INTO reviews VALUES(?,'P-DEMO',?,?,'C-1',?,?,?,?,?,?)")
+        .run(
+          source.id,
+          reviewId,
+          source.seq,
+          targetVersion,
+          payload.verdict,
+          payload.capable_of_failure,
+          JSON.stringify(payload.rubric),
+          payload.basis,
+          payload.body_md,
+        );
+      return source;
+    },
+    async read(budget?: ScientificReadBudget, cursor = sequence, version = 1) {
       return (
         await prepareScientificDispositions(
           db,
           "P-DEMO",
           cursor,
           1,
-          { claimId: "C-1", version: 1 },
+          { claimId: "C-1", version },
           budget,
         ).all<ScientificRow>()
       ).results;
@@ -136,13 +204,9 @@ test("a complete bounded history retains the canonical rows and fold", async () 
     f.evidence("A recorded counterexample challenges the exact claim.", "refutes");
     const original = await f.read(),
       bounded = await f.read(BUDGET);
-    expect(original.every((row) => row.scientific_budget_exceeded === undefined)).toBe(true);
+    expect(original.every((row) => row.scientific_budget_exceeded === 0)).toBe(true);
     expect(bounded.every((row) => row.scientific_budget_exceeded === 0)).toBe(true);
-    expect(
-      bounded.map((row) =>
-        Object.fromEntries(Object.entries(row).filter(([key]) => !key.startsWith("scientific_"))),
-      ),
-    ).toEqual(original);
+    expect(bounded).toEqual(original);
     expect(await foldScientificRows(bounded)).toEqual(await foldScientificRows(original));
     expect((await foldScientificRows(bounded)).disposition).toBe("disputed");
   } finally {
@@ -172,7 +236,7 @@ test("row lookahead detects late adverse history without returning or folding a 
   }
 });
 
-test("an oversized UTF-8 body is withheld in SQL and does not change the unbounded reader", async () => {
+test("an oversized UTF-8 body is withheld by a tighter collection budget", async () => {
   const f = await fixture();
   try {
     const source = f.evidence("µ".repeat(10_000), "refutes");
@@ -243,6 +307,119 @@ test("current withholding preserves adverse metadata and does not spend the body
   }
 });
 
+test("the production default bounds history before transfer and never folds a missing late objection", async () => {
+  const f = await fixture();
+  try {
+    for (let index = 1; index < DEFAULT_SCIENTIFIC_READ_BUDGET.maxRows; index++)
+      f.evidence(`Checked instance ${index}.`);
+    f.evidence("The next recorded input refutes the selected statement.", "refutes");
+    f.evidence("Additional history cannot make the transferred prefix complete.");
+    const bounded = await f.read();
+    expect(bounded).toHaveLength(DEFAULT_SCIENTIFIC_READ_BUDGET.maxRows + 1);
+    expect(bounded.every((row) => row.scientific_budget_exceeded === 1)).toBe(true);
+    expect(bounded.every((row) => row.payload_json === null && row.statement === null)).toBe(true);
+    await expect(foldScientificRows(bounded)).rejects.toBeInstanceOf(
+      ScientificReadBudgetExceededError,
+    );
+    await expect(readScientificDispositions(f.db, "P-DEMO", 10000, 100)).rejects.toBeInstanceOf(
+      ScientificReadBudgetExceededError,
+    );
+
+    const historical = await f.read(undefined, DEFAULT_SCIENTIFIC_READ_BUDGET.maxRows);
+    expect(historical).toHaveLength(DEFAULT_SCIENTIFIC_READ_BUDGET.maxRows);
+    expect(historical.every((row) => row.scientific_budget_exceeded === 0)).toBe(true);
+    expect((await foldScientificRows(historical)).disposition).toBe("open");
+
+    // The feed remains readable, but it cannot recognize any candidate whose
+    // complete standing was unavailable. This calls the real Honors consumer.
+    const honors = await loadHonorsRecord(f.db);
+    expect(honors.results).toEqual([]);
+    expect(honors.omitted).toContain(
+      "some candidate histories exceed the scientific read budget; no recognition is inferred from a partial history; exact published resolution claims are checked independently",
+    );
+  } finally {
+    f.sql.close();
+  }
+});
+
+test("later revisions are excluded before the exact-version history budget", async () => {
+  const f = await fixture();
+  try {
+    f.evidence("The first statement has a recorded counterexample.", "refutes");
+    await f.revision(2);
+    for (let index = 0; index < DEFAULT_SCIENTIFIC_READ_BUDGET.maxRows + 1; index++)
+      f.evidence(`Later statement instance ${index}.`, "supports", {
+        kind: "claim",
+        id: "C-1",
+        version: 2,
+      });
+    const oldVersion = await f.read();
+    expect(oldVersion).toHaveLength(2);
+    expect(oldVersion.every((row) => row.scientific_budget_exceeded === 0)).toBe(true);
+    expect(await foldScientificRows(oldVersion)).toMatchObject({
+      currentVersion: 1,
+      disposition: "disputed",
+      stale: false,
+    });
+    const selected = await readScientificDispositions(f.db, "P-DEMO", 10000, 1, {
+      claimId: "C-1",
+      version: 1,
+    });
+    expect(selected.get("C-1")).toMatchObject({ currentVersion: 1, disposition: "disputed" });
+    const later = await f.read(undefined, undefined, 2);
+    expect(later).toHaveLength(DEFAULT_SCIENTIFIC_READ_BUDGET.maxRows + 1);
+    expect(later.every((row) => row.payload_json === null && row.statement === null)).toBe(true);
+    await expect(foldScientificRows(later)).rejects.toBeInstanceOf(
+      ScientificReadBudgetExceededError,
+    );
+  } finally {
+    f.sql.close();
+  }
+});
+
+test("default byte limits admit maximum-length escaped bodies and cap aggregate transfer", async () => {
+  const f = await fixture();
+  try {
+    // The request schema admits 64 KiB characters, and JSON escaping can
+    // expand each one to six bytes without exceeding the 512 KiB write limit.
+    const body = "\u0001".repeat(64 * 1024);
+    const source = f.evidence(body);
+    expect(bytes(source.body)).toBeLessThan(512 * 1024);
+    const ordinary = await f.read();
+    expect(ordinary.every((row) => row.scientific_budget_exceeded === 0)).toBe(true);
+    expect(ordinary[1]?.payload_json).toBe(source.body);
+
+    for (let index = 0; index < 10; index++) f.evidence(body);
+    const bounded = await f.read();
+    expect(bounded).toHaveLength(12);
+    expect(bounded.every((row) => row.scientific_budget_exceeded === 1)).toBe(true);
+    expect(
+      bounded.reduce((sum, row) => sum + bytes(row.payload_json) + bytes(row.statement), 0),
+    ).toBe(0);
+    await expect(foldScientificRows(bounded)).rejects.toBeInstanceOf(
+      ScientificReadBudgetExceededError,
+    );
+  } finally {
+    f.sql.close();
+  }
+});
+
+test("a default per-body overflow withholds every body in the assessment", async () => {
+  const f = await fixture();
+  try {
+    f.evidence("µ".repeat(DEFAULT_SCIENTIFIC_READ_BUDGET.maxPayloadBytes / 2), "refutes");
+    const bounded = await f.read();
+    expect(bounded).toHaveLength(2);
+    expect(bounded.every((row) => row.scientific_budget_exceeded === 1)).toBe(true);
+    expect(bounded.every((row) => row.payload_json === null && row.statement === null)).toBe(true);
+    await expect(foldScientificRows(bounded)).rejects.toBeInstanceOf(
+      ScientificReadBudgetExceededError,
+    );
+  } finally {
+    f.sql.close();
+  }
+});
+
 test("internal budget values cannot become unsafe SQL limits", async () => {
   const f = await fixture();
   try {
@@ -254,6 +431,161 @@ test("internal budget values cannot become unsafe SQL limits", async () => {
       { maxTotalPayloadBytes: Number.NaN },
     ])
       await expect(f.read({ ...BUDGET, ...bad })).rejects.toThrow("budget");
+  } finally {
+    f.sql.close();
+  }
+});
+
+test("a drifted evidence projection cannot erase a published objection or move it to another target", async () => {
+  for (const mutation of [
+    "UPDATE evidence SET direction = 'supports'",
+    "UPDATE evidence SET bears_on_id = 'C-2'",
+    "UPDATE evidence SET bears_on_version = 2",
+    "UPDATE evidence SET bears_on_kind = 'hypothesis'",
+    "UPDATE evidence SET source_seq = 200",
+    "UPDATE evidence SET source_event_id = 'MISSING'",
+    "DELETE FROM evidence",
+  ]) {
+    const f = await fixture();
+    try {
+      f.evidence("A recorded counterexample challenges the exact claim.", "refutes");
+      expect(await foldScientificRows(await f.read())).toMatchObject({
+        disposition: "disputed",
+        stale: false,
+      });
+      f.sql.exec(mutation);
+      for (const budget of [undefined, BUDGET]) {
+        const rows = await f.read(budget);
+        // Production readers filter to the requested exact version before folding.
+        await expect(
+          foldScientificRows(rows.filter((row) => row.target_version <= 1)),
+        ).rejects.toThrow("Scientific projections disagree with the public event history");
+        // A later broken projection cannot rewrite an earlier captured cut.
+        expect(await foldScientificRows(await f.read(budget, 1))).toMatchObject({
+          disposition: "open",
+          stale: false,
+        });
+      }
+    } finally {
+      f.sql.close();
+    }
+  }
+});
+
+test("a drifted review target cannot turn the original claim's adverse history into a clean read", async () => {
+  for (const mutation of [
+    "UPDATE reviews SET verdict = 'verify'",
+    "UPDATE reviews SET target_claim_id = 'C-2'",
+    "UPDATE reviews SET target_version = 2",
+    "UPDATE reviews SET source_seq = 200",
+    "UPDATE reviews SET source_event_id = 'MISSING'",
+    "DELETE FROM reviews",
+  ]) {
+    const f = await fixture();
+    try {
+      f.review();
+      expect(await foldScientificRows(await f.read())).toMatchObject({
+        disposition: "disputed",
+        stale: false,
+      });
+      f.sql.exec(mutation);
+      for (const budget of [undefined, BUDGET]) {
+        const rows = await f.read(budget);
+        await expect(
+          foldScientificRows(rows.filter((row) => row.target_version <= 1)),
+        ).rejects.toThrow("Scientific projections disagree with the public event history");
+      }
+    } finally {
+      f.sql.close();
+    }
+  }
+});
+
+test("a hypothesis evidence projection cannot manufacture a claim input", async () => {
+  const f = await fixture();
+  try {
+    f.evidence("A witness concerns a different attack route.", "refutes", {
+      kind: "hypothesis",
+      id: "H-other",
+      version: null,
+    });
+    expect(await foldScientificRows(await f.read())).toMatchObject({
+      disposition: "open",
+      stale: false,
+    });
+    f.sql.exec(
+      "UPDATE evidence SET bears_on_kind = 'claim', bears_on_id = 'C-1', bears_on_version = 1",
+    );
+    for (const budget of [undefined, BUDGET])
+      await expect(foldScientificRows(await f.read(budget))).rejects.toThrow(
+        "Scientific projections disagree with the public event history",
+      );
+  } finally {
+    f.sql.close();
+  }
+});
+
+test("redaction preserves the recorded objection without inventing a projection disagreement", async () => {
+  const f = await fixture();
+  try {
+    const source = f.evidence("A recorded counterexample challenges the exact claim.", "refutes");
+    f.sql
+      .query("UPDATE event_content SET payload_json = NULL, redacted_at = ? WHERE event_id = ?")
+      .run("2026-11-23T00:00:00.000Z", source.id);
+    for (const budget of [undefined, BUDGET])
+      expect(await foldScientificRows(await f.read(budget))).toMatchObject({
+        disposition: "disputed",
+        stale: true,
+      });
+  } finally {
+    f.sql.close();
+  }
+});
+
+test("a known unrelated claim's projection disagreement does not erase the selected claim's history", async () => {
+  const f = await fixture();
+  try {
+    const other = f.evidence("The recorded objection concerns another claim.", "refutes", {
+      kind: "claim",
+      id: "C-2",
+      version: 1,
+    });
+    f.sql
+      .query("UPDATE evidence SET direction = 'supports' WHERE evidence_id = ?")
+      .run(other.evidenceId);
+    for (const budget of [undefined, BUDGET])
+      expect(await foldScientificRows(await f.read(budget))).toMatchObject({
+        disposition: "open",
+        stale: false,
+      });
+    f.evidence("A separate objection concerns the selected claim.", "refutes");
+    expect(await foldScientificRows(await f.read())).toMatchObject({ disposition: "disputed" });
+  } finally {
+    f.sql.close();
+  }
+});
+
+test("known later-version projection drift cannot contaminate an earlier exact-version read", async () => {
+  const f = await fixture();
+  try {
+    f.evidence("The objection concerns only the later statement.", "refutes", {
+      kind: "claim",
+      id: "C-1",
+      version: 2,
+    });
+    f.review(2);
+    f.sql.exec("UPDATE evidence SET direction = 'supports'");
+    f.sql.exec("UPDATE reviews SET verdict = 'verify'");
+    for (const budget of [undefined, BUDGET]) {
+      const historical = (await f.read(budget)).filter((row) => row.target_version <= 1);
+      expect(await foldScientificRows(historical)).toMatchObject({
+        disposition: "open",
+        stale: false,
+      });
+      await expect(foldScientificRows(await f.read(budget, undefined, 2))).rejects.toThrow(
+        "Scientific projections disagree with the public event history",
+      );
+    }
   } finally {
     f.sql.close();
   }

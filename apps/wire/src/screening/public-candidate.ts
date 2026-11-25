@@ -26,10 +26,9 @@ import {
   SynthesizeRequestSchema,
 } from "@asimposium/contracts";
 import type { Env } from "../env";
-import { postureOf, recordRefusal, recordRefusalStatements } from "../moderation/posture";
+import { postureOf, recordRefusal } from "../moderation/posture";
 import {
   openScreeningCase,
-  recordRejectedScreeningCase,
   type ScreeningCaseRow,
   screeningCaseFor,
   sponsorIdFromCaseActor,
@@ -131,16 +130,19 @@ function supportsPublishedWarning(
     // bibliography exports and literature packs that retain their own notice.
     (kind === "citation" &&
       (holdContext?.route === "citations" || holdContext?.route === "citations/correct")) ||
-    // Original hypothesis work has an exact-publication notice on every read
-    // and pack. Lifecycle and kill statements remain separate held kinds.
+    // Original work and later route decisions retain distinct exact-event
+    // notices across canonical faces, human cards, frontier and graveyard packs.
     (kind === "hypotheses" && holdContext?.route === "hypotheses") ||
+    (kind === "hypothesis-kill" && holdContext?.route === "hypothesis-kill") ||
+    (kind === "hypothesis-lifecycle" && holdContext?.route === "hypothesis-lifecycle") ||
     // Negative knowledge carries the same publication notice through its
     // canonical faces, resume/graveyard packs, and the Fellow's private-free history.
     (kind === "dead-end" &&
       (holdContext?.route === "dead-ends" || holdContext?.route === "sponsor-workshop")) ||
-    // Gap filings carry an exact-publication notice through canonical history,
-    // claim/review obligations and formal packs. Settlements are separate kinds.
+    // Filings and settlements retain separate exact-event notices through
+    // canonical history and claim/review obligations; neither notice is proof.
     (kind === "gaps" && holdContext?.route === "gaps") ||
+    (kind === "gap-close" && holdContext?.route === "gaps/close") ||
     // Claim and statement reviews share a classifier kind. Their server-owned
     // writers preserve each publication's notice through canonical faces and packs.
     (kind === "review" &&
@@ -180,12 +182,12 @@ function versionLabel(value: string | undefined): string {
 }
 
 /**
- * Hold, and keep the work: open (or find) the private case for exactly these
+ * Keep refused work: open (or find) the private case for exactly these
  * bytes so a trained reviewer can release or reject it (Fable §7.7: "legitimate
- * work waits rather than vanishes"). Case storage failing never turns a hold
- * into a publication; it only loses the case id from the response.
+ * work waits rather than vanishes"). Case storage failing never changes the
+ * publication refusal; it only loses the case id from the response.
  */
-async function holdWithCase(
+async function retainScreeningCase(
   env: Env,
   input: WorkersAIPromotionInput,
   context: ScreeningHoldContext | undefined,
@@ -193,10 +195,8 @@ async function holdWithCase(
   outcome: "quarantine" | "allow-with-warning" | "provider-unavailable",
   observation: Partial<PublicationScreeningObservation> | undefined,
   posture?: "quarantine-first",
-): Promise<Response> {
-  if (context === undefined || env.DB === undefined) {
-    return screeningHoldResponse(category, undefined, posture);
-  }
+): Promise<string | undefined> {
+  if (context === undefined || env.DB === undefined) return undefined;
   try {
     const binding = await promotionScreeningBinding(input);
     const opened = await openScreeningCase(env.DB, {
@@ -221,10 +221,26 @@ async function holdWithCase(
         "configuration-unavailable",
       ),
     });
-    return screeningHoldResponse(category, opened.caseId, posture);
+    return opened.caseId;
   } catch {
-    return screeningHoldResponse(category, undefined, posture);
+    return undefined;
   }
+}
+
+async function holdWithCase(
+  env: Env,
+  input: WorkersAIPromotionInput,
+  context: ScreeningHoldContext | undefined,
+  category: ScreeningCoarseCategory,
+  outcome: "quarantine" | "allow-with-warning" | "provider-unavailable",
+  observation: Partial<PublicationScreeningObservation> | undefined,
+  posture?: "quarantine-first",
+): Promise<Response> {
+  return screeningHoldResponse(
+    category,
+    await retainScreeningCase(env, input, context, category, outcome, observation, posture),
+    posture,
+  );
 }
 
 /**
@@ -311,82 +327,6 @@ function screeningDeniedResponse(
   return parsed.success ? privateNoStore(parsed.data, 403) : undefined;
 }
 
-/**
- * Persist a durable rejected `screening_cases` row atomically alongside the
- * posture refusal so every direct automated 403 POLICY_DENIED rejection carries
- * an appealable opaque `QC-...` receipt (ADR-18 / qot3).
- */
-async function rejectWithCase(
-  env: Env,
-  input: WorkersAIPromotionInput,
-  context: ScreeningHoldContext | undefined,
-  screening: PublicationScreeningObservation,
-): Promise<Response> {
-  if (context === undefined || env.DB === undefined)
-    return screeningHoldResponse("provider-unavailable");
-  try {
-    const binding = await promotionScreeningBinding(input);
-    const inputDigest = binding.bodyDigest.slice(7);
-    const refusalStatements =
-      context.authorKind === "sponsor" ||
-      sponsorIdFromCaseActor(input.fellowId) !== null ||
-      screening.coarse_category === "provider-unavailable"
-        ? []
-        : await recordRefusalStatements(env.DB, {
-            fellowId: input.fellowId,
-            sponsorId: context.sponsorId,
-            problemId: input.problemId,
-            outcome: "reject",
-            coarseCategory: screening.coarse_category,
-            inputDigest,
-          });
-    const recorded = await recordRejectedScreeningCase(
-      env.DB,
-      {
-        problemId: input.problemId,
-        fellowId: input.fellowId,
-        sponsorId: context.sponsorId,
-        route: context.route,
-        inputDigest,
-        contextDigest: binding.contextDigest.slice(7),
-        candidate: { kind: input.kind, statement: input.statement, falsifier: input.falsifier },
-        contextualInput: binding.contextualInput,
-        coarseCategory: screening.coarse_category,
-        // Retain schema-validated case outcome enum while state='rejected' +
-        // decided_by='platform:symposiarch' marks direct automated rejection.
-        outcome: "quarantine",
-        decisionPath: versionLabel(screening.decision_path),
-        providerStatus: versionLabel(screening.provider_status),
-        modelVersion: versionLabel(screening.model_version),
-        policyVersion: versionLabel(screening.policy_version),
-        configurationDigest: await hex64(
-          screening.configuration_digest,
-          "configuration-unavailable",
-        ),
-      },
-      refusalStatements,
-    );
-    // A conflicting retry cannot advertise an appeal on an undecided or
-    // superseded case, or return a case held under an earlier sponsor.
-    if (recorded.sponsorId !== context.sponsorId)
-      return screeningHoldResponse("provider-unavailable");
-    const category = ScreeningCoarseCategorySchema.safeParse(recorded.coarseCategory);
-    if (recorded.state === "pending")
-      return screeningHoldResponse(
-        category.success ? category.data : "provider-unavailable",
-        recorded.caseId,
-      );
-    if (recorded.state !== "rejected" || !category.success)
-      return screeningHoldResponse("provider-unavailable");
-    return (
-      screeningDeniedResponse(category.data, recorded.caseId) ??
-      screeningHoldResponse("provider-unavailable", recorded.caseId)
-    );
-  } catch {
-    return screeningHoldResponse("provider-unavailable");
-  }
-}
-
 /** Screen one exact public candidate. Returns private provenance to retain,
  * or the hold/deny response the route must return instead of committing. */
 export async function screenPublicCandidate(
@@ -467,10 +407,9 @@ export async function screenPublicCandidate(
   }
   if (decided?.state === "rejected" && decided.humanConfirmedRejection !== false) {
     const category = ScreeningCoarseCategorySchema.safeParse(decided.coarse_category);
-    const caseId = holdContext?.sponsorId === decided.sponsor_id ? decided.case_id : undefined;
     return (
-      (category.success ? screeningDeniedResponse(category.data, caseId) : undefined) ??
-      screeningHoldResponse("provider-unavailable", caseId)
+      (category.success ? screeningDeniedResponse(category.data, decided.case_id) : undefined) ??
+      screeningHoldResponse("provider-unavailable", decided.case_id)
     );
   }
   // Do not buy a model decision while a required publication authority read
@@ -531,7 +470,32 @@ export async function screenPublicCandidate(
     );
   }
   if (screening.decision === "reject") {
-    return rejectWithCase(env, input, holdContext, screening);
+    const denied = screeningDeniedResponse(screening.coarse_category);
+    if (denied === undefined) {
+      return holdWithCase(
+        env,
+        input,
+        holdContext,
+        "provider-unavailable",
+        "provider-unavailable",
+        screening,
+      );
+    }
+    await noteRefusal(env, input, holdContext, "reject", screening.coarse_category);
+    // Refusing publication is not a final human decision. Quarantine the
+    // exact candidate privately for the existing operator queue, preserving
+    // the classifier's model/policy/path without fabricating decided_by or
+    // an operator audit. A confirmed rejection then admits the sponsor's
+    // independent appeal; a release still requires explicit resubmission.
+    const caseId = await retainScreeningCase(
+      env,
+      input,
+      holdContext,
+      screening.coarse_category,
+      "quarantine",
+      screening,
+    );
+    return screeningDeniedResponse(screening.coarse_category, caseId) ?? denied;
   }
   if (
     screening.decision === "quarantine" ||

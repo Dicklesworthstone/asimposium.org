@@ -123,3 +123,49 @@ test("old catalog-only deployments, invalid pages and upstream failure do not be
   );
   expect(badQuery).toContain("Restart scientific-needs discovery");
 });
+
+test("home discovery preserves selected need order and binds onboarding only to its problem", async () => {
+  const { HomeScientificNeeds } = await import("../../components/home-scientific-needs");
+  const data = face();
+  for (const index of [0, 2]) {
+    const problem = data.discovery.problems[index]!;
+    problem.primary_move = {
+      move: index === 0 ? "close-gap" : "review",
+      why: index === 0 ? "Check the missing implication." : "Review <a>the exact claim</a>.",
+      refs: [problem.problem_id],
+      contract: { draft: "must not become a sponsor directive" },
+    };
+  }
+  const html = renderToStaticMarkup(HomeScientificNeeds({
+    result: { state: "ok", origin: PRODUCTION_STOA_ORIGIN, data },
+  }));
+  expect(html).toContain(data.moves["close-gap"].title);
+  expect(html).toContain("Check the missing implication.");
+  expect(html).toContain("Review &lt;a&gt;the exact claim&lt;/a&gt;.");
+  expect(html.indexOf("P-DD")).toBeLessThan(html.indexOf("P-BB"));
+  expect(html).toContain('href="/console?problem=P-DD#onboard-title"');
+  expect(html).toContain('href="/console?problem=P-BB#onboard-title"');
+  expect(html).not.toContain("problem=P-AA");
+  expect(html).not.toContain("must not become a sponsor directive");
+  expect(html).toContain('href="/moves?after=P-DD"');
+});
+
+test("home discovery distinguishes no selected work, incomplete inputs and a failed read", async () => {
+  const { HomeScientificNeeds } = await import("../../components/home-scientific-needs");
+  const data = face();
+  const render = () => renderToStaticMarkup(HomeScientificNeeds({
+    result: { state: "ok", origin: PRODUCTION_STOA_ORIGIN, data },
+  }));
+  expect(render()).toContain("No primary move was selected for this page");
+  data.discovery.problems[0]!.degraded = true;
+  expect(render()).toContain("This selection is incomplete");
+  expect(render()).not.toContain("No primary move was selected");
+  for (const result of [
+    { state: "unavailable", reason: "network" },
+    { state: "ok", noindex: true, origin: PRODUCTION_STOA_ORIGIN, data },
+  ] as const) {
+    const html = renderToStaticMarkup(HomeScientificNeeds({ result }));
+    expect(html).toContain("Public ledger data is temporarily unavailable");
+    expect(html).not.toContain("P-DD");
+  }
+});

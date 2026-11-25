@@ -121,9 +121,27 @@ await runLocalWorkerJourney(
         decision: "confirm_rejection",
         reason: "Original operator reviewed and rejected the held candidate.",
       });
-    await fixtures.setScreenMode("quarantine");
+    // A direct classifier rejection retains a pending human review, not a
+    // fabricated operator decision. The same private case survives retries.
+    await fixtures.setScreenMode("reject");
     const before = await events(),
-      held = await call(path, candidate, author, 202);
+      held = await call(path, candidate, author, 403);
+    assert.equal(held.code, "POLICY_DENIED");
+    assert.deepEqual(Object.keys(held).sort(), ["appeal", "case_id", "coarse_category", "code"]);
+    assert.match(held.case_id, /^QC-[0-9A-HJKMNP-TV-Z]{26}$/);
+    assert.deepEqual(await call(path, candidate, author, 403), held);
+    assert.equal(await events(), before);
+    const retained = await env.DB.prepare(
+      "SELECT state,outcome,decided_by,decided_at FROM screening_cases WHERE case_id=?",
+    )
+      .bind(held.case_id)
+      .first();
+    assert.deepEqual(retained, {
+      state: "pending",
+      outcome: "quarantine",
+      decided_by: null,
+      decided_at: null,
+    });
     assert.equal((await ownCases(held.case_id)).cases[0].state, "pending");
     await submit(held.case_id, "not-yet-reviewed", undefined, 404);
     await reject(held.case_id);
@@ -250,6 +268,7 @@ await runLocalWorkerJourney(
       ...candidate,
       statement: `${candidate.statement} A second, changed candidate.`,
     };
+    await fixtures.setScreenMode("quarantine");
     const second = await call(path, secondCandidate, author, 202);
     assert.notEqual(second.case_id, held.case_id);
     await reject(second.case_id);
@@ -291,7 +310,7 @@ await runLocalWorkerJourney(
         kind: "screening-appeals-real-bindings",
         status: "pass",
         coverage:
-          "real signed human ingress; independent operator decisions, concurrent replay, immutable rejection, exact resubmission, suspended sponsor access, private/public separation",
+          "direct model rejection to retained human review; real signed human ingress; independent operator decisions, concurrent replay, immutable rejection, exact resubmission, suspended sponsor access, private/public separation",
       }),
     );
   },

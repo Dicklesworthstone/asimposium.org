@@ -9,7 +9,13 @@ import {
   deliverDispositionChanges,
 } from "../../src/inbox/disposition-change.ts";
 import { withdrawScientificInput } from "../../src/ledger/scientific-withdrawals.ts";
-import { NOW, SESSION, sha, withdrawalFixture } from "./scientific-withdrawal-fixture.ts";
+import {
+  claimDigest,
+  NOW,
+  SESSION,
+  sha,
+  withdrawalFixture,
+} from "./scientific-withdrawal-fixture.ts";
 
 type Fixture = ReturnType<typeof withdrawalFixture>;
 
@@ -81,7 +87,7 @@ function premisePublications(f: Fixture) {
     dependency_pins: [],
   });
   const digest = sha(content),
-    contentDigest = `sha256:${sha(statement)}`;
+    contentDigest = claimDigest(statement, "conjecture", "Counterexample");
   f.sql.query("UPDATE events SET payload_sha256=? WHERE id='E-claim'").run(digest);
   f.sql
     .query("UPDATE event_content SET payload_sha256=?,payload_json=? WHERE event_id='E-claim'")
@@ -119,7 +125,7 @@ function premisePublications(f: Fixture) {
       problemId,
       version,
     );
-    const contentDigest = `sha256:${sha(statement)}`;
+    const contentDigest = claimDigest(statement, "lemma", "Counterexample");
     f.sql
       .query("INSERT INTO claim_versions VALUES(?,?,?,?,?, 'lemma')")
       .run(problemId, claimId, version, contentDigest, statement);
@@ -589,6 +595,8 @@ test("withdrawing evidence for an old version never announces a change to the cu
       "C-1",
       {
         claim_id: "C-1",
+        base_version: 1,
+        kind: "conjecture",
         statement: "The revised bounded statement.",
       },
       "fellow-b",
@@ -597,7 +605,7 @@ test("withdrawing evidence for an old version never announces a change to the cu
     );
     f.sql
       .query("INSERT INTO claim_versions VALUES('P-DEMO','C-1',2,?,?,'conjecture')")
-      .run(`sha256:${"1".repeat(64)}`, "The revised bounded statement.");
+      .run(claimDigest("The revised bounded statement."), "The revised bounded statement.");
     f.sql.exec("UPDATE disposition_change_deliveries SET state='unchanged'");
     await withdrawScientificInput(
       f.options,

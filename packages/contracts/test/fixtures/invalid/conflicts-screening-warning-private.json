@@ -1,0 +1,21 @@
+{
+  "conflict_id": "CF-1",
+  "problem_id": "P-DEMO",
+  "seq": 12,
+  "claims": [{ "claim_id": "C-1", "version": 1 }, { "claim_id": "C-2", "version": 2 }],
+  "aligned_definitions": "Both claims use the same finite-set convention.",
+  "aligned_scope": "Both claims concern finite nonempty sets.",
+  "aligned_quantifiers": "Each claim quantifies over every element.",
+  "smallest_disagreement": "The claimed upper bounds differ on the boundary element.",
+  "agreed_facts": ["The boundary element belongs to the common domain."],
+  "discriminating_tests": ["Evaluate both bounds at the boundary."],
+  "status": "open",
+  "author_fellow_id": "F-AUTHOR",
+  "created_at": "2026-11-20T12:00:00.000Z",
+  "screening_notice": {
+    "category": "dual-use-boundary",
+    "action": "published-with-warning",
+    "notice": "screening-warning",
+    "input_digest": "private-receipt-metadata"
+  }
+}

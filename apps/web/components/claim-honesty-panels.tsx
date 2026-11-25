@@ -1,5 +1,10 @@
 import Link from "next/link";
+import { ScientificBody } from "@/components/scientific-body";
 import { ScreeningNotice } from "@/components/screening-notice";
+import type {
+  ClaimProofObligationView,
+  ClaimProofObligationsView,
+} from "@/lib/claim-proof-obligations";
 import type {
   ClaimBadges,
   ClaimPageViewModel,
@@ -99,13 +104,13 @@ export function WhatRemainsUnverifiedPanel({
       aria-labelledby="what-remains-unverified-heading"
     >
       <h2 id="what-remains-unverified-heading">What remains unverified?</h2>
+      <ClaimProofObligations obligations={whatRemainsUnverified.proofObligations} />
       <p className="quiet">
-        Epistemic gaps, unexercised verification rubrics, missing independence tiers, and ceiling
-        bounds:
+        Other recorded verification conditions, independence tiers, and evidence bounds:
       </p>
 
       {whatRemainsUnverified.gaps.length === 0 ? (
-        <p className="quiet">No open verification gaps recorded for this statement version.</p>
+        <p className="quiet">No additional verification conditions are listed in this view.</p>
       ) : (
         <ul className="gaps-list">
           {whatRemainsUnverified.gaps.map((gap) => (
@@ -146,6 +151,158 @@ export function WhatRemainsUnverifiedPanel({
           </ul>
         </div>
       )}
+    </section>
+  );
+}
+
+const OBLIGATION_STATUS = {
+  open: "Open obligation",
+  "closed-by": "Recorded settlement",
+  withdrawn: "Withdrawn obligation",
+  unavailable: "Status unavailable",
+} as const;
+
+function ClaimProofObligationCard({ gap }: { readonly gap: ClaimProofObligationView }) {
+  return (
+    <li className="claim-card" data-gap-status={gap.status}>
+      <h4>
+        <Link href={gap.href} prefetch={false}>
+          {gap.id}
+        </Link>{" "}
+        · {OBLIGATION_STATUS[gap.status]}
+      </h4>
+      <p className="quiet">
+        {gap.path.length === 1
+          ? "Obligation on this exact statement"
+          : "Obligation on a pinned premise"}
+        :{" "}
+        {gap.path.map((step, index) => (
+          <span key={step.target}>
+            {index === 0 ? "" : " → "}
+            <Link href={step.href} prefetch={false}>
+              <code>{step.target}</code>
+            </Link>
+          </span>
+        ))}
+      </p>
+      {gap.obligation === null || gap.closesWhat === null ? (
+        <p>The complete obligation text was omitted from this face. Read its pinned record.</p>
+      ) : (
+        <div data-untrusted="true">
+          <ScreeningNotice notice={gap.screeningNotice} />
+          <h5>Missing step</h5>
+          <ScientificBody body={gap.obligation} namespace={`obligation-${gap.id}`} />
+          <h5>What closing it would establish</h5>
+          <ScientificBody body={gap.closesWhat} namespace={`obligation-result-${gap.id}`} />
+        </div>
+      )}
+      {gap.closedBy !== null && (
+        <p>
+          Submitted closing reference:{" "}
+          {gap.closingHref === null ? (
+            <code>{gap.closedBy}</code>
+          ) : (
+            <Link href={gap.closingHref} prefetch={false}>
+              {gap.closedBy}
+            </Link>
+          )}
+          .
+          {gap.closedBy.startsWith("E-") &&
+            " Evidence is read with current visibility and withdrawal."}
+        </p>
+      )}
+      <p className="quiet">
+        Filed at #{gap.filing.seq}
+        {gap.filing.fellow_id === null ? "" : ` by ${gap.filing.fellow_id}`}.
+        {gap.lastEvent.event_id !== gap.filing.event_id &&
+          ` Latest recorded transition: #${gap.lastEvent.seq}.`}{" "}
+        <Link href={gap.href} prefetch={false}>
+          Read the obligation and its recorded history
+        </Link>
+        .
+      </p>
+    </li>
+  );
+}
+
+function ClaimProofObligations({
+  obligations,
+}: {
+  readonly obligations: ClaimProofObligationsView;
+}) {
+  const unresolved = obligations.records.filter(
+    (gap) => gap.status === "open" || gap.status === "unavailable",
+  );
+  const settled = obligations.records.filter(
+    (gap) => gap.status === "closed-by" || gap.status === "withdrawn",
+  );
+  return (
+    <section
+      id="claim-proof-obligations"
+      aria-labelledby="claim-proof-obligations-heading"
+      data-obligation-coverage={obligations.coverage}
+    >
+      <h3 id="claim-proof-obligations-heading">Recorded proof obligations</h3>
+      <p>
+        Missing steps on this statement and its pinned premises are shown at the same ledger
+        snapshot. A recorded settlement names submitted closing work; it is not independent
+        verification. An empty inventory does not establish mathematical completeness.
+      </p>
+      {obligations.counts !== null && (
+        <p className="quiet">
+          {obligations.counts.examined} problem-wide filing(s) examined;{" "}
+          {obligations.counts.relevant} relevant to this statement or its premises.{" "}
+          {obligations.counts.unresolved} unresolved and {obligations.counts.settled} settled in
+          that scan. {obligations.records.length} record(s) displayed here.
+        </p>
+      )}
+      {obligations.notices.length > 0 && (
+        <ul className="quiet">
+          {obligations.notices.map((notice) => (
+            <li key={notice}>{notice}</li>
+          ))}
+        </ul>
+      )}
+      {unresolved.length > 0 ? (
+        <ol className="claims-list" aria-label="Unresolved proof obligations">
+          {unresolved.map((gap) => (
+            <ClaimProofObligationCard key={gap.id} gap={gap} />
+          ))}
+        </ol>
+      ) : (
+        <p>
+          {obligations.coverage === "complete"
+            ? "No unresolved proof obligations are recorded in this inventory. Settlements remain subject to independent review."
+            : "No readable unresolved obligations are displayed here; the incomplete inventory cannot establish their absence."}
+        </p>
+      )}
+      {settled.length > 0 && (
+        <details>
+          <summary>Recorded settlements and withdrawals ({settled.length})</summary>
+          <p>
+            A settlement or withdrawal is a recorded action, not a verified proof of the missing
+            step.
+          </p>
+          <ol className="claims-list">
+            {settled.map((gap) => (
+              <ClaimProofObligationCard key={gap.id} gap={gap} />
+            ))}
+          </ol>
+        </details>
+      )}
+      <p>
+        <Link href={obligations.readHref} prefetch={false}>
+          Browse proof-gap history at this snapshot
+        </Link>
+        {obligations.nextHref !== null && (
+          <>
+            {" · "}
+            <Link href={obligations.nextHref} prefetch={false}>
+              Continue to unexamined filings at this snapshot
+            </Link>
+          </>
+        )}
+      </p>
     </section>
   );
 }

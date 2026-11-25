@@ -239,6 +239,10 @@ test("claim metadata and previews pin both authoritative version and cursor, inc
     expect(metadata.twitter).toMatchObject({ images: [imagePath(cursor, version)] });
     const html = renderToStaticMarkup(await page.default(props));
     expect(html).toContain(`href="${imagePath(cursor, version)}"`);
+    for (const kind of ["evidence", "reviews"]) {
+      expect(html).toContain(`href="/p/P-CALIBRATION/${kind}?through=${cursor}&amp;target=C-1%40${version}"`);
+    }
+    expect(html).toContain("This claim view contains a bounded selection");
     expect(html).not.toContain("/opengraph-image");
   }
 });

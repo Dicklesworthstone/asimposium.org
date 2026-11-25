@@ -3,11 +3,13 @@ import Image from "next/image";
 import Link from "next/link";
 
 import { auth, signIn, signOut } from "@/auth";
+import { HomeScientificNeeds } from "@/components/home-scientific-needs";
 import { PublicReadNotice } from "@/components/public-read-unavailable";
 import {
   stoaFetchAreasIndex,
   stoaFetchNowStrip,
   stoaFetchProblemsIndex,
+  stoaFetchPublicMoves,
 } from "@/lib/public-ledger";
 import { SITE } from "@/lib/site";
 
@@ -44,11 +46,12 @@ const SESSION_LOOP: readonly {
 const SECTION_MARKS = ["α", "β", "γ", "δ", "ε", "ζ", "η", "θ"] as const;
 
 export default async function Home() {
-  const [session, nowData, areasIndex, problemsIndex] = await Promise.all([
+  const [session, nowData, areasIndex, problemsIndex, publicMoves] = await Promise.all([
     auth(),
     stoaFetchNowStrip(),
     stoaFetchAreasIndex(),
     stoaFetchProblemsIndex(),
+    stoaFetchPublicMoves(),
   ]);
 
   const who = session?.user?.name ?? session?.user?.email ?? null;
@@ -205,6 +208,8 @@ export default async function Home() {
           </ol>
         </section>
 
+        <HomeScientificNeeds result={publicMoves} />
+
         <div className="home-grid">
           {/* Living Scientific Instrument / Now Strip Preview */}
           <section className="now-strip-preview" aria-labelledby="now-strip-heading">
@@ -273,6 +278,10 @@ export default async function Home() {
                   <p className="quiet">
                     Open for frontier agent investigation. Inspect typed claims, falsifiers, and
                     independent reviews.
+                  </p>
+                  <p className="quiet">
+                    Problem lifecycle: <strong>{livingProblem.status}</strong>. Inspect its recorded
+                    claims, falsifiers and reviews.
                   </p>
                 </div>
               </section>

@@ -15,7 +15,6 @@ import {
   FellowTokenSchema,
   type HelloAssignment,
   type HelloOpenSession,
-  type HelloUnreadReview,
   LIFECYCLE_TRANSFER_SCHEMA_ID,
   MintEnrollmentRequestSchema,
   MintEnrollmentResponseSchema,
@@ -95,6 +94,14 @@ import { readActiveDirectivePage } from "../directives/active-page.ts";
 import { enqueueSponsorNotificationIfConfigured } from "../email/transactional-email.ts";
 import type { Env } from "../env.ts";
 import { validatedProblem } from "../http/envelope.ts";
+import {
+  confirmInboxReadAuthority,
+  getInboxFeedbackSummary,
+  type InboxFeedbackSummary,
+  type InboxReadAuthority,
+  InboxReadAuthorityError,
+  revalidateInboxAuthority,
+} from "../inbox/store.ts";
 import {
   ProjectionRepairRefusedError,
   projectionDoctorReport,
@@ -1415,7 +1422,6 @@ export async function buildHelloResponse(input: {
 
   let assignments: HelloAssignment[] | undefined;
   let openSessions: HelloOpenSession[] | undefined;
-  let unreadReviews: HelloUnreadReview[] | undefined;
   let protocolDigest: string | undefined;
   let protocolAcknowledged: boolean | undefined;
 
@@ -1483,45 +1489,8 @@ export async function buildHelloResponse(input: {
         }));
       }
 
-      // 3. Unread reviews
-      const reviewRows = await db
-        .prepare(
-          `SELECT r.review_id, r.problem_id, r.target_claim_id, r.target_version,
-                  r.reviewer_fellow_id, r.verdict, r.created_at
-           FROM reviews r
-           JOIN claim_versions cv
-             ON r.problem_id = cv.problem_id
-             AND r.target_claim_id = cv.claim_id
-             AND r.target_version = cv.version
-           WHERE cv.editor_fellow_id = ?
-             AND r.reviewer_fellow_id <> ?
-           ORDER BY r.created_at DESC
-           LIMIT 50`,
-        )
-        .bind(binding.fellowId, binding.fellowId)
-        .all<{
-          review_id: string;
-          problem_id: string;
-          target_claim_id: string;
-          target_version: number;
-          reviewer_fellow_id: string;
-          verdict: string;
-          created_at: string;
-        }>();
-
-      if (reviewRows.results) {
-        unreadReviews = reviewRows.results.map((r) => ({
-          review_id: r.review_id,
-          problem_id: r.problem_id,
-          target_claim_id: r.target_claim_id,
-          target_version: r.target_version,
-          reviewer_fellow_id: r.reviewer_fellow_id,
-          verdict: r.verdict,
-          created_at: String(r.created_at),
-        }));
-      }
-
-      // 4. Protocol ACK
+      // 3. Protocol ACK. Inbox feedback is read at the final response boundary,
+      // after any awaited move selection, using its current source authority.
       if (currentProtocolDigest !== undefined) {
         const ackRow = await db
           .prepare(`SELECT 1 FROM fellow_protocol_acks WHERE fellow_id = ? AND protocol_digest = ?`)
@@ -1593,6 +1562,12 @@ export async function buildHelloResponse(input: {
       reason: directiveReadRequired
         ? directiveReason
         : "No active sponsor instructions for this problem at hello. Your working pack checks again.",
+    },
+    {
+      action: "read" as const,
+      url: `${service.stoaOrigin}/v1/inbox?unread_only=true`,
+      reason:
+        "Inbox feedback is currently unavailable. Read your inbox before acting; do not infer that no notices are waiting. Reading does not acknowledge notices.",
     },
     ...(protocolAcknowledged === false
       ? [
@@ -1707,10 +1682,44 @@ export async function buildHelloResponse(input: {
     ...(input.readBudget === undefined ? {} : { read_budget: input.readBudget }),
     ...(assignments !== undefined ? { assignments } : {}),
     ...(openSessions !== undefined ? { open_sessions: openSessions } : {}),
-    ...(unreadReviews !== undefined ? { unread_reviews: unreadReviews } : {}),
     ...(protocolDigest !== undefined ? { protocol_digest: protocolDigest } : {}),
     ...(protocolAcknowledged !== undefined ? { protocol_acknowledged: protocolAcknowledged } : {}),
     next_actions: nextActions,
+  });
+}
+
+/** Complete private discovery only after all other awaited work. The base
+ * response deliberately contains no historical review projection fallback.
+ * An unavailable source is unknown; changed authority refuses the whole read. */
+export async function completeHelloInboxFeedback(
+  response: EnrollmentHelloResponse,
+  db: D1Database | undefined,
+  authority: InboxReadAuthority,
+): Promise<EnrollmentHelloResponse> {
+  let feedback: InboxFeedbackSummary | undefined;
+  try {
+    if (db !== undefined) feedback = await getInboxFeedbackSummary(db, authority);
+    else await revalidateInboxAuthority(authority);
+  } catch (error) {
+    if (error instanceof InboxReadAuthorityError) throw error;
+    // Existing identity/session discovery remains useful when inbox sources
+    // are unavailable. That failed await may itself race a revoke or transfer;
+    // prove current authority again without depending on the failed source.
+    if (db !== undefined) await confirmInboxReadAuthority(db, authority);
+    else await revalidateInboxAuthority(authority);
+  }
+  const { inbox: _previousInbox, unread_reviews: _previousReviews, ...base } = response;
+  return EnrollmentHelloResponseSchema.parse({
+    ...base,
+    ...feedback,
+    next_actions: response.next_actions.map((action) =>
+      feedback !== undefined && action.url.endsWith("/v1/inbox?unread_only=true")
+        ? {
+            ...action,
+            reason: `${feedback.inbox.unacknowledged_count} unacknowledged notices. Read feedback before acting; page with next_cursor while has_more, then acknowledge received notice IDs. Reading alone does not acknowledge them.`,
+          }
+        : action,
+    ),
   });
 }
 
@@ -2366,7 +2375,7 @@ export function createEnrollmentRouter(options: EnrollmentRouterOptions): Hono<{
       const db = options.db ?? env.DB;
       const readBudget = await admitFellowRead(db, binding.fellowId);
       if (readBudget instanceof Response) return readBudget;
-      const response = await buildHelloResponse({
+      const base = await buildHelloResponse({
         binding,
         service: options.service,
         db,
@@ -2374,7 +2383,11 @@ export function createEnrollmentRouter(options: EnrollmentRouterOptions): Hono<{
         sponsorPromotionRateLimit:
           options.sponsorPromotionRateLimit ?? env.SPONSOR_PROMOTION_RATE_LIMIT,
       });
-      await logMegaCommand({
+      const response = await completeHelloInboxFeedback(base, db, {
+        binding,
+        revalidate: () => options.service.credentialBinding(token ?? ""),
+      });
+      const logging = logMegaCommand({
         endpoint: "hello",
         startedAt,
         status: 200,
@@ -2382,11 +2395,25 @@ export function createEnrollmentRouter(options: EnrollmentRouterOptions): Hono<{
         permissions: response.granted_scopes,
         projection: response,
       });
+      try {
+        c.executionCtx.waitUntil(logging);
+      } catch {
+        // In-process callers have no Worker execution context. The logger is
+        // failure-contained; no await may stale the final private snapshot.
+      }
       return c.json(response, 200, {
         "cache-control": "private, no-store",
         ...fellowReadBudgetHeaders(readBudget),
       });
     } catch (error) {
+      if (error instanceof InboxReadAuthorityError)
+        return problem(
+          401,
+          "FELLOW_TOKEN_INVALID",
+          "Fellow bearer token is not accepted",
+          "The current credentials cannot authorize this private read.",
+          "Use a current Fellow bearer token from an explicitly approved enrollment flow.",
+        );
       const operational = enrollmentOperationalFailure(error);
       return operational ?? enrollmentUnavailableResponse();
     }

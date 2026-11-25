@@ -7,7 +7,7 @@ import {
 import type { D1Database } from "@cloudflare/workers-types";
 import { eventContentHiddenSql, hiddenByContentControlSql } from "../krater/public-content.ts";
 import { assessEvidenceClass } from "../ledger/evidence-class.ts";
-import { checkedScientificPayload } from "../ledger/scientific-checks.ts";
+import { checkedScientificPayload, inspectFormalArtifact } from "../ledger/scientific-checks.ts";
 import { normalizeClaimStatement } from "../split/policy.ts";
 
 export const DEAD_END_MOVES_BOUNDARY =
@@ -77,7 +77,7 @@ function exactClaim(id: unknown, version: unknown): string | null {
     : null;
 }
 
-function evidenceContent(payload: Record<string, unknown>) {
+async function evidenceContent(payload: Record<string, unknown>) {
   const candidate = { ...payload };
   for (const key of ["computed_class", "coercion_flags", "caused_by", "sponsor_promotion"])
     delete candidate[key];
@@ -98,7 +98,13 @@ function evidenceContent(payload: Record<string, unknown>) {
     ...(data.kind === "computation"
       ? { computation: { domainOrFloor: data.computation_domain_or_floor } }
       : {}),
-    ...(data.kind === "certificate" ? { certifiedArtifact: {} } : {}),
+    ...(data.kind === "certificate"
+      ? {
+          certifiedArtifact: {
+            shapeCheckDigest: (await inspectFormalArtifact(data.formal_artifact)) ?? undefined,
+          },
+        }
+      : {}),
     selectedHypothesis: data.selected_hypothesis_id !== undefined,
     mode: data.mode,
   });
@@ -219,7 +225,7 @@ export async function selectRecordDeadEndMove(
       if (source.type !== "evidence.created") continue;
       if (source.object_version !== 1 || !/^E-[0-9A-HJKMNP-TV-Z]{1,78}$/.test(source.object_id))
         return unavailable;
-      const { data, assessment } = evidenceContent(payload);
+      const { data, assessment } = await evidenceContent(payload);
       const target =
         data.bears_on_kind === "claim" ? exactClaim(data.bears_on_id, data.bears_on_version) : null;
       const candidate = target ? candidates.get(target) : undefined;

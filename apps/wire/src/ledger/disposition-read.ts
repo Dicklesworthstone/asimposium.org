@@ -12,6 +12,7 @@ import {
   type ClaimTransitionContext,
   EMPTY_CLAIM_CONTEXT,
   evaluateClaimTransition,
+  hasStatementDefect,
   type VerifiedReview,
 } from "./dispositions.ts";
 
@@ -81,6 +82,9 @@ export type VersionedClaimTimelineEvent =
         readonly evidenceId: string;
         readonly unansweredHours: number;
       };
+      /** Exact counterevidence independently found mismatched by a retained,
+       * weighted verification. This review gives no positive support credit. */
+      readonly resolvedRefutationEvidenceId?: string;
     }
   | {
       readonly kind: "refuting-evidence";
@@ -127,10 +131,7 @@ function reviewFinding(
   verdict: string,
   rubric?: readonly string[],
 ): VerifiedReview["finding"] | null {
-  if (
-    rubric &&
-    (rubric.includes("statement-defect") || rubric.includes("statement-fails-review"))
-  ) {
+  if (hasStatementDefect(rubric)) {
     return "statement-defect";
   }
   if (verdict === "confirm" || verdict === "reproduces") return "support";
@@ -164,6 +165,9 @@ export function computeCurrentClaimDisposition(
   let hasCertifiedArtifact = false;
   const qualifyingArtifacts = new Set<string>();
   const seenAttemptIds = new Set<string>();
+  const unresolvedEvidence = new Set<string>();
+  const unresolvedReviews = new Set<string>();
+  let reductionTarget: string | undefined;
 
   const context = (): ClaimTransitionContext => ({
     recorded_refutation_attempts: recordedRefutationAttempts,
@@ -222,6 +226,9 @@ export function computeCurrentClaimDisposition(
       hasCertifiedArtifact = false;
       qualifyingArtifacts.clear();
       seenAttemptIds.clear();
+      unresolvedEvidence.clear();
+      unresolvedReviews.clear();
+      reductionTarget = event.targetClaimId;
       apply({ kind: "promote" });
       if (event.targetClaimId) {
         apply({ kind: "reduced-to", target_claim_id: event.targetClaimId });
@@ -250,6 +257,9 @@ export function computeCurrentClaimDisposition(
       hasCertifiedArtifact = false;
       qualifyingArtifacts.clear();
       seenAttemptIds.clear();
+      unresolvedEvidence.clear();
+      unresolvedReviews.clear();
+      reductionTarget = event.targetClaimId;
       continue;
     }
     if (currentVersion === null || event.targetVersion !== currentVersion) {
@@ -264,6 +274,7 @@ export function computeCurrentClaimDisposition(
     }
     if (event.kind === "claim-reduced") {
       apply({ kind: "reduced-to", target_claim_id: event.targetClaimId });
+      if (currentDisposition() === "reduced-to") reductionTarget = event.targetClaimId;
       continue;
     }
     if (event.kind === "author-concession") {
@@ -303,6 +314,7 @@ export function computeCurrentClaimDisposition(
       continue;
     }
     if (event.kind === "refuting-evidence") {
+      unresolvedEvidence.add(event.evidenceId);
       apply({
         kind: "evidence-refuted",
         evidence_id: event.evidenceId,
@@ -313,8 +325,36 @@ export function computeCurrentClaimDisposition(
       continue;
     }
     if (event.kind === "review-created") {
-      if (!event.carriesWeight) continue;
       const finding = reviewFinding(event.verdict, event.rubric);
+      if (event.resolvedRefutationEvidenceId !== undefined) {
+        if (
+          finding !== "dispute" &&
+          finding !== "statement-defect" &&
+          event.carriesWeight &&
+          event.review.tier !== "T0" &&
+          currentDisposition() === "disputed" &&
+          unresolvedEvidence.delete(event.resolvedRefutationEvidenceId)
+        ) {
+          // A failed counterexample is neither a surviving falsification check
+          // nor a substitute for any independent review of the claim itself.
+          recordedRefutationAttempts = Math.max(0, recordedRefutationAttempts - 1);
+          apply({
+            kind: "refutation-resolved",
+            evidence_id: event.resolvedRefutationEvidenceId,
+            remaining_evidence_objections: unresolvedEvidence.size,
+            remaining_review_objections: unresolvedReviews.size,
+          });
+          if (currentDisposition() === "open") {
+            if (reductionTarget) apply({ kind: "reduced-to", target_claim_id: reductionTarget });
+            else {
+              const support = verifiedReviews.at(-1);
+              if (support) applySupport(support);
+            }
+          }
+        }
+        continue;
+      }
+      if (!event.carriesWeight) continue;
       if (finding === null) continue;
       if (
         finding === "support" &&
@@ -325,6 +365,7 @@ export function computeCurrentClaimDisposition(
         hasCertifiedArtifact = true;
       }
       const review: VerifiedReview = { ...event.review, finding };
+      if (finding === "dispute") unresolvedReviews.add(review.review_id);
       if (finding === "support") applySupport(review);
       else apply({ kind: "review-verified", review });
       if (finding === "dispute" && event.confirmedRefutation) {

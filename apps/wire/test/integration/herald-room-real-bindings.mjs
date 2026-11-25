@@ -2,14 +2,16 @@ import assert from "node:assert/strict";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 
 // Herald rooms (beads asimposiumorg-f37v / W7) on real local Workerd with the
-// exported HeraldRoom Durable Object, D1 migration 0078 and the production
+// exported HeraldRoom Durable Object, D1 migrations 0078/0157 and the production
 // heraldRoomFetch/scheduleHeraldDelivery layering. A live sponsor-approved
 // Fellow credential upgrades to a WebSocket (101) with the room protocol; a
 // committed public write then reaches the open socket. Missing upgrade,
 // missing or bogus credentials are refused without a socket.
 //
-// A database missing migration 0078 refuses the upgrade fail-closed (503
-// ROOM_UNAVAILABLE) instead of opening a room no write would ever wake.
+// A database missing room delivery or moderation-wake schema refuses the
+// upgrade fail-closed instead of opening a room that misses a withdrawal.
+// Whole-problem moderation evicts idle sockets without advancing public_seq;
+// object moderation preserves room access, and a later restoration reopens it.
 // A 45-day dormant transition evicts a settled live socket; public tails stay
 // readable, and accepted evidence reactivates the room through migration 0118.
 //
@@ -18,7 +20,7 @@ import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 const PROTOCOL = "asimposium.room.v1";
 
 await runLocalWorkerJourney(
-  async ({ call, enroll, sponsorCall, worker, origin, userAgent, env, fixtures }) => {
+  async ({ call, enroll, sponsorCall, operatorCall, worker, origin, userAgent, env, fixtures }) => {
     const OWNER = "usr_herald_owner";
     const author = await enroll("herald-author", OWNER);
     const viewer = await enroll("herald-viewer", "usr_herald_viewer");
@@ -55,7 +57,7 @@ await runLocalWorkerJourney(
         "SELECT type, name, sql FROM sqlite_master WHERE name LIKE 'herald_room_%' AND sql IS NOT NULL ORDER BY CASE type WHEN 'table' THEN 0 ELSE 1 END",
       ).all()
     ).results;
-    assert.equal(heraldObjects.length, 7, "0078 creates one table, one index and five triggers");
+    assert.equal(heraldObjects.length, 8, "0078/0157 create one table, one index and six triggers");
     for (const { type, name } of [...heraldObjects].reverse())
       await env.DB.prepare(`DROP ${type.toUpperCase()} "${name}"`).run();
     const unmigrated = await open({
@@ -65,7 +67,20 @@ await runLocalWorkerJourney(
     });
     assert.equal(unmigrated.status, 503, "a database without 0078 refuses the room");
     assert.equal((await unmigrated.json()).code, "ROOM_UNAVAILABLE");
-    for (const { sql } of heraldObjects) await env.DB.prepare(sql).run();
+    const moderationWake = heraldObjects.find(
+      ({ name }) => name === "herald_room_content_control_insert",
+    );
+    assert.ok(moderationWake);
+    for (const { name, sql } of heraldObjects)
+      if (name !== moderationWake.name) await env.DB.prepare(sql).run();
+    const missingModerationWake = await open({
+      upgrade: "websocket",
+      authorization: `Bearer ${viewer}`,
+      "sec-websocket-protocol": PROTOCOL,
+    });
+    assert.equal(missingModerationWake.status, 503, "missing moderation wake refuses the room");
+    assert.equal((await missingModerationWake.json()).code, "ROOM_UNAVAILABLE");
+    await env.DB.prepare(moderationWake.sql).run();
 
     // Refusals: non-upgrade gets 426; S-6 cookies and bogus bearer credentials get 401.
     // Per Fable §11 (kfag), public problem rooms also accept unauthenticated human viewers
@@ -166,7 +181,7 @@ await runLocalWorkerJourney(
       201,
     );
     const before = messages.length;
-    await call(
+    const promoted = await call(
       `/v1/sessions/${session}/promote`,
       {
         workshop_id: draft.workshop_id,
@@ -184,7 +199,6 @@ await runLocalWorkerJourney(
     assert.ok(!messages.join("").includes("Private."), "no workshop bytes reach the room");
     assert.deepEqual(closes, [], "a well-behaved client is never closed");
     assert.ok(tails.length >= 1 && tails.every((status) => status === 200), `tail reads: ${tails}`);
-    socket.close(1000, "done");
     const settled = await Promise.allSettled(pending);
     assert.deepEqual(
       settled
@@ -193,6 +207,56 @@ await runLocalWorkerJourney(
       [],
       "every tail read and acknowledgement completed",
     );
+    await new Promise((resolve) => setTimeout(resolve, 500));
+
+    // Moderation is not scientific progress. An object hide keeps the problem
+    // room usable; a sponsor's whole-problem hide must wake and evict the idle
+    // socket through the same committed queue without needing another event.
+    const headBeforeHide = await env.DB.prepare("SELECT public_seq FROM problems WHERE id = ?")
+      .bind(problem)
+      .first();
+    const control = (target_kind, target_id, action) =>
+      operatorCall("POST", "/v1/operators/content-control", "operator.content.control", {
+        target_kind,
+        target_id,
+        action,
+        reason: "Exercise room visibility against current moderation.",
+      });
+    await control("claim", `${problem}/${promoted.claim_id}`, "hide");
+    await fixtures.deliverHeraldTick();
+    assert.equal(socket.readyState, 1, "a claim hide does not close its public problem room");
+    await control("claim", `${problem}/${promoted.claim_id}`, "restore");
+    await sponsorCall(OWNER, "POST", `/v1/sponsors/problems/${problem}/hide`, "problem.hide", {
+      problem_id: problem,
+      reason: "Withdraw the problem while its room is idle.",
+      step_up_authenticated_at: Math.floor(Date.now() / 1000),
+    });
+    assert.deepEqual(
+      await env.DB.prepare("SELECT public_seq FROM problems WHERE id = ?").bind(problem).first(),
+      headBeforeHide,
+      "hiding a problem preserves its scientific cursor",
+    );
+    const hidden = await open({
+      upgrade: "websocket",
+      authorization: `Bearer ${viewer}`,
+      "sec-websocket-protocol": PROTOCOL,
+    });
+    assert.equal(hidden.status, 404, "current moderation refuses a new connection");
+    await hidden.text();
+    assert.equal((await fixtures.deliverHeraldTick()).retry, 0);
+    for (let i = 0; i < 100 && closes.length === 0; i++)
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.ok(closes[0]?.startsWith("1008:"), "the committed hide evicts the idle room");
+    await control("problem", problem, "restore");
+    const restored = await open({
+      upgrade: "websocket",
+      authorization: `Bearer ${viewer}`,
+      "sec-websocket-protocol": PROTOCOL,
+    });
+    assert.equal(restored.status, 101, "the current restoration reopens the room");
+    assert.ok(restored.webSocket);
+    restored.webSocket.accept();
+    restored.webSocket.close(1000, "done");
 
     // A true dormancy transition evicts an existing Durable Object connection.
     // The ledger remains readable, and an ordinary evidence write reopens it.
@@ -307,7 +371,7 @@ await runLocalWorkerJourney(
         status: "pass",
         messages: messages.length,
         boundary:
-          "local Workerd Durable Object + D1 0078/0118; no deployed room or hibernation claim",
+          "local Workerd Durable Object + D1 0078/0118/0157; no deployed room or hibernation claim",
       }),
     );
   },

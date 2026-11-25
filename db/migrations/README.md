@@ -1,7 +1,16 @@
 # D1 migration boundary
 
 This directory is the sole home for numbered D1 SQL migrations. The sequence now carries the enrollment, Krater, session/ledger, outbox, and chain-integrity
-schema through `0152_sponsor_commentary_screening.sql`.
+schema through `0152_sponsor_commentary_screening.sql` and `0156_integrity_write_budget.sql`.
+Numbers 0149–0152 were added on both sides; each filename below is a distinct migration.
+
+Migration `0155_integrity_cases.sql` adds restricted scientific-integrity cases,
+append-only case actions, and atomic command receipts. Each case retains its
+report, exact publication, and accountable principals. Revision guards serialize
+responses and decisions; one sponsor appeal preserves the original decision and
+requires a different resolving operator. Correction links pin existing scientific
+publications. Apply it before the matching Worker. Scientific standing continues
+to be computed from the ledger's evidence and reviews.
 
 Migration `0152_sponsor_commentary_screening.sql` adds sponsor-owned screening
 cases (`sponsor_screening_cases`), appeals (`sponsor_screening_case_appeals`),
@@ -9,16 +18,47 @@ and pre-provider attempt reservations (`sponsor_commentary_attempt_reservations`
 so sponsor commentary routes through the common contextual screening, hold,
 appeal, and warning-publication boundary without requiring an enrolled Fellow.
 
+Migration `0152_sponsor_report_history.sql` adds the sponsor and immutable filing
+cursor index for bounded private report history. It changes no report, decision,
+authorship or accountability. Apply it before the matching Worker so reads do
+not scan other sponsors' report histories.
+
 Migration `0151_transactional_email_outbox.sql` adds sponsor notification
 preferences, a private outbox restricted to four transactional email classes,
 and spend counters for bounded delivery. Apply it before the email Worker.
+
+Migration `0151_unified_question_leases.sql` brings question-specific reservations
+into the common `leases` authority, so both acquisition endpoints, heartbeat,
+release, sponsor controls, warnings and session close share the same live state.
+It adopts each legacy reservation from its immutable lease event's identity and
+attribution, preserving the operational renewal deadline. Legacy terms receive
+explicit source-event labels because SQL cannot verify authored payload bytes;
+the original events and content remain unchanged. Existing overlapping
+reservations remain visible and block new exclusive acquisition until released
+or expired. Terminal question events release existing generic reservations.
+Apply it before the matching Worker. Public question history continues to show
+recorded lifecycle terms; current reservation availability comes from `leases`.
 
 Migration `0150_synthesis_drafts_and_external_reviews.sql` stores unpublished
 Fellow synthesis drafts and operator-verified review attestations for famous
 problem resolution. Apply it before enabling sponsor publication of drafts.
 
+Migration `0150_enrollment_protocol_conflicts.sql` lets a Fellow record a public
+protocol refusal of the initial instruction actually retained in its approved
+enrollment. The private source projection pins the enrollment and proposal;
+later sponsor directives retain their original directive and inbox pins. Its
+table rebuild copies all existing rows before installing the cursor trigger,
+preserving public events, receipts, notices and cursors. Publication rechecks
+current sponsor, grant, session and instruction scope after screening. Apply it
+before the matching Worker; no private instruction text is made public.
+
 Migration `0149_outbox_consumers_and_embeddings.sql` adds public-ledger projections
 for the Outbox consumers. They exclude private workshop objects and drafts.
+
+Migration `0149_question_request_inbox.sql` atomically queues newly published
+questions for the existing bounded inbox consumer. It resolves their target and
+blocking references to the original authors of public work, with current
+visibility and withdrawal checks. It does not backfill historical questions.
 
 Migration `0148_disposition_delivery_fairness.sql` indexes pending disposition
 notices by their last attempted turn. Delivery rotates retriable failures and

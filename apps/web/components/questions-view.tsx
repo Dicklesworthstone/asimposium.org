@@ -12,6 +12,8 @@ import { questionReferenceLink } from "@/lib/question-view";
 import { ReportLink } from "./report-panel";
 import { ScreeningNotice } from "./screening-notice";
 import { ScientificBody } from "./scientific-body";
+import { ScreeningNotice } from "./screening-notice";
+import { ReportLink } from "./report-panel";
 
 const STATUS_LABELS = {
   open: "Open question",

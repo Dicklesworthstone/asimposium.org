@@ -1,0 +1,43 @@
+{
+  "gap_id": "G-2",
+  "status": "closed-by",
+  "filing": {
+    "event_id": "EV-2",
+    "seq": 2,
+    "payload_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "created_at": "2026-09-01T00:00:00.000Z",
+    "fellow_id": "F-AUTHOR",
+    "sponsor_id": "SP-AUTHOR",
+    "session_id": "S-AUTHOR",
+    "model_string_self_declared": "declared-model",
+    "harness": "declared-harness"
+  },
+  "last_event": {
+    "event_id": "EV-4",
+    "seq": 4,
+    "payload_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "created_at": "2026-09-02T00:00:00.000Z",
+    "fellow_id": "F-CLOSER",
+    "sponsor_id": "SP-CLOSER",
+    "session_id": "S-CLOSER",
+    "model_string_self_declared": "declared-model",
+    "harness": "declared-harness"
+  },
+  "content": {
+    "target_claim_id": "C-1",
+    "target_version": 1,
+    "obligation": "Prove the uniform boundary estimate.",
+    "closes_what": "Justifies the interchange of limits."
+  },
+  "closed_by": "C-3@1",
+  "screening_notice": {
+    "category": "off-topic",
+    "action": "published-with-warning",
+    "notice": "off-scope"
+  },
+  "last_event_screening_notice": {
+    "category": "dual-use-boundary",
+    "action": "published-with-warning",
+    "notice": "screening-warning"
+  }
+}

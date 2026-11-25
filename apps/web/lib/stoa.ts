@@ -79,12 +79,24 @@ import {
   ReportRequestSchema,
   type ReportResponse,
   ReportResponseSchema,
+  SPONSOR_REPORTS_MAX_RESPONSE_BYTES,
+  type SponsorReportsRequest,
+  SponsorReportsRequestSchema,
+  type SponsorReportsResponse,
+  SponsorReportsResponseSchema,
+  sponsorReportsMatchRequest,
   type SaveProblemBriefRequest,
   SaveProblemBriefRequestSchema,
   SaveProblemBriefResponseSchema,
   ScreeningPromotionDeniedResponseSchema,
   ScreeningPromotionHoldResponseSchema,
   type ScreeningPromotionPolicyResponse,
+  SPONSOR_ACTIVITY_MAX_RESPONSE_BYTES,
+  type SponsorActivityRequest,
+  SponsorActivityRequestSchema,
+  type SponsorActivityResponse,
+  SponsorActivityResponseSchema,
+  sponsorActivityMatchesRequest,
   SPONSOR_INBOX_MAX_RESPONSE_BYTES,
   SPONSOR_WORKSHOP_CURSOR_MAX_RESPONSE_BYTES,
   SPONSOR_WORKSHOP_INDEX_MAX_RESPONSE_BYTES,
@@ -1085,6 +1097,32 @@ export function stoaSponsorDirectives(
   });
 }
 
+/** Current assignments and recorded activity for a currently owned Fellow.
+ * The Worker checks ownership again before releasing this private snapshot. */
+export async function stoaSponsorActivity(
+  principalId: string,
+  request: SponsorActivityRequest,
+): Promise<StoaCall<SponsorActivityResponse>> {
+  const parsed = SponsorActivityRequestSchema.safeParse(request);
+  if (!parsed.success) return { ok: false, reason: "unreachable" };
+  const route = "/v1/sponsors/fellow-activity";
+  return callStoa({
+    method: "POST",
+    route,
+    path: route,
+    action: "fellow.activity.read",
+    principalId,
+    body: JSON.stringify(parsed.data),
+    responseMaxBytes: SPONSOR_ACTIVITY_MAX_RESPONSE_BYTES,
+    parse: (value) => {
+      const page = SponsorActivityResponseSchema.parse(value);
+      if (!sponsorActivityMatchesRequest(principalId, parsed.data, page))
+        throw new TypeError("Fellow activity does not match the signed sponsor or page.");
+      return page;
+    },
+  });
+}
+
 /** One bounded, read-only page for a currently owned Fellow. The selected
  * Fellow, cursor and filter are signed bytes, never ambient browser authority. */
 export async function stoaSponsorInbox(
@@ -1556,6 +1594,31 @@ export function stoaSponsorReport(
     body: JSON.stringify(command),
     idempotencyKey,
     parse: (value) => ReportResponseSchema.parse(value),
+  });
+}
+
+/** Read the accountable sponsor's own report history; never a public cache entry. */
+export async function stoaSponsorReports(
+  principalId: string,
+  request: SponsorReportsRequest,
+): Promise<StoaCall<SponsorReportsResponse>> {
+  const parsed = SponsorReportsRequestSchema.safeParse(request);
+  if (!parsed.success) return { ok: false, reason: "unreachable" };
+  const route = "/v1/sponsors/reports/list";
+  return callStoa({
+    method: "POST",
+    route,
+    path: route,
+    action: "sponsor.reports.list",
+    principalId,
+    body: JSON.stringify(parsed.data),
+    responseMaxBytes: SPONSOR_REPORTS_MAX_RESPONSE_BYTES,
+    parse: (value) => {
+      const page = SponsorReportsResponseSchema.parse(value);
+      if (!sponsorReportsMatchRequest(principalId, parsed.data, page))
+        throw new TypeError("Report history does not match the signed sponsor or continuation.");
+      return page;
+    },
   });
 }
 

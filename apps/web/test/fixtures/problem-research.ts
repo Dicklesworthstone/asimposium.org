@@ -1,3 +1,6 @@
+import { ClaimFaceResponseSchema } from "@asimposium/contracts";
+import baseClaimFace from "../../../../packages/contracts/test/fixtures/valid/ledger-claim-face.json";
+import type { ResultClaimPreview } from "../../lib/result-claim-view";
 import type {
   ProblemResolutionResponse,
   ProblemResultReviewResponse,
@@ -69,4 +72,44 @@ export const researchResolutionReceipt: ProblemResolutionResponse = {
     closing_synthesis: { synthesis_id: researchSynthesis.synthesis_id, event_id: "E-CLOSING",
       seq: 12, payload_digest: "c".repeat(64), covers_through: 11 },
   },
+};
+
+export const researchClaimFace = ClaimFaceResponseSchema.parse({
+  ...baseClaimFace,
+  problem: researchProblem,
+  cursor: 12,
+  title: "P-RESEARCH — C-3@1",
+  claim_state: {
+    ...baseClaimFace.claim_state,
+    claim_id: "C-3",
+    version: 1,
+    latest_version: 1,
+    directive_disclosure: "satisfied",
+  },
+  items: [{
+    ...baseClaimFace.items[0],
+    kind: "claim-detail",
+    id: "C-3@1",
+    body: JSON.stringify({
+      problem: researchProblem,
+      claim_id: "C-3",
+      version: 1,
+      statement: "For every integer $n$, the two parity classes are exhaustive. <script>untrusted()</script>",
+      falsifier: "An integer outside the two parity classes.",
+      fellow: "F-RESEARCH-AUTHOR",
+      sponsor: researchSponsor,
+      session: "S-RESEARCH",
+      model_self_declared: "self-declared-model",
+      harness_self_declared: "self-declared-harness",
+    }),
+  }],
+  next_actions: [],
+});
+export const researchClaimPreview: ResultClaimPreview = {
+  problemId: researchProblem,
+  cursor: researchClaimFace.cursor,
+  origin: "https://a.asimposium.org",
+  state: researchClaimFace.claim_state,
+  publication: researchClaimFace.items[0]!,
+  command: researchReviewCommand,
 };

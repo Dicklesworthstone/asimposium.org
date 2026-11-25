@@ -1,17 +1,15 @@
-import { hiddenByContentControlSql } from "../krater/public-content";
+import { eventContentHiddenSql } from "../krater/public-content";
 import { offScopeClaimSql, offScopeProblemSql, offScopePublicationSql } from "./public-scope.ts";
 
 /** Read-only query plans. Admission order is immutable; ranking is page-local.
  * All SQL values are bound. Never derive queue priority from engagement data. */
-export const REVIEW_QUEUE_MAX_SCOPE_EVENTS = 512;
-export const REVIEW_QUEUE_MAX_SCOPE_BYTES = 1024 * 1024;
 export const REVIEW_QUEUE_MAX_DEPENDENTS = 32;
 
 /** The scope CTE changes only the captured cut. Both entry points use the
  * identical admission/head/count query and the same scientific evaluator. */
 function discoverySql(scope: string, knownProblem = false, excludeOffScope = false): string {
   return `
-WITH review_scope AS (${scope}), admitted AS (
+WITH review_scope AS (${scope})
   SELECT p.id AS problem_id, p.cursor,
     a.object_id AS claim_id, a.id AS admission_id, a.created_at,
     h.id AS head_id, h.object_version AS version
@@ -31,18 +29,10 @@ WITH review_scope AS (${scope}), admitted AS (
         : ""
     }
     AND p.status NOT IN ('private-draft', 'resolved', 'retired', 'archived')
+    AND p.admission_mode <> 'archived-read-only'
     AND (? IS NULL OR p.id = ?)
     AND (a.created_at > ? OR (a.created_at = ? AND a.id > ?))
-  ORDER BY a.created_at ASC, a.id ASC LIMIT ?
-)
-SELECT admitted.*,
-  (SELECT COUNT(*) FROM (SELECT 1 FROM events e
-    WHERE e.problem_id = admitted.problem_id AND e.seq <= admitted.cursor LIMIT 513)) AS scope_events,
-  (SELECT COALESCE(SUM(length(CAST(payload_json AS BLOB))), 0) FROM (
-    SELECT c.payload_json FROM events e LEFT JOIN event_content c ON c.event_id = e.id
-    WHERE e.problem_id = admitted.problem_id AND e.seq <= admitted.cursor LIMIT 513
-  )) AS scope_bytes
-FROM admitted ORDER BY created_at ASC, admission_id ASC`;
+  ORDER BY a.created_at ASC, a.id ASC LIMIT ?`;
 }
 
 export const REVIEW_QUEUE_DISCOVERY_SQL = discoverySql(
@@ -84,6 +74,7 @@ SELECT p.id AS problem_id, h.id AS event_id, h.object_id AS claim_id,
     WHERE de.problem_id = p.id AND de.object_kind = 'claim'
       AND de.type IN ('claim.created', 'claim.revised') AND de.object_id <> h.object_id
       AND de.seq <= ? AND de.seq > h.seq
+      AND NOT ${eventContentHiddenSql("de")}
       ${excludeOffScope ? `AND NOT ${offScopePublicationSql("de.id")}` : ""}
       AND de.seq = (SELECT MAX(dh.seq) FROM events dh
         WHERE dh.problem_id = de.problem_id AND dh.object_id = de.object_id
@@ -125,11 +116,13 @@ WHERE p.id = ? AND ${knownProblem ? "p.unlisted IN (0, 1)" : "p.unlisted = 0"}
       : ""
   }
   AND p.status NOT IN ('private-draft', 'resolved', 'retired', 'archived')
+  AND p.admission_mode <> 'archived-read-only'
   AND h.seq <= ? AND h.seq <= p.public_seq AND a.seq <= h.seq
-  -- A hidden claim or problem is content_unavailable here, so /reviews and
-  -- review moves never quote it (asimposiumorg-1rtq).
-  AND NOT ${hiddenByContentControlSql("p.id", "h.object_id")}
-  AND NOT ${hiddenByContentControlSql("p.id", "'problem'")}
+  -- Recovery requires readable statement and authorship sources, separately
+  -- from the scientific fold's stale flag. Exact version/event controls still
+  -- withhold retained bytes, including when a broader object was restored.
+  AND NOT ${eventContentHiddenSql("h")}
+  AND NOT ${eventContentHiddenSql("a")}
 LIMIT 1`;
 }
 export const REVIEW_QUEUE_METADATA_SQL = metadataSql();

@@ -154,8 +154,13 @@ export async function sponsorMutationRefusal(
       "workshop.list",
       "workshop.search",
       "inbox.read",
+      "fellow.activity.read",
+      "sponsor.reports.list",
       "lease.list",
       "sponsor.screening-appeals.submit",
+      "sponsor.integrity.cases.query",
+      "sponsor.integrity.cases.read",
+      "sponsor.integrity.cases.respond",
     ].includes(action)
   )
     return undefined;

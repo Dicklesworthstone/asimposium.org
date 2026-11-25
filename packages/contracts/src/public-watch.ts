@@ -1,7 +1,7 @@
 /** Public-browser liveness uses existing read contracts, not a second ledger.
  * Keep this transport vocabulary dependency-free: the Worker and the small
  * client island share the exact same route/ETag/cursor grammar. */
-export const PUBLIC_WATCH_MAX_TARGETS = 9;
+export const PUBLIC_WATCH_MAX_TARGETS = 10;
 export const PUBLIC_WATCH_INTERVAL_MS = 10_000;
 export const PUBLIC_WATCH_MAX_BACKOFF_MS = 120_000;
 export const PUBLIC_WATCH_REQUEST_TIMEOUT_MS = 3_000;
@@ -97,6 +97,7 @@ export function publicWatchPath(path: string): "cursor" | "face" | "sse" | undef
   const problem = /^\/p\/([^/]+)\.json$/.exec(decoded);
   const claim = /^\/p\/([^/]+)\/claims\/C-([1-9][0-9]*)(?:@([1-9][0-9]*))?\.json$/.exec(decoded);
   const deadEnds = /^\/p\/([^/]+)\/dead-ends\.json$/.exec(decoded);
+  const events = /^\/p\/([^/]+)\/events\.json$/.exec(decoded);
   if (problem && PROBLEM.test(problem[1] ?? "")) {
     permitted = [];
   } else if (
@@ -112,6 +113,23 @@ export function publicWatchPath(path: string): "cursor" | "face" | "sse" | undef
     permitted = ["include_superseded"];
     const history = query.get("include_superseded");
     if (history !== null && !["true", "false", "0", "1"].includes(history)) return undefined;
+  } else if (events && PROBLEM.test(events[1] ?? "")) {
+    // Browser freshness checks never long-poll or walk an unbounded history.
+    // Only the bounded, explicitly pinned window actually rendered qualifies.
+    permitted = ["since", "limit", "through"];
+    const since = parsePublicWatchCursor(query.get("since") ?? "");
+    const limit = parsePublicWatchCursor(query.get("limit") ?? "");
+    const through = parsePublicWatchCursor(query.get("through") ?? "");
+    if (
+      since === undefined ||
+      limit === undefined ||
+      through === undefined ||
+      limit < 1 ||
+      limit > 200 ||
+      through < since ||
+      through - since > limit
+    )
+      return undefined;
   } else if (decoded === "/problems.json") {
     permitted = ["after"];
     const after = query.get("after");

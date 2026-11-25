@@ -173,6 +173,10 @@ export const WorkshopObjectIdSchema = z
   .regex(/^W-[A-Za-z0-9]{26}$/, "invalid workshop object id");
 export type WorkshopObjectId = z.infer<typeof WorkshopObjectIdSchema>;
 
+export const SynthesisIdPattern = /^(?!.*--)SYNTH-[A-Z0-9][A-Z0-9-]{0,40}$/;
+export const SynthesisIdSchema = z.string().regex(SynthesisIdPattern, "invalid synthesis id");
+export type SynthesisId = z.infer<typeof SynthesisIdSchema>;
+
 export { type ClaimId, ClaimIdSchema } from "./scientific-provenance.ts";
 
 /** Session declarations are self-reports, never provider attestations (ADR-3/24).
@@ -613,6 +617,12 @@ export const WorkshopPublicationDraftSchema = z.union([
       payload: RecordDeadEndRequestSchema,
     })
     .strict(),
+  z
+    .object({
+      object_kind: z.literal("review"),
+      payload: z.lazy(() => ReviewRequestSchema),
+    })
+    .strict(),
 ]);
 export type WorkshopPublicationDraft = z.infer<typeof WorkshopPublicationDraftSchema>;
 
@@ -632,7 +642,7 @@ export type LedgerIntentKind = z.infer<typeof LedgerIntentKindSchema>;
 export const LedgerCreateIntentSchema = z
   .object({
     kind: z.literal("create"),
-    target_kind: z.enum(["claim", "hypothesis", "evidence", "dead-end"]),
+    target_kind: z.enum(["claim", "hypothesis", "evidence", "dead-end", "review"]),
   })
   .strict();
 export type LedgerCreateIntent = z.infer<typeof LedgerCreateIntentSchema>;
@@ -666,7 +676,7 @@ export const WorkshopCreateRequestSchema = z
      * genuine note: recorded, ranked last, visible to the sponsor (§7.6).
      */
     force_note: z.literal(true).optional(),
-    /** Optional typed new claim, hypothesis or evidence; draft prose stays private. */
+    /** Optional typed scientific publication; draft prose stays private. */
     publication: WorkshopPublicationDraftSchema.optional(),
     /** Optional publication-ready replacement; draft prose stays private. */
     revision: ClaimRevisionSchema.optional(),
@@ -1114,6 +1124,15 @@ export const SponsorWorkshopPromotionReceiptSchema = z.union([
       result: RecordDeadEndResponseSchema,
     })
     .strict(),
+  z
+    .object({
+      object_kind: z.literal("review"),
+      problem_id: ProblemIdSchema,
+      seq: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+      version: z.literal(1),
+      result: z.lazy(() => ReviewResponseSchema),
+    })
+    .strict(),
 ]);
 export type SponsorWorkshopPromotionReceipt = z.infer<typeof SponsorWorkshopPromotionReceiptSchema>;
 
@@ -1157,10 +1176,32 @@ export const SponsorWorkshopMutationResponseSchema = z.discriminatedUnion("actio
 ]);
 export type SponsorWorkshopMutationResponse = z.infer<typeof SponsorWorkshopMutationResponseSchema>;
 
-/** §7.2 close: ≤ 2,000 chars; object IDs over paraphrase (Rev 3.1). */
+/** Explicitly share an already published synthesis; private handback text is never copied. */
+export const SessionSharedHandoffRequestSchema = z
+  .object({
+    synthesis_id: SynthesisIdSchema,
+    event_id: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/),
+  })
+  .strict();
+export type SessionSharedHandoffRequest = z.infer<typeof SessionSharedHandoffRequestSchema>;
+
+/** The server pins the exact immutable publication selected by a session close. */
+export const SessionSharedHandoffPinSchema = SessionSharedHandoffRequestSchema.extend({
+  seq: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+  payload_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+}).strict();
+export type SessionSharedHandoffPin = z.infer<typeof SessionSharedHandoffPinSchema>;
+
+export const SessionSharedHandoffReceiptSchema = SessionSharedHandoffPinSchema.extend({
+  read_url: z.string().regex(/^\/p\/P-[A-Z0-9-]+\/syntheses\/SYNTH-[A-Z0-9-]+\.json$/),
+}).strict();
+export type SessionSharedHandoffReceipt = z.infer<typeof SessionSharedHandoffReceiptSchema>;
+
+/** §7.2 close: private handback ≤ 2,000 chars; sharing requires an explicit public source. */
 export const SessionCloseRequestSchema = z
   .object({
     handback: z.string().trim().min(1).max(2_000),
+    shared_handoff: SessionSharedHandoffRequestSchema.optional(),
     promote: z.array(WorkshopObjectIdSchema).max(16).default([]),
     keep: z.array(WorkshopObjectIdSchema).max(64).default([]),
     discard: z.array(WorkshopObjectIdSchema).max(64).default([]),
@@ -1168,11 +1209,25 @@ export const SessionCloseRequestSchema = z
   .strict();
 export type SessionCloseRequest = z.infer<typeof SessionCloseRequestSchema>;
 
+/** A close can publish several kinds of saved research. Keep the original
+ * claim-ID list while returning each exact draft's ordinary typed receipt. */
+export const SessionClosePublicationReceiptSchema = z
+  .object({
+    workshop_id: WorkshopObjectIdSchema,
+    workshop_version: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+    publication: SponsorWorkshopPromotionReceiptSchema,
+  })
+  .strict();
+export type SessionClosePublicationReceipt = z.infer<typeof SessionClosePublicationReceiptSchema>;
+
 export const SessionCloseResponseSchema = z
   .object({
     session_id: SessionIdSchema,
     closed_at: z.string().datetime(),
     promoted: z.array(ClaimIdSchema),
+    /** Present when a close includes non-claim research; claim-only receipts retain their shape. */
+    publications: z.array(SessionClosePublicationReceiptSchema).min(1).max(16).optional(),
+    shared_handoff: SessionSharedHandoffReceiptSchema.optional(),
   })
   .strict();
 
@@ -1272,6 +1327,14 @@ export const ReviewRequestSchema = z
   })
   .strict();
 export type ReviewRequest = z.infer<typeof ReviewRequestSchema>;
+
+/** Publish either a complete review or the exact typed payload saved privately.
+ * Selecting a draft cannot replace its target, checks, verdict or evidence. */
+export const ReviewSubmissionSchema = z.union([
+  ReviewRequestSchema,
+  WorkshopPublicationRequestSchema,
+]);
+export type ReviewSubmission = z.infer<typeof ReviewSubmissionSchema>;
 
 export const ReviewResponseSchema = z
   .object({
@@ -1834,6 +1897,8 @@ export const SessionsContractsSchema = z
     full_pack_page: FullPackPageSchema,
     workshop_push_request: WorkshopPushRequestSchema,
     first_claim_draft_request: FirstClaimDraftRequestSchema,
+    workshop_create_request: WorkshopCreateRequestSchema,
+    workshop_revise_request: WorkshopReviseRequestSchema,
     workshop_push_response: WorkshopPushResponseSchema,
     workshop_object_response: WorkshopObjectResponseSchema,
     sponsor_workshop_request: SponsorWorkshopRequestSchema,
@@ -1856,6 +1921,7 @@ export const SessionsContractsSchema = z
     session_heartbeat_request: SessionHeartbeatRequestSchema,
     session_heartbeat_response: SessionHeartbeatResponseSchema,
     review_request: ReviewRequestSchema,
+    review_submission: ReviewSubmissionSchema,
     review_response: ReviewResponseSchema,
     evidence_request: EvidenceRequestSchema,
     evidence_response: EvidenceResponseSchema,

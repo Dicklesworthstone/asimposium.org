@@ -12,6 +12,7 @@ import {
   TriageResponseSchema,
 } from "@asimposium/contracts";
 import { getDocument, sha256Hex } from "@asimposium/protocol";
+import type { ExecutionContext } from "@cloudflare/workers-types";
 
 import { createApp } from "../../src/app.ts";
 import { D1EnrollmentStore } from "../../src/enrollment/d1-store.ts";
@@ -75,9 +76,13 @@ function migratedDb(): Env["DB"] {
         const row = (sqlite.prepare(query) as any).get(...(values as any[]));
         return (row ?? null) as T | null;
       },
-      async all<T>(): Promise<{ results: T[]; meta: { rows_read: number; rows_written: number } }> {
+      async all<T>(): Promise<{
+        success: true;
+        results: T[];
+        meta: { rows_read: number; rows_written: number };
+      }> {
         const rows = (sqlite.prepare(query) as any).all(...(values as any[])) as T[];
-        return { results: rows, meta: { rows_read: rows.length, rows_written: 0 } };
+        return { success: true, results: rows, meta: { rows_read: rows.length, rows_written: 0 } };
       },
     });
     return {
@@ -502,11 +507,16 @@ describe("W6.2 Mega-Commands (hello, triage, next)", () => {
     try {
       const auth = { authorization: `Bearer ${fellow.token}` };
       for (const path of ["/v1/hello", "/v1/triage", "/v1/p/P-OPSLOG/next"]) {
+        const background: Promise<unknown>[] = [];
         const res = await app.fetch(
           new Request(`https://a.asimposium.org${path}`, { headers: auth }),
           env,
+          {
+            waitUntil: (job: Promise<unknown>) => background.push(job),
+          } as unknown as ExecutionContext,
         );
         expect(res.status).toBe(200);
+        await Promise.all(background);
       }
       const refused = await app.fetch(
         new Request("https://a.asimposium.org/v1/p/P-OPSLOG/next", {
@@ -752,6 +762,61 @@ describe("W6.2 Mega-Commands (hello, triage, next)", () => {
     expect(parsed.move?.refs).toEqual(["P-TRIAGE1"]);
     expect(parsed.selection_boundary).toBeDefined();
     expect(parsed.selection_boundary?.toLowerCase()).toContain("triage examines at most");
+  });
+
+  test("next and triage rank only moves within the Fellow's problem and sponsor budgets", async () => {
+    const { app, env, db, enrollFellow, seedPublishedProblem, seedMembership } =
+      await createTestHarness();
+    const fellow = await enrollFellow();
+    const exhausted = "P-BUDGETA";
+    const available = "P-BUDGETB";
+    for (const id of [exhausted, available]) {
+      await seedPublishedProblem(id, "A problem with no public claims", fellow);
+      await seedMembership(id, fellow.fellowId, "contributor");
+    }
+    const now = Date.now();
+    for (let i = 0; i < 20; i++) {
+      await db
+        .prepare(`INSERT INTO public_write_attempt_reservations
+        (reservation_id,fellow_id,problem_id,sponsor_id,session_id,route,idempotency_key,
+         request_digest,reserved_at,expires_at,status)
+        VALUES (?, ?, ?, ?, 'session', 'promote', ?, 'digest', ?, ?, 'settled_held')`)
+        .bind(
+          `attempt-${i}`,
+          fellow.fellowId,
+          exhausted,
+          fellow.sponsorId,
+          `key-${i}`,
+          now,
+          now + 60000,
+        )
+        .run();
+    }
+    async function read(path: string, sponsorLimit: number | string) {
+      const response = await app.fetch(
+        new Request(`https://a.asimposium.org${path}`, {
+          headers: { authorization: `Bearer ${fellow.token}` },
+        }),
+        { ...env, SPONSOR_PROMOTION_RATE_LIMIT: sponsorLimit },
+      );
+      expect(response.status).toBe(200);
+      return response.json();
+    }
+    expect(
+      ProblemNextResponseSchema.parse(await read(`/v1/p/${exhausted}/next`, 60)).primary_move,
+    ).toBeNull();
+    expect(TriageResponseSchema.parse(await read("/v1/triage", 60)).move?.refs).toEqual([
+      available,
+    ]);
+    for (const limit of [20, 0, "invalid"]) {
+      const next = ProblemNextResponseSchema.parse(await read(`/v1/p/${available}/next`, limit));
+      expect(next.primary_move).toBeNull();
+      expect(next.alternatives).toEqual([]);
+      expect(next.degraded).toBe(limit === "invalid");
+      const triage = TriageResponseSchema.parse(await read("/v1/triage", limit));
+      expect(triage.move).toBeNull();
+      expect(triage.degraded).toBe(limit === "invalid");
+    }
   });
 
   test("GET /v1/triage with custom provider returns selected move", async () => {

@@ -25,6 +25,20 @@ const hash = async (text: string) =>
     new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text))),
     (n) => n.toString(16).padStart(2, "0"),
   ).join("");
+const screeningReceipt = JSON.parse(
+  readFileSync(
+    new URL(
+      "../../../../packages/contracts/test/fixtures/valid/screening-publication-warning-provenance.json",
+      import.meta.url,
+    ),
+    "utf8",
+  ),
+);
+const assertionNotice = {
+  category: "off-topic",
+  action: "published-with-warning",
+  notice: "off-scope",
+} as const;
 
 function fixture() {
   const sqlite = new Database(":memory:");
@@ -36,6 +50,7 @@ function fixture() {
       actor_fellow_id TEXT, actor_sponsor_id TEXT, actor_session_id TEXT,
       model_string_self_declared TEXT, harness TEXT);
     CREATE TABLE event_content (event_id TEXT PRIMARY KEY, payload_sha256 TEXT, payload_json TEXT, redacted_at TEXT);
+    CREATE TABLE screening_publications (event_id TEXT PRIMARY KEY, provenance_json TEXT NOT NULL);
     CREATE TABLE content_controls (problem_id TEXT, target_ref TEXT, visibility TEXT, version INTEGER);
     CREATE TABLE claim_relations (status TEXT, kind TEXT, source_claim_id TEXT);
     INSERT INTO claim_relations VALUES ('disputed', 'contradicts', 'C-FAKE');
@@ -153,6 +168,10 @@ function fixture() {
       ) as Record<string, unknown>[];
   const read = (cursor = seq, relationSeq?: number) =>
     readClaimRelations(db, "P-TEST", cursor, { relationSeq });
+  const warn = (id: string, notice = screeningReceipt.public_action) =>
+    sqlite
+      .prepare("INSERT INTO screening_publications VALUES (?, ?)")
+      .run(id, JSON.stringify({ ...screeningReceipt, public_action: notice }));
   return {
     sqlite,
     db,
@@ -165,6 +184,7 @@ function fixture() {
     hide,
     raw,
     read,
+    warn,
     queries,
     reads: () => reads,
   };
@@ -211,6 +231,80 @@ test("a later dispute is absent at the earlier cursor and carries exact attribut
   assert.equal(now.provenance.fellow, "F-author");
 });
 
+test("assertion and dispute notices follow their separate exact publications at the selected cursor", async () => {
+  const f = fixture(),
+    edge = await f.pair(),
+    other = await f.relation("C-2@1", "C-1@1"),
+    d = await f.dispute(edge);
+  f.warn(edge.id, assertionNotice);
+  f.warn(d.id);
+  const past = await f.read(edge.seq);
+  assert.deepEqual(past.relations[0]?.screening_notice, assertionNotice);
+  assert.equal(past.relations[0]?.dispute, undefined);
+  assert.ok(!JSON.stringify(past).includes("dual-use-boundary"));
+  const current = await f.read();
+  assert.deepEqual(current.relations[0]?.screening_notice, assertionNotice);
+  assert.deepEqual(current.relations[0]?.dispute?.screening_notice, screeningReceipt.public_action);
+  assert.equal(current.relations[0]?.dispute?.event, d.id);
+  assert.equal(current.relations[1]?.event, other.id);
+  assert.equal(current.relations[1]?.screening_notice, undefined);
+  assert.equal(current.relations[1]?.dispute, undefined);
+  for (const privateField of [
+    "input_digest",
+    "context_digest",
+    "configuration_digest",
+    "policy_version",
+  ])
+    assert.ok(!JSON.stringify(current).includes(privateField));
+  assert.equal(f.reads(), 2);
+});
+
+for (const subject of ["assertion", "dispute"] as const) {
+  for (const corruption of ["invalid-json", "private-field", "oversized"] as const) {
+    test(`${subject} ${corruption} screening provenance cannot silently become a clean publication`, async () => {
+      const f = fixture(),
+        edge = await f.pair(),
+        d = await f.dispute(edge),
+        publication = subject === "assertion" ? edge : d;
+      f.warn(edge.id, assertionNotice);
+      f.warn(d.id);
+      const raw =
+        corruption === "invalid-json"
+          ? "{"
+          : JSON.stringify({
+              ...screeningReceipt,
+              private_detail: corruption === "oversized" ? "é".repeat(4096) : "PRIVATE-RECEIPT",
+            });
+      f.sqlite
+        .prepare("UPDATE screening_publications SET provenance_json=? WHERE event_id=?")
+        .run(raw, publication.id);
+      await assert.rejects(f.read(), /PUBLIC_SCREENING_RECEIPT_UNAVAILABLE/);
+      if (corruption === "oversized")
+        assert.equal(
+          f.raw()[0]?.[
+            subject === "assertion"
+              ? "screening_provenance_json"
+              : "dispute_screening_provenance_json"
+          ],
+          "",
+        );
+      if (subject === "dispute")
+        assert.deepEqual((await f.read(edge.seq)).relations[0]?.screening_notice, assertionNotice);
+      // Current visibility wins over a receipt, including malformed private data.
+      f.hide(`#${publication.seq}`);
+      const hidden = await f.read();
+      assert.ok(!JSON.stringify(hidden).includes("PRIVATE-RECEIPT"));
+      assert.ok(!JSON.stringify(hidden).includes("dual-use-boundary"));
+      if (subject === "assertion") assert.deepEqual(hidden.relations, []);
+      else {
+        assert.equal(hidden.relations[0]?.status, "unavailable");
+        assert.equal(hidden.relations[0]?.dispute, undefined);
+        assert.deepEqual(hidden.relations[0]?.screening_notice, assertionNotice);
+      }
+    });
+  }
+}
+
 test("the publication boundary wins even when the requested cursor is higher", async () => {
   const f = fixture(),
     edge = await f.pair();
@@ -245,7 +339,9 @@ for (const target of ["C-1", "C-2", "C-1@1", "C-2@1", "C-1@1-implies-C-2@1", "#3
   test(`current hiding suppresses the relation at historical cursors: ${target}`, async () => {
     const f = fixture(),
       edge = await f.pair();
-    await f.dispute(edge);
+    const d = await f.dispute(edge);
+    f.warn(edge.id, assertionNotice);
+    f.warn(d.id);
     f.hide(target);
     const result = await f.read(edge.seq);
     assert.deepEqual(result.relations, []);
@@ -253,6 +349,7 @@ for (const target of ["C-1", "C-2", "C-1@1", "C-2@1", "C-1@1-implies-C-2@1", "#3
     assert.ok(f.raw().every((r) => r.payload_json === null && r.dispute_json === null));
     f.hide(target, "public", 2);
     assert.equal((await f.read(edge.seq)).relations[0]?.status, "asserted");
+    assert.deepEqual((await f.read(edge.seq)).relations[0]?.screening_notice, assertionNotice);
   });
 }
 
@@ -281,6 +378,7 @@ for (const alter of ["redacted", "missing", "detached", "tampered", "invalid-jso
   test(`unreadable assertion bytes never supply an edge: ${alter}`, async () => {
     const f = fixture(),
       edge = await f.pair();
+    f.warn(edge.id);
     if (alter === "redacted")
       f.sqlite.prepare("UPDATE event_content SET redacted_at='now' WHERE event_id=?").run(edge.id);
     if (alter === "missing")
@@ -308,6 +406,8 @@ for (const alter of ["redacted", "missing", "detached", "tampered", "hidden", "s
     const f = fixture(),
       edge = await f.pair(),
       d = await f.dispute(edge);
+    f.warn(edge.id, assertionNotice);
+    f.warn(d.id);
     if (alter === "redacted")
       f.sqlite.prepare("UPDATE event_content SET redacted_at='now' WHERE event_id=?").run(d.id);
     if (alter === "missing")
@@ -327,6 +427,8 @@ for (const alter of ["redacted", "missing", "detached", "tampered", "hidden", "s
     const result = await f.read();
     assert.equal(result.relations[0]?.status, "unavailable");
     assert.equal(result.relations[0]?.dispute, undefined);
+    assert.deepEqual(result.relations[0]?.screening_notice, assertionNotice);
+    assert.ok(!JSON.stringify(result).includes("dual-use-boundary"));
     assert.ok(result.omitted.some((o) => o.detail.endsWith(":dispute-state")));
     assert.equal((await f.read(edge.seq)).relations[0]?.status, "asserted");
   });
@@ -344,8 +446,14 @@ for (const invalid of [
   test(`digest-valid but mismatched dispute is not accepted: ${Object.keys(invalid).join()}`, async () => {
     const f = fixture(),
       edge = await f.pair();
-    await f.dispute(edge, invalid);
-    assert.equal((await f.read()).relations[0]?.status, "unavailable");
+    const d = await f.dispute(edge, invalid);
+    f.warn(edge.id, assertionNotice);
+    f.warn(d.id);
+    const result = await f.read();
+    assert.equal(result.relations[0]?.status, "unavailable");
+    assert.equal(result.relations[0]?.dispute, undefined);
+    assert.deepEqual(result.relations[0]?.screening_notice, assertionNotice);
+    assert.ok(!JSON.stringify(result).includes("dual-use-boundary"));
   });
 }
 
@@ -466,14 +574,21 @@ test("the assertion limit has one body-free lookahead, and exact reads bypass th
   }
   assert.equal((await f.read()).omitted.length, 0);
   await f.claim(100);
-  last = (await f.relation("C-1@1", "C-100@1")).seq;
+  const tail = await f.relation("C-1@1", "C-100@1");
+  last = tail.seq;
+  const d = await f.dispute(tail);
+  f.warn(tail.id, assertionNotice);
+  f.warn(d.id);
   assert.equal(f.raw().length, CLAIM_RELATION_READ_LIMIT + 1);
   assert.equal(f.raw().at(-1)?.payload_json, null);
   assert.equal(f.raw().at(-1)?.dispute_json, null);
+  assert.equal(f.raw().at(-1)?.screening_provenance_json, null);
+  assert.equal(f.raw().at(-1)?.dispute_screening_provenance_json, null);
   const read = await f.read();
   assert.equal(read.relations.length, CLAIM_RELATION_READ_LIMIT);
   assert.ok(read.omitted.some((o) => o.reason === "candidate_limit"));
   assert.equal((await f.read(last, last)).relations[0]?.target, "C-100@1");
+  assert.deepEqual((await f.read(last, last)).relations[0]?.screening_notice, assertionNotice);
 });
 
 test("content-control rows from a foreign problem have no effect", async () => {

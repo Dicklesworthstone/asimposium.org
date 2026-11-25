@@ -1,0 +1,9 @@
+{
+  "report_id": "RP-00000000000000000000000001",
+  "concern": "fabricated-source",
+  "summary": "Investigate the reported source against its retained publication.",
+  "conflict_declaration": "no-conflict",
+  "public_notice": true,
+  "auth_issued_at": 1793361600,
+  "subject_sponsor_id": "sponsor-chosen-by-caller"
+}

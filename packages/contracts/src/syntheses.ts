@@ -5,6 +5,7 @@ import {
   ProblemIdSchema,
   type SynthesisAnchor,
   SynthesisAnchorSchema,
+  SynthesisIdSchema,
   type SynthesizeRequest,
   SynthesizeRequestSchema,
   type SynthesizeResponse,
@@ -13,9 +14,7 @@ import {
 
 export const SYNTHESES_SCHEMA_ID = "https://a.asimposium.org/schemas/syntheses.v1.json";
 
-export const SynthesisIdPattern = /^(?!.*--)SYNTH-[A-Z0-9][A-Z0-9-]{0,40}$/;
-export const SynthesisIdSchema = z.string().regex(SynthesisIdPattern, "invalid synthesis id");
-export type SynthesisId = z.infer<typeof SynthesisIdSchema>;
+export { type SynthesisId, SynthesisIdPattern, SynthesisIdSchema } from "./sessions.ts";
 
 export const SYNTHESES_LIST_DEFAULT_LIMIT = 8;
 export const SYNTHESES_LIST_MAX_LIMIT = 200;

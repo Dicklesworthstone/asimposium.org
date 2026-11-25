@@ -22,7 +22,7 @@ import {
   ScientificInputError,
 } from "../ledger/scientific-checks";
 import { publicationScreeningNotice } from "../screening/publication-notice.ts";
-import { loadFellowCalibration } from "./fellow-calibration.ts";
+import { type FellowCalibrationReleaseCheck, loadFellowCalibration } from "./fellow-calibration.ts";
 
 interface FellowRecord {
   fellow_id: string;
@@ -66,6 +66,147 @@ interface ReviewRow {
   sponsor_at_event: string;
 }
 
+interface HistoryPosition {
+  readonly event_id: string;
+  readonly problem_id: string;
+  readonly seq: number;
+}
+
+interface HistorySource extends HistoryPosition {
+  readonly payload_sha256: string;
+  readonly payload_json: string;
+  readonly screening_provenance: string | null;
+}
+
+const SESSION_COUNT_SQL = `SELECT COUNT(*) AS count FROM sessions s
+  JOIN problems p ON p.id = s.problem_id
+  WHERE s.fellow_id = ? AND p.status != 'private-draft' AND p.unlisted = 0
+    AND NOT ${hiddenByContentControlSql("p.id", "'problem'")}
+    AND NOT ${hiddenByContentControlSql("p.id", "p.id")}`;
+
+const PROMOTION_TOTALS_SQL = `SELECT
+    COUNT(CASE WHEN cv.kind = 'conjecture' THEN 1 END) AS conjectures,
+    COUNT(CASE WHEN cv.kind IN ('theorem', 'theorem-attempt', 'lemma') THEN 1 END) AS theorems
+  FROM claim_versions cv
+  JOIN problems p ON p.id = cv.problem_id AND p.status != 'private-draft' AND p.unlisted = 0
+  WHERE cv.editor_fellow_id = ? AND cv.version = 1
+    AND EXISTS (SELECT 1 FROM events e
+      WHERE e.problem_id = cv.problem_id AND e.object_id = cv.claim_id
+        AND e.object_version = cv.version AND e.object_kind = 'claim'
+        AND e.type = 'claim.created' AND e.actor_fellow_id = cv.editor_fellow_id
+        AND e.actor_sponsor_id IS NOT NULL AND e.seq <= p.public_seq
+        AND NOT ${eventContentHiddenSql("e")}
+        AND NOT ${hiddenByContentControlSql("p.id", "p.id")}
+        AND EXISTS (SELECT 1 FROM event_content c WHERE c.event_id = e.id
+          AND c.payload_sha256 = e.payload_sha256 AND c.redacted_at IS NULL))`;
+
+/** The final release is bounded by the three history windows. Source bytes
+ * stay in separate bind parameters, so escaping a large work product cannot
+ * inflate a JSON witness past D1's row limit. No source text is logged. */
+function cardReleaseChecks(
+  db: D1Database,
+  fellow: FellowRecord,
+  positions: readonly HistoryPosition[],
+  sources: readonly HistorySource[],
+  sessionsCount: number,
+  totals: { conjectures: number; theorems: number },
+): FellowCalibrationReleaseCheck[] {
+  const maxPositions = 2 * 51 + FELLOW_NEGATIVE_HISTORY_PAGE_SIZE + 1;
+  const maxSources = 2 * 50 + FELLOW_NEGATIVE_HISTORY_PAGE_SIZE;
+  if (positions.length > maxPositions || sources.length > maxSources)
+    throw new Error("Fellow card release budget exceeded.");
+  let bytes = 0;
+  for (const source of sources) {
+    const size = new TextEncoder().encode(source.payload_json).byteLength;
+    bytes += size;
+    if (size > 512 * 1024 || bytes > 8 * 1024 * 1024)
+      throw new Error("Fellow card release budget exceeded.");
+  }
+  const checks: FellowCalibrationReleaseCheck[] = [
+    {
+      statement: db
+        .prepare(`SELECT COUNT(*) AS matched FROM enrollment_fellows
+          WHERE fellow_id = ? AND sponsor_id = ? AND name = ? AND model = ?
+            AND harness = ? AND created_at = ?`)
+        .bind(
+          fellow.fellow_id,
+          fellow.sponsor_id,
+          fellow.name,
+          fellow.model,
+          fellow.harness,
+          fellow.created_at,
+        ),
+      expected: 1,
+    },
+    {
+      statement: db
+        .prepare(`SELECT COUNT(*) AS matched FROM (${SESSION_COUNT_SQL}) WHERE count = ?`)
+        .bind(fellow.fellow_id, sessionsCount),
+      expected: 1,
+    },
+    {
+      statement: db
+        .prepare(`SELECT COUNT(*) AS matched FROM (${PROMOTION_TOTALS_SQL})
+          WHERE conjectures = ? AND theorems = ?`)
+        .bind(fellow.fellow_id, totals.conjectures, totals.theorems),
+      expected: 1,
+    },
+    {
+      // Pagination positions and omission counts can refer to unreadable
+      // records. Recheck their public envelopes without requiring those
+      // deliberately omitted bodies to become readable.
+      statement: db
+        .prepare(`SELECT COUNT(*) AS matched FROM json_each(?) pin
+          JOIN events e ON e.id = json_extract(pin.value, '$.event_id')
+            AND e.problem_id = json_extract(pin.value, '$.problem_id')
+            AND e.seq = json_extract(pin.value, '$.seq')
+          JOIN problems p ON p.id = e.problem_id AND e.seq <= p.public_seq
+          WHERE e.actor_fellow_id = ? AND p.status != 'private-draft' AND p.unlisted = 0
+            AND NOT ${eventContentHiddenSql("e")}
+            AND NOT ${hiddenByContentControlSql("p.id", "p.id")}`)
+        .bind(JSON.stringify(positions), fellow.fellow_id),
+      expected: positions.length,
+    },
+  ];
+  // Six parameters per source: sixteen remain below D1's one-hundred limit.
+  for (let offset = 0; offset < sources.length; offset += 16) {
+    const chunk = sources.slice(offset, offset + 16);
+    checks.push({
+      statement: db
+        .prepare(`WITH expected(event_id,problem_id,seq,digest,body,screening) AS (
+          VALUES ${chunk.map(() => "(?,?,?,?,?,?)").join(",")}
+        ) SELECT COUNT(*) AS matched FROM expected pin
+          JOIN events e ON e.id = pin.event_id AND e.problem_id = pin.problem_id
+            AND e.seq = pin.seq AND e.payload_sha256 = pin.digest
+          JOIN event_content content ON content.event_id = e.id
+            AND content.payload_sha256 = e.payload_sha256 AND content.redacted_at IS NULL
+            AND content.payload_json = pin.body
+          JOIN problems p ON p.id = e.problem_id AND e.seq <= p.public_seq
+          LEFT JOIN screening_publications screening ON screening.event_id = e.id
+          WHERE p.status != 'private-draft' AND p.unlisted = 0
+            AND screening.provenance_json IS pin.screening
+            AND NOT ${eventContentHiddenSql("e")}
+            AND NOT ${hiddenByContentControlSql("p.id", "p.id")}`)
+        .bind(
+          ...chunk.flatMap((source) => [
+            source.event_id,
+            source.problem_id,
+            source.seq,
+            source.payload_sha256,
+            source.payload_json,
+            source.screening_provenance,
+          ]),
+        ),
+      expected: chunk.length,
+    });
+  }
+  return checks;
+}
+
+function historyPosition(row: HistoryPosition): HistoryPosition {
+  return { event_id: row.event_id, problem_id: row.problem_id, seq: row.seq };
+}
+
 /**
  * Load a bounded Fellow card page for a given fellow name or ID (W6.1 / W8.2).
  * Rule A3 (total attribution) and Rule A10 (no leaderboards/rankings) enforced.
@@ -89,14 +230,14 @@ export async function loadFellowCard(
 
   if (!fellow) return null;
 
+  const positions: HistoryPosition[] = [];
+  const sources: HistorySource[] = [];
+
   // Count sessions
   let sessionsCount = 0;
   {
     const sessionRes = await db
-      .prepare(`SELECT COUNT(*) as count FROM sessions s JOIN problems p ON p.id = s.problem_id
-        WHERE s.fellow_id = ? AND p.status != 'private-draft' AND p.unlisted = 0
-          AND NOT ${hiddenByContentControlSql("p.id", "'problem'")}
-          AND NOT ${hiddenByContentControlSql("p.id", "p.id")}`)
+      .prepare(SESSION_COUNT_SQL)
       .bind(fellow.fellow_id)
       .first<CountRecord>();
     if (!sessionRes) throw new Error("Fellow session count unavailable");
@@ -145,6 +286,8 @@ export async function loadFellowCard(
       .bind(fellow.fellow_id, ...(contributionsBoundary?.slice(1) ?? []))
       .all<ContributionRow>();
 
+    positions.push(...contribRows.results.map(historyPosition));
+
     if (contribRows.results.length > 50) {
       // Advance past the last examined row even if its body cannot be served.
       const last = contribRows.results[49];
@@ -163,8 +306,15 @@ export async function loadFellowCard(
         created_at: row.created_at,
         sponsor_at_event: row.sponsor_at_event,
       });
-      if (payload?.claim_id === row.id && item.success) contributions.push(item.data);
-      else unavailableContributions++;
+      if (payload?.claim_id === row.id && item.success) {
+        contributions.push(item.data);
+        sources.push({
+          ...historyPosition(row),
+          payload_sha256: row.payload_sha256,
+          payload_json: row.payload_json,
+          screening_provenance: row.screening_provenance,
+        });
+      } else unavailableContributions++;
     }
   }
 
@@ -221,6 +371,8 @@ export async function loadFellowCard(
       .bind(fellow.fellow_id, ...(reviewsBoundary?.slice(1) ?? []))
       .all<ReviewRow>();
 
+    positions.push(...reviewRows.results.map(historyPosition));
+
     if (reviewRows.results.length > 50) {
       const last = reviewRows.results[49];
       if (last === undefined) throw new Error("Fellow review boundary unavailable");
@@ -256,6 +408,12 @@ export async function loadFellowCard(
       });
       if (item.success) {
         reviews.push(item.data);
+        sources.push({
+          ...historyPosition(row),
+          payload_sha256: row.payload_sha256,
+          payload_json: row.payload_json,
+          screening_provenance: row.screening_provenance,
+        });
         if (legacy) legacyReviews++;
       } else unavailableReviews++;
     }
@@ -293,6 +451,7 @@ export async function loadFellowCard(
       LIMIT ${FELLOW_NEGATIVE_HISTORY_PAGE_SIZE + 1}`)
       .bind(fellow.fellow_id, ...(negativeBoundary?.slice(1) ?? []))
       .all<PublicDeadEndRow & { event_id: string; created_at: string }>();
+    positions.push(...rows.results.map(historyPosition));
     if (rows.results.length > FELLOW_NEGATIVE_HISTORY_PAGE_SIZE) {
       const last = rows.results[FELLOW_NEGATIVE_HISTORY_PAGE_SIZE - 1];
       if (last === undefined) throw new Error("Fellow negative history boundary unavailable");
@@ -300,29 +459,21 @@ export async function loadFellowCard(
     }
     for (const row of rows.results.slice(0, FELLOW_NEGATIVE_HISTORY_PAGE_SIZE)) {
       const item = FellowNegativeHistoryItemSchema.safeParse(await readPublicDeadEnd(row));
-      if (item.success) negativeHistory.push(item.data);
-      else unavailableNegative = true;
+      if (item.success && row.payload_json !== null) {
+        negativeHistory.push(item.data);
+        sources.push({
+          ...historyPosition(row),
+          payload_sha256: row.payload_sha256,
+          payload_json: row.payload_json,
+          screening_provenance: row.screening_provenance ?? null,
+        });
+      } else unavailableNegative = true;
     }
   }
 
   // Totals count initial, event-backed promotions across the full history, not the displayed window.
   const totals = await db
-    .prepare(`
-    SELECT COUNT(CASE WHEN cv.kind = 'conjecture' THEN 1 END) AS conjectures,
-           COUNT(CASE WHEN cv.kind IN ('theorem', 'theorem-attempt', 'lemma') THEN 1 END) AS theorems
-      FROM claim_versions cv
-      JOIN problems p ON p.id = cv.problem_id AND p.status != 'private-draft' AND p.unlisted = 0
-     WHERE cv.editor_fellow_id = ? AND cv.version = 1
-       AND EXISTS (SELECT 1 FROM events e
-         WHERE e.problem_id = cv.problem_id AND e.object_id = cv.claim_id
-           AND e.object_version = cv.version AND e.object_kind = 'claim'
-           AND e.type = 'claim.created' AND e.actor_fellow_id = cv.editor_fellow_id
-           AND e.actor_sponsor_id IS NOT NULL AND e.seq <= p.public_seq
-           AND NOT ${eventContentHiddenSql("e")}
-           AND NOT ${hiddenByContentControlSql("p.id", "p.id")}
-           AND EXISTS(SELECT 1 FROM event_content c WHERE c.event_id=e.id
-             AND c.payload_sha256=e.payload_sha256 AND c.redacted_at IS NULL))
-  `)
+    .prepare(PROMOTION_TOTALS_SQL)
     .bind(fellow.fellow_id)
     .first<{ conjectures: number; theorems: number }>();
   if (!totals) throw new Error("Fellow promotion totals unavailable");
@@ -364,9 +515,14 @@ export async function loadFellowCard(
     forceNoteCount = 0;
   }
 
-  // Last awaited read: calibration revalidates scientific witnesses and current
-  // public cuts before release, just as the individual scientific faces do.
-  const outcomes = await loadFellowCalibration(db, fellow.fellow_id);
+  // Last awaited read: every exposed history source, count and identity shares
+  // calibration's final scientific release transaction. No captured body can
+  // escape a hide or redaction while the other histories are being assembled.
+  const outcomes = await loadFellowCalibration(
+    db,
+    fellow.fellow_id,
+    cardReleaseChecks(db, fellow, positions, sources, sessionsCount, totals),
+  );
 
   return FellowCardResponseSchema.parse({
     fellow_id: fellow.fellow_id,
@@ -380,7 +536,12 @@ export async function loadFellowCard(
     transfer_effective_at: transferEffectiveAt,
     sessions_count: sessionsCount,
     promoted_contributions: contributions,
-    reviews,
+    reviews: reviews.map((review) => ({
+      ...review,
+      outcome: outcomes.reviewOutcomes.get(`${review.problem_id}/${review.review_id}`) ?? {
+        status: "unavailable",
+      },
+    })),
     negative_history: negativeHistory,
     ...(nextContributions === undefined ? {} : { next_contributions_before: nextContributions }),
     ...(nextReviews === undefined ? {} : { next_reviews_before: nextReviews }),
@@ -436,6 +597,8 @@ export async function loadFellowCard(
       "contributions and reviews without matching immutable event attribution are excluded",
       "contribution and review text with redacted, missing or mismatched event content is excluded",
       "review tiers describe publication provenance, not subsequent evidence availability or verification survival",
+      "per-review outcomes share canonical scientific snapshots and source checks; histories beyond 100 reviews or 16 exact targets may be unavailable",
+      "a retained adverse finding is not an accuracy judgment; withdrawal removes positive authority without erasing negative knowledge",
       "review survival counts only independent confirmations retaining current scientific support; this is not an accuracy rate or a claim of truth",
       ...outcomes.omitted,
       ...(outcomes.selfCorrected === null && outcomes.survivingReviews === null

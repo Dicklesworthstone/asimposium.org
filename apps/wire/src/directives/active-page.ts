@@ -6,6 +6,7 @@ import {
   ActiveDirectiveResponseSchema,
   activeDirectivesUrl,
   DIRECTIVES_SCHEMA_ID,
+  type InitialSponsorInstruction,
 } from "@asimposium/contracts/directives";
 import type { D1Database } from "@cloudflare/workers-types";
 import type { FellowCredentialBinding } from "../enrollment/service.ts";
@@ -14,6 +15,7 @@ import {
   ACTIVE_DIRECTIVE_SOURCE_SQL,
   type ActiveDirectiveRow,
 } from "./active-source.ts";
+import { type InitialInstructionRow, initialInstructionFromRow } from "./initial-instruction.ts";
 
 export class ActiveDirectiveReadError extends Error {
   constructor(readonly reason: "invalid" | "changed" | "unauthorized" | "unavailable") {
@@ -41,17 +43,19 @@ const PAGE_SQL = `WITH authority AS (
     AND (?6 IS NULL OR ?6 = (SELECT snapshot_seq FROM snapshot))
     ORDER BY seq ASC LIMIT ?8)
 )
-SELECT snapshot.snapshot_seq,
+SELECT authority.*, snapshot.snapshot_seq,
   (?7 = 0 OR EXISTS (SELECT 1 FROM source WHERE verb = 'forbid' AND seq = ?7)) AS frontier_valid,
   page.*
 FROM authority CROSS JOIN snapshot LEFT JOIN page ON 1 = 1
 ORDER BY page.seq ASC, page.id ASC`;
 
-type PageRow = Partial<ActiveDirectiveRow> & { snapshot_seq: number; frontier_valid: number };
+type PageRow = Partial<ActiveDirectiveRow> &
+  InitialInstructionRow & { snapshot_seq: number; frontier_valid: number };
 
 async function queryDigest(
   binding: FellowCredentialBinding,
   query: ActiveDirectiveQuery,
+  initialInstruction: InitialSponsorInstruction | null,
 ): Promise<string> {
   const value = JSON.stringify([
     "active-directives-v1",
@@ -60,6 +64,7 @@ async function queryDigest(
     binding.credentialId,
     query.problem_id ?? null,
     query.limit,
+    initialInstruction,
   ]);
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
@@ -73,17 +78,17 @@ export async function readActiveDirectivePage(
   const parsed = ActiveDirectiveQuerySchema.safeParse(input);
   if (!parsed.success) throw new ActiveDirectiveReadError("invalid");
   const query = parsed.data;
-  const digest = await queryDigest(binding, query);
+  let boundQuery: string | undefined;
   let expected: number | null = null;
   let after = 0;
   if (query.cursor !== undefined) {
     if (ACTIVE_DIRECTIVE_CURSOR_PATTERN.exec(query.cursor)?.[0] !== query.cursor)
       throw new ActiveDirectiveReadError("invalid");
-    const [, boundQuery, snapshotText, afterText] = query.cursor.split(".");
+    const [, cursorQuery, snapshotText, afterText] = query.cursor.split(".");
+    boundQuery = cursorQuery;
     expected = Number(snapshotText);
     after = Number(afterText);
     if (
-      boundQuery !== digest ||
       !Number.isSafeInteger(expected) ||
       expected < 1 ||
       !Number.isSafeInteger(after) ||
@@ -110,6 +115,17 @@ export async function readActiveDirectivePage(
   // A valid empty set still has an authority row. No row means the live
   // credential/scope was lost; never publish that as "no instructions".
   if (!state) throw new ActiveDirectiveReadError("unauthorized");
+  const initialInstruction = await initialInstructionFromRow(
+    state,
+    binding,
+    query.problem_id ?? null,
+  );
+  // Bind the complete eligible onboarding source, including its absence, to
+  // the same snapshot as this page. A cursor cannot splice changed private
+  // grant context into an otherwise unchanged sequence of ordinary directives.
+  const digest = await queryDigest(binding, query, initialInstruction);
+  if (boundQuery !== undefined && boundQuery !== digest)
+    throw new ActiveDirectiveReadError("invalid");
   if (!Number.isSafeInteger(state.snapshot_seq) || state.snapshot_seq < 0)
     throw new ActiveDirectiveReadError("unavailable");
   if (expected !== null && expected !== state.snapshot_seq)
@@ -136,13 +152,14 @@ export async function readActiveDirectivePage(
     delivered: true,
     acknowledged_at: row.acknowledged_at,
   });
-  return ActiveDirectiveResponseSchema.parse({
+  const response = ActiveDirectiveResponseSchema.parse({
     schema: DIRECTIVES_SCHEMA_ID,
     fellow_id: binding.fellowId,
     sponsor_id: binding.sponsorId,
     problem_id: query.problem_id ?? null,
     scope: query.problem_id ? "problem" : "global",
     snapshot_seq: state.snapshot_seq,
+    initial_instruction: initialInstruction,
     focus: focus ? receipt(focus) : null,
     forbids: selected.map(receipt),
     has_more: hasMore,
@@ -162,4 +179,53 @@ export async function readActiveDirectivePage(
         : []),
     ],
   });
+  // Both EI identity and cursor hashing yield after the page snapshot. Check
+  // live authority and the exact sources again after those awaits, so a revoke,
+  // transfer, panic or instruction change cannot release stale private bytes.
+  // This repeats the bounded page, including the latest ordinary sequence and
+  // source/receipt witnesses. ACK is receipt metadata, not instruction authority.
+  // No further asynchronous work may follow this final bounded witness read.
+  const checked = await db
+    .prepare(PAGE_SQL)
+    .bind(
+      binding.fellowId,
+      binding.sponsorId,
+      query.problem_id ?? null,
+      binding.credentialId,
+      binding.tokenHash,
+      expected,
+      after,
+      query.limit + 1,
+    )
+    .all<PageRow>();
+  if (!checked.success) throw new ActiveDirectiveReadError("unavailable");
+  const current = checked.results[0];
+  if (!current) throw new ActiveDirectiveReadError("unauthorized");
+  const ordinarySources = (page: PageRow[]) =>
+    JSON.stringify(
+      page
+        .filter((row) => row.id !== null && row.id !== undefined)
+        .map((row) => [
+          row.id,
+          row.verb,
+          row.body,
+          row.problem_id,
+          row.notice_id,
+          row.created_at,
+          row.seq,
+        ]),
+    );
+  if (
+    current.snapshot_seq !== state.snapshot_seq ||
+    current.frontier_valid !== state.frontier_valid ||
+    current.initial_enrollment_id !== state.initial_enrollment_id ||
+    current.initial_sponsor_id !== state.initial_sponsor_id ||
+    current.initial_created_at !== state.initial_created_at ||
+    current.initial_instruction_type !== state.initial_instruction_type ||
+    current.initial_instruction_text !== state.initial_instruction_text ||
+    current.initial_problem_id !== state.initial_problem_id ||
+    ordinarySources(checked.results) !== ordinarySources(result.results)
+  )
+    throw new ActiveDirectiveReadError("changed");
+  return response;
 }

@@ -271,7 +271,14 @@ export async function operatorReportResolution(
         };
         return result.reason === "not-found"
           ? notFound(example)
-          : stateConflict("This report was already resolved. Nothing was changed.", example);
+          : stateConflict(
+              result.reason === "integrity-case-required"
+                ? "An integrity allegation cannot be upheld through a generic report decision. Open its typed integrity case from the retained report, or dismiss an unsupported report without opening an investigation."
+                : result.reason === "integrity-case-owned"
+                  ? "This report belongs to an integrity case. Read that case and use its response, decision or appeal action; generic moderation cannot replace the investigation."
+                  : "This report was already resolved. Nothing was changed.",
+              example,
+            );
       }
       return privateJson(command.receipt(result.auditEventId, result.resolvedAt));
     },

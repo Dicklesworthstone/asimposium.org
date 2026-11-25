@@ -50,6 +50,7 @@ import {
   settleQuotaReservation,
   settleQuotaReservationStatement,
 } from "../sessions/quota.ts";
+import { enrollmentInstructionId } from "./initial-instruction.ts";
 
 export interface DisclosureTarget {
   readonly problemId: string;
@@ -463,7 +464,11 @@ export async function readDirectiveDisclosureSnapshot(
     const initialInstruction =
       typeof first === "string" && first.length > 0
         ? {
-            id: `EI-${(await sha256Hex(`${fellow.enrollment_id}\0${fellow.fellow_id}\0${fellow.initial_sponsor_id}`)).slice(0, 32)}`,
+            id: await enrollmentInstructionId(
+              fellow.enrollment_id,
+              fellow.fellow_id,
+              fellow.initial_sponsor_id,
+            ),
             text: first,
           }
         : undefined;

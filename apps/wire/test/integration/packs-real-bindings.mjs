@@ -154,6 +154,21 @@ await runLocalWorkerJourney(
             false,
             "coordination precedes any public claim",
           );
+          const route = pack.items.find((item) => item.kind === "active-hypothesis");
+          assert.ok(route, "arriving Fellows can see the existing scientific attack route");
+          assert.equal(route.scope, "ledger");
+          assert.equal(route.untrusted, true);
+          const routeContext = json(route.body);
+          assert.equal(routeContext.hypothesis_id, firstHypothesis.hypothesis_id);
+          assert.equal(routeContext.status, "active");
+          assert.equal(routeContext.cursor, pack.cursor);
+          assert.ok(routeContext.publication.fellow_id);
+          assert.ok(routeContext.publication.sponsor_id);
+          assert.equal(routeContext.publication.session_id, authorSession);
+          assert.equal(
+            routeContext.source,
+            `/p/${problem}/hypotheses/${firstHypothesis.hypothesis_id}.md?through=${pack.cursor}`,
+          );
           const work = pack.items.find((item) => item.id === acquired.lease_id);
           assert.ok(work, "a first-hypothesis lease is visible to another current member");
           assert.equal(work.kind, "lease");
@@ -228,6 +243,18 @@ await runLocalWorkerJourney(
         author,
         201,
       );
+      const frontierObligation = "Establish the additive base case before applying induction.";
+      const frontierGap = await call(
+        `/v1/sessions/${authorSession}/gaps`,
+        {
+          target_claim_id: published.claim_id,
+          target_version: 1,
+          obligation: frontierObligation,
+          closes_what: "The base case of the additive identity argument.",
+        },
+        author,
+        201,
+      );
       const claimLease = LeaseAcquireResponseSchema.parse(
         await call(
           `/v1/sessions/${authorSession}/leases`,
@@ -252,6 +279,73 @@ await runLocalWorkerJourney(
           .find((item) => item.kind === "claim" && item.id === published.claim_id)
           ?.body.includes(`leased by ${claimLease.fellow_id}`),
       );
+      const routeContext = json(
+        leasedClaim.items.find((item) => item.kind === "active-hypothesis").body,
+      );
+      const gapContext = json(
+        leasedClaim.items.find((item) => item.kind === "open-proof-gap").body,
+      );
+      assert.equal(gapContext.gap_id, frontierGap.gap_id);
+      assert.equal(gapContext.content.target_claim_id, published.claim_id);
+      assert.equal(gapContext.content.target_version, 1);
+      assert.equal(gapContext.content.obligation, frontierObligation);
+      assert.equal(gapContext.filing.session_id, authorSession);
+      for (const profile of ["orient", "working"]) {
+        const arrival = PackResponseSchema.parse(
+          await call(
+            `/v1/sessions/${outsiderSession}/pack?profile=${profile}&max_tokens=8000`,
+            undefined,
+            outsider,
+          ),
+        );
+        const obligation = arrival.items.find((item) => item.kind === "open-proof-gap");
+        assert.ok(obligation, "orientation exposes the unresolved scientific obligation");
+        assert.equal(obligation.scope, "ledger");
+        assert.equal(obligation.untrusted, true);
+        const record = json(obligation.body);
+        assert.equal(record.gap_id, frontierGap.gap_id);
+        assert.equal(record.content.obligation, frontierObligation);
+        assert.equal(record.cursor, arrival.cursor);
+        assert.equal(
+          record.source,
+          `/p/${problem}/gaps.md?through=${arrival.cursor}&target=${frontierGap.gap_id}`,
+        );
+        assert.ok(!JSON.stringify(arrival).includes("PRIVATE-PACK-SOURCE"));
+      }
+      for (const record of [routeContext, gapContext]) {
+        const response = await worker.fetch(`${origin}${record.source}`, {
+          headers: { "User-Agent": userAgent },
+        });
+        assert.equal(response.status, 200, "an anonymous reader can follow the exact source");
+        const text = await response.text();
+        assert.ok(text.includes(record.hypothesis_id ?? record.gap_id));
+        assert.ok(!text.includes("PRIVATE-PACK-SOURCE"));
+      }
+      const smallFrontier = PackResponseSchema.parse(
+        await call(
+          `/v1/sessions/${outsiderSession}/pack?profile=working&max_tokens=800`,
+          undefined,
+          outsider,
+        ),
+      );
+      assert.ok(smallFrontier.tokens_estimate <= 800);
+      for (const [kind, marker, collection] of [
+        ["active-hypothesis", "active-hypotheses", "hypotheses"],
+        ["open-proof-gap", "open-proof-gaps", "gaps"],
+      ]) {
+        if (!smallFrontier.items.some((item) => item.kind === kind))
+          assert.ok(
+            smallFrontier.omitted.some(
+              (item) =>
+                item.reason === "budget_exceeded" &&
+                item.detail?.startsWith(`${marker}: budget`) &&
+                item.detail.includes(
+                  `/p/${problem}/${collection}.md?through=${smallFrontier.cursor}`,
+                ),
+            ),
+            "a compact pack keeps source recovery when a whole frontier record is omitted",
+          );
+      }
       const isolatedReview = PackResponseSchema.parse(
         await call(
           `/v1/sessions/${outsiderSession}/pack?profile=review&target=${published.claim_id}@1&max_tokens=8000`,
@@ -264,12 +358,107 @@ await runLocalWorkerJourney(
         false,
       );
       assert.ok(!JSON.stringify(isolatedReview).includes(claimLease.objective));
+      assert.ok(
+        isolatedReview.items.every(
+          (item) => item.kind !== "active-hypothesis" && item.kind !== "open-proof-gap",
+        ),
+        "P12: arrival frontier summaries never enter the isolated review profile",
+      );
       await call(
         `/v1/sessions/${authorSession}/leases/${published.claim_id}/release`,
         {},
         author,
         200,
       );
+      const currentFrontier = async () =>
+        PackResponseSchema.parse(
+          await call(
+            `/v1/sessions/${outsiderSession}/pack?profile=working&max_tokens=8000`,
+            undefined,
+            outsider,
+          ),
+        );
+      for (const [targetKind, id, kind, text, historicalSource] of [
+        [
+          "hypothesis",
+          firstHypothesis.hypothesis_id,
+          "active-hypothesis",
+          routeContext.route,
+          routeContext.source,
+        ],
+        ["gap", frontierGap.gap_id, "open-proof-gap", frontierObligation, gapContext.source],
+      ]) {
+        const control = (action) =>
+          operatorCall("POST", "/v1/operators/content-control", "operator.content.control", {
+            target_id: `${problem}/${id}`,
+            target_kind: targetKind,
+            action,
+            reason: "Verify present-day controls on arrival frontier and frozen source reads.",
+          });
+        await control("hide");
+        try {
+          const hidden = await currentFrontier();
+          assert.ok(!hidden.items.some((item) => item.kind === kind));
+          assert.ok(!JSON.stringify(hidden).includes(text));
+          assert.ok(hidden.omitted.some((item) => item.reason.endsWith("_unavailable")));
+          const historical = await worker.fetch(`${origin}${historicalSource}`, {
+            headers: { "User-Agent": userAgent },
+          });
+          assert.ok([200, 403].includes(historical.status));
+          assert.ok(!(await historical.text()).includes(text));
+        } finally {
+          await control("restore");
+        }
+        assert.ok((await currentFrontier()).items.some((item) => item.kind === kind));
+      }
+      const routeHead = await call(
+        `/p/${problem}/hypotheses/${firstHypothesis.hypothesis_id}.json`,
+      );
+      await call(
+        `/v1/sessions/${authorSession}/hypotheses/${firstHypothesis.hypothesis_id}/lifecycle`,
+        {
+          action: "defer",
+          expected_last_event_id: routeHead.hypotheses[0].last_event.event_id,
+          reason: "Pause this route while checking the explicit proof obligation.",
+        },
+        author,
+        200,
+      );
+      await call(
+        `/v1/sessions/${authorSession}/gaps/close`,
+        { gap_id: frontierGap.gap_id, outcome: "withdrawn" },
+        author,
+        201,
+      );
+      const settled = await currentFrontier();
+      assert.ok(
+        settled.items.every(
+          (item) => item.kind !== "active-hypothesis" && item.kind !== "open-proof-gap",
+        ),
+        "deferred routes and settled obligations leave current arrival context",
+      );
+      const oldRoute = await call(routeContext.source.replace(".md?", ".json?"));
+      const oldGap = await call(gapContext.source.replace(".md?", ".json?"));
+      assert.equal(oldRoute.hypotheses[0].status, "active");
+      assert.equal(oldGap.gaps[0].status, "open");
+      const deferred = await call(`/p/${problem}/hypotheses/${firstHypothesis.hypothesis_id}.json`);
+      await call(
+        `/v1/sessions/${authorSession}/hypotheses/${firstHypothesis.hypothesis_id}/lifecycle`,
+        {
+          action: "resume",
+          expected_last_event_id: deferred.hypotheses[0].last_event.event_id,
+          reason: "Return to the original scientific route after resolving its work pause.",
+        },
+        author,
+        200,
+      );
+      const resumed = (await currentFrontier()).items.find(
+        (item) => item.kind === "active-hypothesis",
+      );
+      assert.ok(resumed, "resumed routes return with their original scientific publication");
+      const resumedContext = json(resumed.body);
+      assert.deepEqual(resumedContext.publication, routeContext.publication);
+      assert.ok(resumedContext.last_event.seq > resumedContext.publication.seq);
     }
     const initialOrientation = PackResponseSchema.parse(
       await call(

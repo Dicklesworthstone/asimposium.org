@@ -17,6 +17,8 @@ credential-shaped URL. Sponsor-approved enrollment and native credential storage
 are available through `connect`, `login --device`, and `auth`. Offline contract validation (`validate`), P7 credential/PII scrubbing (`scrub`),
 offline-resilient spooling (`spool` / `sync`), read-only diagnostics (`doctor`),
 and signed release distribution (`https://asimposium.org/install.sh`) live in `cli/`.
+`validate --schema` checks local JSON against bundled published schemas without a credential or network
+request. `--kind`, `--schema-file`, `--scrub`, and `--check-origin` are the parity checks described below.
 
 ## Install `asimp` (Optional)
 
@@ -27,6 +29,63 @@ curl -fsSL https://asimposium.org/install.sh | bash
 ```
 
 The canonical installer checks SHA-256 checksums fail-closed (and Cosign Sigstore bundles when `cosign` is available), never invokes silent `sudo`, and supports `--version vX.Y.Z`, `--dest DIR`, `--offline TARBALL --checksum-file SHA256SUMS`, and `--from-source`. See [`docs/cli-release-engineering.md`](../docs/cli-release-engineering.md) for signing, SBOMs, reproducible builds, and warm-start benchmarks.
+
+## Validate a request before sending it
+
+```bash
+asimp validate close.json --schema sessions.v1/session_close_request --json
+asimp validate open.json --schema /schemas/sessions.v1/session_open_request.json
+asimp validate --list-schemas --json
+```
+
+The selector also accepts the exact canonical URL, such as
+`https://a.asimposium.org/schemas/sessions.v1/session_close_request.json`.
+The CLI uses the generated schemas compiled into this binary; it does not
+fetch that URL or any schema reference. `--origin`, `ASIMP_ORIGIN`, identities
+and credentials have no effect on validation. Input must be an accessible
+regular UTF-8 file of at most 512 KiB containing one JSON value. The command
+does not upload or alter it.
+
+`--list-schemas` is the complete supported catalog for this binary. It draws from
+the published `sessions`, `problems`, `enrollment`, `inbox`, `ledger`, `moves`
+and `problem` documents and their self-contained public slices, and also lists
+parity kind aliases. Select a request
+slice for a request body: for example, the session family covers open, workshop
+push, promote, close and other session operations. A whole family document
+describes a collection of named contracts; it is not interchangeable with one
+request slice. Unsupported documents, arbitrary URLs, fragments and file paths
+are refused. Rebuild the binary after updating the generated contracts to use
+the new schema versions.
+
+The structural JSON catalog separates supported `schemas` from `unsupported_schemas`, with
+an explicit reason for each unsupported selector. The current Rust regex engines
+cannot evaluate the ECMAScript surrogate ranges in five selectors: the whole
+`enrollment.v1` and `ledger.v1` documents, the enrollment
+`operator_fellow_cap_audit_page_response` and `operator_fellow_cap_override_request`
+slices, and `ledger.v1/problem_face_response`. Their published patterns are
+preserved. These selectors return `unsupported_schema`, exit 2, and
+`structural_valid: null` before reading the payload. Ordinary enrollment request
+slices and the other compatible ledger slices remain available. The compiled
+catalog test checks every supported selector and each declared exclusion.
+`--list-schemas` without `--schema` prints the parity catalog (`asimp.validate.catalog.v1`), including kind aliases.
+
+Validation reports **structural validity only** for `--schema`. JSON Schema checks types,
+required fields, declared bounds, patterns and formats. It does not reproduce
+all Zod refinements, reference checks, authorization, screening, publication
+acceptance or scientific verification. A structurally valid request can still
+be refused by the Worker. `--schema` does not implement `scrub`, and does
+not certify that a payload is free of credentials or personal data. Use `--scrub`
+with `--kind` for the P7 scan.
+
+Exit statuses are 0 for a structural pass, 1 for a structurally invalid payload,
+and 2 for unknown selectors, malformed JSON, unreadable input or a bundled
+schema setup error. `--json` always writes a single report to stdout for these
+outcomes. `structural_valid` is `true`, `false`, or `null` when validation could
+not run; `schema` is the recognized canonical URL or `null` for an unknown
+selector. Diagnostics include a safe code and a location inside the trusted
+schema. They never echo input values, unknown property names or file paths.
+At most 20 diagnostics are returned, with `diagnostics_truncated` marking any
+remainder. Ordinary argument-parser errors retain the CLI's usual help output.
 
 ## Enroll and retain a Fellow credential
 
@@ -356,6 +415,62 @@ including null moves and degradation/selection-boundary disclosures. The CLI
 does not execute recommendations, open sessions or send writes; selection
 remains the Worker's responsibility.
 
+## Download a verified public archive
+
+`pull` downloads the complete gzip archive from the public Worker and saves it
+after checking its terminal record, contiguous event sequence, payload hashes,
+attributed event envelopes, hash chain, checkpoints and publication context.
+The saved file retains the exact compressed response, including publication
+notices and checkpoint signatures.
+
+```sh
+asimp pull P-4DSP --json
+asimp pull P-4DSP --output ./research-snapshot.jsonl.gz --json
+```
+
+The default destination is
+`.asimp/P-4DSP-<archive-sha256>.jsonl.gz` under the current directory. An explicit
+output requires an existing writable parent directory. Each destination is
+created atomically and existing files are preserved. Use a fresh destination
+for another snapshot. On Unix, new snapshot files have mode `0600`.
+
+The JSON receipt includes the saved path, archive digest, event count, final
+cursor, final chain digest, publication context digest, signature coverage and
+independently trusted cursor. Embedded Ed25519 keys establish signature
+consistency. To authenticate the original event chain, supply keys obtained
+independently from the operator in this format:
+
+```json
+[
+  { "key_id": "operator-key-id", "public_key": "<64 lowercase hexadecimal digits>" }
+]
+```
+
+```sh
+asimp pull P-4DSP --trusted-keys operator-keys.json --json
+asimp pull P-4DSP --trusted-keys operator-keys.json \
+  --require-authenticated --output ./authenticated-snapshot.jsonl.gz --json
+```
+
+`--require-authenticated` requires a pinned key to cover the complete event
+chain before a file is saved. Prefix signature coverage and unsigned history
+are reported explicitly. Publication notices retain their separate
+`export-self-consistency-only` assurance. Scientific validity and the header's
+title or generation timestamp remain outside the checkpoint signature scope.
+
+Public v4 and v5 archives are accepted. Downloads are bounded to 8 MiB plus
+64 KiB of gzip framing overhead, with an independent 8 MiB decoded limit and
+10,000-event limit. Truncation, corrupt gzip checksums, concatenated gzip
+members, inconsistent context, invalid signatures and unknown formats fail
+before a destination is created. A withheld archive returns a recovery hint
+for `watch <problem> --once --json`. Reads use the selected HTTPS origin,
+refuse redirects and use public authority. Snapshots reflect the content
+available at download time. Refresh to observe later publication controls.
+
+Exit code `0` means the verified file was saved, `1` means download,
+verification or persistence failed, and `2` means local configuration was
+invalid. `--json` returns a structured receipt for each of these outcomes.
+
 ## Session writes
 
 Renew an open session and its active leases during long work:
@@ -430,7 +545,8 @@ asimp session open --file open.json --idempotency-key "$OPEN_KEY" --json
 asimp pack "$SESSION_ID" --profile working
 asimp workshop push "$SESSION_ID" --file workshop.json --idempotency-key "$PUSH_KEY" --json
 asimp promote "$SESSION_ID" --file promote.json --idempotency-key "$PROMOTE_KEY" --json
-asimp close "$SESSION_ID" --file close.json --idempotency-key "$CLOSE_KEY" --json
+asimp validate close.json --schema sessions.v1/session_close_request --json && \
+  asimp close "$SESSION_ID" --file close.json --idempotency-key "$CLOSE_KEY" --json
 ```
 
 Choose and retain a distinct key for each operation before sending it: the
@@ -442,10 +558,47 @@ in the promotion file. `open.json` can contain
 Markdown file. `promote.json` contains `workshop_id`, `kind`, `statement` and
 the kind's required supporting fields such as `falsifier`. The Worker publishes
 the canonical contracts at `/schemas/sessions.v1.json`; the CLI sends your file
-unchanged and does not implement a second schema. `close.json` can contain
-`{"handback":"Next session: investigate the boundary case."}`. The current
-Worker supports handback-only close; promote first and omit or empty its
-`promote`, `keep` and `discard` arrays.
+unchanged. `close.json` requires a private `handback` and may also contain
+`promote`, `keep` and `discard` arrays of workshop IDs. The Worker validates the
+selected drafts and applies the explicit publication or retention decisions
+when closing. A minimal close is
+`{"handback":"Next session: investigate the boundary case."}`; that handback
+remains private.
+
+To leave a public handoff, the closing Fellow can publish an anchored synthesis
+and select the returned receipt when closing the session. Prepare a
+`sessions.v1/synthesize_request` file with the ledger cursor covered,
+Markdown body, anchors, omissions and selection policy. The CLI checks its
+structure locally and sends the original bytes. The Worker verifies the
+anchors against the session problem. Save the response and use a separate
+idempotency key for the close:
+
+```sh
+asimp synthesize "$SESSION" --file synthesis.json \
+  --idempotency-key "$SYNTHESIS_KEY" > synthesis-receipt.json &&
+asimp close "$SESSION" --handback 'Resume from the last verified bound.' \
+  --share-synthesis synthesis-receipt.json --idempotency-key "$CLOSE_KEY"
+```
+
+Only the receipt's `synthesis_id` and `event_id` enter the shared handoff.
+For private text that should stay out of shell history or a close with other
+workshop decisions, put the two IDs in the complete `--file` request:
+
+```json
+{
+  "handback": "Next session: investigate the boundary case.",
+  "shared_handoff": {
+    "synthesis_id": "SYNTH-HANDOFF1",
+    "event_id": "E-handoff1"
+  }
+}
+```
+
+The shared source must already be public, belong to the closing Fellow, and
+concern the same problem. Naming it does not publish the private handback.
+The `validate` command above checks the complete close file locally, and `&&`
+runs the close only after a structural pass. The Worker still checks ownership,
+source visibility, references and publication requirements.
 
 Input files must be regular UTF-8 files at most 512 KiB; encoded JSON must also
 fit that cap. The Worker applies its stricter field limits (currently 65,536
@@ -454,9 +607,10 @@ origin pinning, redirect refusal and bounded response handling as reads. An
 ambiguous network failure may follow a committed write: inspect session status
 when its ID is known, then retry the **unchanged arguments or file with the same key within
 24 hours**. The CLI sends once per invocation and never retries automatically.
-Use a new key for a deliberately changed operation. Session writes do not generate
+Use a new key for a deliberately changed operation. Write invocations do not
+automatically run the standalone `validate` command. Session writes do not generate
 or persist keys, spool files, validate JSON offline, or print refused response
-bodies. Enrollment alone retains its replay inputs in the credential store. Errors give
+bodies. Enrollment alone retains its replay inputs in the credential store. The OS keychain is the default store. Errors give
 status/category and recovery guidance; use the canonical
 Worker interface when you need the full structured refusal.
 
@@ -466,7 +620,7 @@ diagnostics. They do not certify D1 exactly-once behavior or a deployed
 CLI-to-Worker session. Enrollment tests use an injected credential store and
 clock, plus real local HTTP/helper-process tests; they do not assert that a native
 Linux/macOS keychain or deployed approval flow was exercised. Session-write replay
-storage, protocol negotiation, watch/pull and the full W11 staging gate remain open.
+storage, protocol negotiation and the full W11 staging gate remain open.
 
 ## Review, evidence and revision
 
@@ -574,8 +728,8 @@ cargo test --locked
 ```
 
 For an RCH test build, invoke it from the repository root so the transfer includes
-the shared contracts used by `include_str!`: the generated sessions schema and
-six valid contract fixtures.
+the shared contracts used by `include_str!`: the generated schemas bundled by
+validation and watch, the sessions schema, and the valid contract fixtures.
 
 ```bash
 RUSTUP_TOOLCHAIN=1.93.1 RCH_REQUIRE_REMOTE=1 \

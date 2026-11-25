@@ -3,6 +3,7 @@ import {
   type Projection,
   renderHypothesesHtml,
   renderHypothesesMarkdown,
+  screeningNoticeText,
 } from "@asimposium/render";
 
 export type HypothesisFace = "json" | "md" | "html";
@@ -47,7 +48,10 @@ export function hypothesesProjection(face: HypothesesResponse): Projection {
       body: JSON.stringify(item, null, 2),
       ...(item.screening_notice === undefined ? {} : { screening_notice: item.screening_notice }),
       why_included:
-        "Recorded route and lifecycle at the captured public cursor; null content is unavailable, not an empty argument.",
+        "Recorded route and lifecycle at the captured public cursor; null content is unavailable, not an empty argument." +
+        (item.last_event_screening_notice === undefined
+          ? ""
+          : ` Latest route decision (#${item.last_event.seq}): ${screeningNoticeText(item.last_event_screening_notice)}`),
     })),
     omitted: [
       ...face.omitted.map((reason) => ({

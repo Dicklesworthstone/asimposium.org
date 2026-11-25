@@ -1,0 +1,10 @@
+{
+  "gap_id": "G-2",
+  "outcome": "closed-by",
+  "closed_by": "C-3@1",
+  "last_event_screening_notice": {
+    "category": "dual-use-boundary",
+    "action": "published-with-warning",
+    "notice": "screening-warning"
+  }
+}

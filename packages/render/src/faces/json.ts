@@ -30,6 +30,7 @@ export function renderJsonFace(prepared: PreparedProjection): string {
     preamble: prepared.preamble,
     ...(prepared.claim_state === undefined ? {} : { claim_state: prepared.claim_state }),
     ...(prepared.problem_status === undefined ? {} : { problem_status: prepared.problem_status }),
+    ...(prepared.roster === undefined ? {} : { roster: prepared.roster }),
     items: prepared.items.map((item) => ({
       kind: item.kind,
       id: item.id,

@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import Ajv2020 from "ajv/dist/2020.js";
 
 test("rate budgets represent a disabled sponsor limit but reject negative limits", () => {
   const budget = {
@@ -55,6 +56,54 @@ import {
 } from "../../src/enrollment.ts";
 
 const VALID_FIXTURE = new URL("../fixtures/valid/enrollment.json", import.meta.url);
+
+test("hello inbox feedback is additive, bounded, and distinguishes unavailable from empty", async () => {
+  const valid = await fixture(new URL("../fixtures/valid/hello-inbox.json", import.meta.url));
+  const invalid = await fixture(
+    new URL("../fixtures/invalid/hello-inbox-negative.json", import.meta.url),
+  );
+  const parsed = EnrollmentHelloResponseSchema.parse(valid);
+  const generated = (await fixture(GENERATED_ENROLLMENT_SCHEMA)) as {
+    properties: { hello_response: Record<string, unknown> };
+  };
+  const validate = new Ajv2020({ strict: false, validateFormats: false }).compile(
+    generated.properties.hello_response,
+  );
+  expect(validate(valid)).toBe(true);
+  expect(validate(invalid)).toBe(false);
+  expect(parsed.inbox).toEqual({ unacknowledged_count: 2 });
+  expect(parsed.unread_reviews).toHaveLength(1);
+  expect(EnrollmentHelloResponseSchema.safeParse(invalid).success).toBe(false);
+  const { inbox: _inbox, unread_reviews: _reviews, ...unavailable } = parsed;
+  expect(EnrollmentHelloResponseSchema.parse(unavailable)).toEqual(unavailable);
+  expect(validate(unavailable)).toBe(true);
+  expect(
+    EnrollmentHelloResponseSchema.parse({
+      ...unavailable,
+      inbox: { unacknowledged_count: 0 },
+      unread_reviews: [],
+    }).inbox,
+  ).toEqual({ unacknowledged_count: 0 });
+  expect(
+    EnrollmentHelloResponseSchema.safeParse({
+      ...parsed,
+      inbox: { ...parsed.inbox, notice_bodies: [] },
+    }).success,
+  ).toBe(false);
+  expect(
+    EnrollmentHelloResponseSchema.safeParse({
+      ...parsed,
+      unread_reviews: Array.from({ length: 51 }, () => parsed.unread_reviews![0]),
+    }).success,
+  ).toBe(false);
+  expect(validate({ ...parsed, inbox: { ...parsed.inbox, notice_bodies: [] } })).toBe(false);
+  expect(
+    validate({
+      ...parsed,
+      unread_reviews: Array.from({ length: 51 }, () => parsed.unread_reviews![0]),
+    }),
+  ).toBe(false);
+});
 
 test("hello read budget is additive and rejects negative remaining capacity", async () => {
   const valid = await fixture(new URL("../fixtures/valid/hello-read-budget.json", import.meta.url));

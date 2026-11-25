@@ -39,8 +39,10 @@ await runLocalWorkerJourney(async (context) => {
       }),
     );
   const drainAnswers = async () => {
-    for (let tick = 0; tick < 3; tick++)
-      assert.equal((await fixtures.deliverInboxTick()).failed, 0);
+    for (let tick = 0; tick < 3; tick++) {
+      const delivered = await fixtures.deliverInboxTick();
+      assert.equal(delivered.failed, 0, JSON.stringify({ stage: "inbox-delivery", ...delivered }));
+    }
   };
 
   // 1. Propose and publish problem
@@ -163,7 +165,27 @@ await runLocalWorkerJourney(async (context) => {
   const qRefusal = ScreeningPromotionDeniedResponseSchema.safeParse(canaryQuestionRes);
   assert.ok(qRefusal.success);
 
-  // 5. Ask Question 1 successfully (201)
+  // 5. A publishable context warning must not block a precise research ask.
+  // The notice is server-owned and remains bound to this exact publication.
+  const questionWarning = {
+    category: "dual-use-boundary",
+    action: "published-with-warning",
+    notice: "screening-warning",
+  };
+  const screensBeforeQuestionForgery = await fixtures.screeningCalls();
+  const forgedQuestion = await call(
+    `/v1/sessions/${sessionIdA}/questions`,
+    {
+      body_md: "Is there a known non-archimedean metric that bounds the residue sequence?",
+      screening_notice: questionWarning,
+    },
+    authorA,
+    422,
+    "question-forged-warning",
+  );
+  assert.equal(forgedQuestion.code, "QUESTION_BODY_INVALID");
+  assert.equal(await fixtures.screeningCalls(), screensBeforeQuestionForgery);
+  await fixtures.setScreenMode("allow-with-warning");
   const question1 = await call(
     `/v1/sessions/${sessionIdA}/questions`,
     {
@@ -175,12 +197,14 @@ await runLocalWorkerJourney(async (context) => {
     201,
     "q-idempotency-1",
   );
+  await fixtures.setScreenMode("pass");
   assert.equal(question1.ok, true);
   assert.ok(question1.question_id.startsWith("Q-"));
   assert.equal(question1.problem_id, problemId);
   assert.equal(question1.status, "open");
   assert.ok(question1.seq > 0);
   const question1Id = question1.question_id;
+  const screensAfterQuestion = await fixtures.screeningCalls();
 
   // 6. Idempotent replay of ask question (200)
   const replayQ1 = await call(
@@ -196,6 +220,39 @@ await runLocalWorkerJourney(async (context) => {
   );
   assert.equal(replayQ1.question_id, question1Id);
   assert.equal(replayQ1.ok, true);
+  assert.deepEqual(
+    replayQ1,
+    question1,
+    "warning publication replays the original question receipt",
+  );
+  assert.equal(await fixtures.screeningCalls(), screensAfterQuestion);
+  const questionReceipts = await env.DB.prepare(
+    `SELECT s.provenance_json FROM events e
+     JOIN screening_publications s ON s.event_id=e.id
+     WHERE e.problem_id=? AND e.object_id=? AND e.type='question.asked'`,
+  )
+    .bind(problemId, question1Id)
+    .all();
+  assert.equal(questionReceipts.results.length, 1, "one question event and notice after replay");
+  assert.deepEqual(
+    JSON.parse(questionReceipts.results[0].provenance_json).public_action,
+    questionWarning,
+  );
+  const questionPack = await call(
+    `/v1/sessions/${sessionIdA}/pack?profile=full&max_tokens=8000&through=${question1.seq}&after=${question1.seq - 1}`,
+    undefined,
+    authorA,
+  );
+  const packedQuestion = questionPack.items.find((item) => item.kind === "full-event");
+  assert.deepEqual(packedQuestion?.screening_notice, questionWarning);
+  assert.equal(
+    JSON.parse(packedQuestion.body).content.body_md,
+    "Is there a known non-archimedean metric that bounds the residue sequence?",
+  );
+  assert.ok(
+    !Object.hasOwn(JSON.parse(packedQuestion.body).content, "screening_notice"),
+    "the trusted notice is outside the question's untrusted scientific body",
+  );
 
   // 7. Lease question (Reviewer B opens session)
   const sessionB = await call(
@@ -205,6 +262,197 @@ await runLocalWorkerJourney(async (context) => {
     201,
   );
   const sessionIdB = sessionB.session_id;
+
+  // A new collaborator finds public help in its ordinary context, even when
+  // no question directly addresses it. This uses the mounted pack route and
+  // actual question publication, not an independently seeded pack fixture.
+  const collaboratorPack = (profile = "working", budget) =>
+    call(
+      `/v1/sessions/${sessionIdB}/pack?profile=${profile}${budget === undefined ? "" : `&max_tokens=${budget}`}`,
+      undefined,
+      reviewerB,
+    );
+  let arrivalQuestionSource;
+  for (const profile of ["orient", "working"]) {
+    const arrival = await collaboratorPack(profile, profile === "orient" ? 8000 : undefined);
+    const request = arrival.items.find((item) => item.kind === "research-question");
+    assert.ok(request, `${profile} exposes unanswered public help to a new collaborator`);
+    assert.equal(request.id, question1Id);
+    assert.equal(request.scope, "ledger");
+    assert.equal(request.untrusted, true);
+    assert.deepEqual(request.screening_notice, questionWarning);
+    const content = JSON.parse(request.body);
+    assert.equal(content.status, "open");
+    assert.equal(content.author_fellow_id, fellowIdA);
+    assert.equal(content.sponsor_id, sponsorA);
+    assert.equal(content.session_id, sessionIdA);
+    assert.equal(content.screening_notice, undefined);
+    assert.equal(content.cursor, arrival.cursor);
+    assert.equal(
+      content.source,
+      `/p/${problemId}/questions.md?through=${arrival.cursor}&target=${question1Id}`,
+    );
+    assert.ok(
+      arrival.next_actions.some(
+        (action) => action.method === "GET" && action.url === content.source,
+      ),
+    );
+    const exact = await worker.fetch(`${origin}${content.source}`);
+    assert.equal(exact.status, 200);
+    assert.ok((await exact.text()).includes("Is there a known non-archimedean metric"));
+    assert.ok(
+      !JSON.stringify(arrival).includes("Preliminary analysis of modular residue bounding."),
+      "another Fellow's workshop never enters a question pack",
+    );
+    arrivalQuestionSource = content.source;
+  }
+  const isolatedReview = await call(
+    `/v1/sessions/${sessionIdB}/pack?profile=review&target=${claim1Id}@1&max_tokens=8000`,
+    undefined,
+    reviewerB,
+  );
+  assert.ok(
+    !isolatedReview.items.some((item) => item.kind === "research-question"),
+    "public questions do not become author narrative in an isolated review",
+  );
+  const questionPackControl = (action) =>
+    operatorCall("POST", "/v1/operators/content-control", "operator.content.control", {
+      target_id: `${problemId}/${question1Id}`,
+      target_kind: "question",
+      action,
+      reason: "Verify arrival packs obey current question visibility.",
+    });
+  await questionPackControl("hide");
+  const hiddenQuestionPack = await collaboratorPack();
+  assert.ok(!hiddenQuestionPack.items.some((item) => item.id === question1Id));
+  assert.ok(
+    !JSON.stringify(hiddenQuestionPack).includes("Is there a known non-archimedean metric"),
+  );
+  assert.ok(
+    hiddenQuestionPack.omitted.some((item) => item.detail?.startsWith("public-questions:")),
+    "withheld source does not become an empty help queue",
+  );
+  assert.equal(
+    (await worker.fetch(`${origin}${arrivalQuestionSource}`)).status,
+    404,
+    "old read links still enforce current controls",
+  );
+  const hiddenLeaseScreens = await fixtures.screeningCalls();
+  for (const [path, body] of [
+    [`/v1/sessions/${sessionIdB}/questions/${question1Id}/lease`, { ttl_seconds: 3600 }],
+    [
+      `/v1/sessions/${sessionIdB}/leases`,
+      {
+        object: question1Id,
+        objective: "Check the public question",
+        deliverable: "A scoped resolution",
+      },
+    ],
+  ]) {
+    await call(path, body, reviewerB, 404);
+  }
+  assert.equal(
+    await fixtures.screeningCalls(),
+    hiddenLeaseScreens,
+    "hidden question sources cannot authorize either lease endpoint",
+  );
+  await questionPackControl("restore");
+  assert.ok((await collaboratorPack()).items.some((item) => item.id === question1Id));
+  const smallQuestionPack = await collaboratorPack("working", 800);
+  if (!smallQuestionPack.items.some((item) => item.id === question1Id))
+    assert.ok(
+      smallQuestionPack.omitted.some(
+        (item) => item.reason === "budget_exceeded" && item.detail?.startsWith("public-questions:"),
+      ),
+      "a budgeted-out question is explicitly omitted",
+    );
+
+  // Current visibility must still hold inside either acquisition's ledger
+  // transaction, after screening and source verification have completed.
+  const leaseSourceState = async () => {
+    const state = await env.DB.batch([
+      env.DB.prepare("SELECT public_seq, chain_digest FROM problems WHERE id = ?").bind(problemId),
+      env.DB.prepare("SELECT id, seq FROM events WHERE problem_id = ? ORDER BY seq").bind(
+        problemId,
+      ),
+      env.DB.prepare("SELECT * FROM questions WHERE problem_id = ? AND question_id = ?").bind(
+        problemId,
+        question1Id,
+      ),
+      env.DB.prepare("SELECT * FROM leases WHERE problem_id = ? ORDER BY lease_id").bind(problemId),
+    ]);
+    return state.map((row) => row.results);
+  };
+  const sourceSequence = (
+    await env.DB.prepare("SELECT seq FROM questions WHERE question_id = ?")
+      .bind(question1Id)
+      .first()
+  ).seq;
+  for (const [index, path, body] of [
+    [0, `/v1/sessions/${sessionIdB}/questions/${question1Id}/lease`, { ttl_seconds: 3600 }],
+    [
+      1,
+      `/v1/sessions/${sessionIdB}/leases`,
+      {
+        object: question1Id,
+        objective: "Check the public question",
+        deliverable: "A scoped resolution",
+      },
+    ],
+  ]) {
+    const before = await leaseSourceState();
+    const key = `question-lease-source-race-${index}`;
+    const insertControl = `INSERT INTO content_controls (
+      control_id, problem_id, target_kind, target_ref, visibility, source,
+      reason_category, actor, reason, version, created_at
+    ) VALUES (?, ?, 'question', ?, ?, 'operator', 'privacy', 'native-lease-test',
+      'Local source availability race.', ?, ?)`;
+    await fixtures.armRaceBeforeNextBatch(
+      insertControl,
+      [
+        `CC-lease-source-hide-${index}`,
+        problemId,
+        `#${sourceSequence}`,
+        "hidden",
+        1 + index * 2,
+        new Date().toISOString(),
+      ],
+      "INSERT INTO events",
+    );
+    const refused = await call(path, body, reviewerB, 409, key);
+    assert.equal(
+      await fixtures.raceStillArmed(),
+      false,
+      "source changed after admission and before commit",
+    );
+    assert.equal(refused.code, "OBJECT_VERSION_CONFLICT");
+    assert.deepEqual(
+      await leaseSourceState(),
+      before,
+      "source loss rolls back event, lease, question and cursor together",
+    );
+    assert.equal(
+      (
+        await env.DB.prepare(
+          "SELECT COUNT(*) AS n FROM session_write_replays WHERE idempotency_key = ?",
+        )
+          .bind(key)
+          .first()
+      ).n,
+      0,
+      "a rejected source race records no success receipt",
+    );
+    await env.DB.prepare(insertControl)
+      .bind(
+        `CC-lease-source-restore-${index}`,
+        problemId,
+        `#${sourceSequence}`,
+        "visible",
+        2 + index * 2,
+        new Date().toISOString(),
+      )
+      .run();
+  }
 
   await assertRacedWriteLeavesNoTrace({
     env,
@@ -237,6 +485,11 @@ await runLocalWorkerJourney(async (context) => {
   assert.equal(leaseRes.ok, true);
   assert.equal(leaseRes.question_id, question1Id);
   assert.ok(leaseRes.leased_until);
+  const leasedQuestionPack = await collaboratorPack();
+  const leasedQuestion = leasedQuestionPack.items.find((item) => item.id === question1Id);
+  assert.ok(leasedQuestion, "an unanswered leased question remains useful public context");
+  assert.equal(JSON.parse(leasedQuestion.body).status, "leased");
+  assert.ok(leasedQuestion.why_included.includes("not current availability"));
 
   // Idempotent replay of lease (200)
   const replayLease = await call(
@@ -261,6 +514,35 @@ await runLocalWorkerJourney(async (context) => {
     "lease-conflict-key",
   );
   assert.equal(conflictLeaseRes.code, "QUESTION_ALREADY_LEASED");
+  const heldQuestionLeases = (
+    await call(`/v1/sessions/${sessionIdB}/leases`, undefined, reviewerB)
+  ).leases.filter((lease) => lease.object_id === question1Id);
+  assert.equal(heldQuestionLeases.length, 1);
+  assert.equal(heldQuestionLeases[0].leased_until, leaseRes.leased_until);
+  assert.equal(
+    Date.parse(heldQuestionLeases[0].leased_until) - Date.parse(heldQuestionLeases[0].leased_at),
+    3600_000,
+  );
+  for (const [session, token, expectedCode] of [
+    [sessionIdA, authorA, "LEASED"],
+    [sessionIdB, reviewerB, "LEASE_ALREADY_EXISTS"],
+  ]) {
+    const overlap = await call(
+      `/v1/sessions/${session}/leases`,
+      {
+        object: question1Id,
+        objective: "Check the public question",
+        deliverable: "A scoped resolution",
+      },
+      token,
+      409,
+    );
+    assert.equal(
+      overlap.code,
+      expectedCode,
+      "dedicated and generic acquisition share one authority",
+    );
+  }
 
   // 8. Answer question with resolved_by_object (200). Answering is not
   // screened, so nothing but the event guard keeps a raced answer from
@@ -334,6 +616,57 @@ await runLocalWorkerJourney(async (context) => {
   assert.equal(answerRes.ok, true);
   assert.equal(answerRes.question_id, question1Id);
   assert.equal(answerRes.resolved_by_object, `${claim1Id}@1`);
+  assert.equal(
+    (
+      await env.DB.prepare("SELECT status FROM leases WHERE lease_id = ?")
+        .bind(heldQuestionLeases[0].lease_id)
+        .first()
+    ).status,
+    "released",
+    "answer and live reservation release commit together",
+  );
+  assert.equal(
+    (
+      await call(
+        `/v1/sessions/${sessionIdB}/leases`,
+        {
+          object: question1Id,
+          objective: "Retry the completed question",
+          deliverable: "A scoped resolution",
+        },
+        reviewerB,
+        409,
+      )
+    ).code,
+    "QUESTION_ALREADY_RESOLVED",
+  );
+  assert.deepEqual(
+    await call(
+      `/v1/sessions/${sessionIdB}/questions/${question1Id}/lease`,
+      { ttl_seconds: 3600 },
+      reviewerB,
+      200,
+      "lease-idempotency-1",
+    ),
+    leaseRes,
+    "an old lease receipt replays without resurrecting a completed reservation",
+  );
+  assert.equal(
+    (await call(`/v1/sessions/${sessionIdB}/leases`, undefined, reviewerB)).leases.some(
+      (lease) => lease.object_id === question1Id,
+    ),
+    false,
+  );
+  assert.ok(
+    !(await collaboratorPack()).items.some((item) => item.id === question1Id),
+    "answered work leaves the current unanswered-question context",
+  );
+  const earlierQuestion = await worker.fetch(`${origin}${arrivalQuestionSource}`);
+  assert.equal(earlierQuestion.status, 200);
+  assert.ok(
+    (await earlierQuestion.text()).includes("**Status**: open"),
+    "an answer cannot rewrite the earlier captured question state",
+  );
 
   // Idempotent replay of answer (200)
   const replayAnswer = await call(
@@ -530,6 +863,37 @@ await runLocalWorkerJourney(async (context) => {
   assert.equal(forbiddenWithdraw.code, "NOT_QUESTION_AUTHOR");
   assert.equal(forbiddenWithdraw.rule, "P9");
 
+  // The inverse overlap is refused too: a generic Q reservation protects
+  // against the dedicated endpoint, and author withdrawal releases it.
+  const genericQuestionLease = (
+    await call(
+      `/v1/sessions/${sessionIdB}/leases`,
+      {
+        object: question2Id,
+        objective: "Investigate the unresolved question",
+        deliverable: "A scoped resolution",
+        ttl_seconds: 600,
+      },
+      reviewerB,
+      201,
+    )
+  ).lease;
+  assert.equal(
+    Date.parse(genericQuestionLease.leased_until) - Date.parse(genericQuestionLease.leased_at),
+    600_000,
+  );
+  assert.equal(
+    (
+      await call(
+        `/v1/sessions/${sessionIdA}/questions/${question2Id}/lease`,
+        { ttl_seconds: 600 },
+        authorA,
+        409,
+      )
+    ).code,
+    "QUESTION_ALREADY_LEASED",
+  );
+
   // Author withdraws Question 2 (200)
   const withdrawRes = await call(
     `/v1/sessions/${sessionIdA}/questions/${question2Id}/withdraw`,
@@ -540,6 +904,34 @@ await runLocalWorkerJourney(async (context) => {
   );
   assert.equal(withdrawRes.ok, true);
   assert.equal(withdrawRes.question_id, question2Id);
+  assert.equal(
+    (
+      await env.DB.prepare("SELECT status FROM leases WHERE lease_id = ?")
+        .bind(genericQuestionLease.lease_id)
+        .first()
+    ).status,
+    "released",
+    "withdrawal releases a generic reservation on the same question",
+  );
+  assert.equal(
+    (
+      await call(
+        `/v1/sessions/${sessionIdB}/leases`,
+        {
+          object: question2Id,
+          objective: "Retry the withdrawn question",
+          deliverable: "A scoped resolution",
+        },
+        reviewerB,
+        409,
+      )
+    ).code,
+    "QUESTION_ALREADY_WITHDRAWN",
+  );
+  assert.ok(
+    !(await collaboratorPack()).items.some((item) => item.id === question2Id),
+    "withdrawn questions leave arrival context while their public history remains readable",
+  );
 
   // Idempotent replay of withdrawal (200)
   const replayWithdraw = await call(
@@ -603,6 +995,16 @@ await runLocalWorkerJourney(async (context) => {
   assert.equal(q1Item.session_id, sessionIdA);
   assert.equal(q1Item.status, "resolved");
   assert.equal(q1Item.resolved_by_object, `${claim1Id}@1`);
+  assert.deepEqual(
+    q1Item.screening_notice,
+    questionWarning,
+    "answers and leases cannot replace the question publication's notice",
+  );
+  assert.equal(
+    parsedQList.data.questions.find((q) => q.question_id === question2Id)?.screening_notice,
+    undefined,
+    "a different question cannot borrow its neighbor's notice",
+  );
 
   const qListMdRes = await worker.fetch(`${origin}/p/${problemId}/questions.md`);
   assert.equal(qListMdRes.status, 200);
@@ -610,12 +1012,21 @@ await runLocalWorkerJourney(async (context) => {
   assert.ok(qListMd.includes(`## Question \`${question1Id}\``));
   assert.ok(qListMd.includes("- **Status**: resolved"));
   assert.ok(!qListMd.includes("Leaderboard"));
+  const questionNoticeText = "Published with a screening context notice: dual-use-boundary.";
+  assert.ok(qListMd.includes(questionNoticeText));
+  assert.ok(qListMd.indexOf(questionNoticeText) < qListMd.indexOf("known non-archimedean metric"));
 
   const qListHtmlRes = await worker.fetch(`${origin}/p/${problemId}/questions.html`);
   assert.equal(qListHtmlRes.status, 200);
   const qListHtml = await qListHtmlRes.text();
   assert.ok(qListHtml.includes(`<h3>Question <code>${question1Id}</code></h3>`));
   assert.ok(qListHtml.includes("asimp-status asimp-status-resolved"));
+  assert.ok(qListHtml.includes(questionNoticeText));
+  assert.ok(
+    qListHtml.indexOf(questionNoticeText) < qListHtml.indexOf("known non-archimedean metric"),
+  );
+  for (const text of [JSON.stringify(qListJson), qListMd, qListHtml])
+    assert.ok(!/input_digest|context_digest|configuration_digest|policy_version/.test(text));
 
   // Exact links and complete collection browsing use the same bounded
   // scientific snapshot. The second source is outside a one-admission page.
@@ -667,11 +1078,13 @@ await runLocalWorkerJourney(async (context) => {
     `${origin}/p/${problemId}/questions.json?target=${question1Id}&through=${question1.seq}`,
   );
   assert.equal(historicalQuestion.status, 200);
+  const historicalQuestionBody = await historicalQuestion.json();
   assert.equal(
-    (await historicalQuestion.json()).questions[0].status,
+    historicalQuestionBody.questions[0].status,
     "open",
     "a later lease and answer cannot cross the public snapshot",
   );
+  assert.deepEqual(historicalQuestionBody.questions[0].screening_notice, questionWarning);
   const filteredQuestionPage = await worker.fetch(
     `${origin}/p/${problemId}/questions.json?through=${qListJson.cursor}&limit=1&status=withdrawn`,
   );
@@ -974,14 +1387,8 @@ await runLocalWorkerJourney(async (context) => {
   const hiddenReviewFeedback = (await sponsorInbox()).items.find(
     (item) => item.id === reviewFeedback.id,
   );
-  assert.equal(hiddenReviewFeedback.source_refs, undefined);
-  assert.ok(
-    !(await inbox(authorA)).items
-      .find((item) => item.id === reviewFeedback.id)
-      .next_actions.some((action) =>
-        action.url.includes(`/reviews/${refutingReview.review_id}.json`),
-      ),
-  );
+  assert.equal(hiddenReviewFeedback, undefined, "hidden reviews remove the entire stale notice");
+  assert.ok(!(await inbox(authorA)).items.some((item) => item.id === reviewFeedback.id));
   await reviewControl("restore");
   assert.deepEqual(
     (await sponsorInbox()).items.find((item) => item.id === reviewFeedback.id).source_refs,
@@ -1408,6 +1815,137 @@ await runLocalWorkerJourney(async (context) => {
     1,
   );
 
+  // A new question reaches the author of referenced work, including a target
+  // named only by blocking. This uses ordinary publication and signed private
+  // inbox reads; synthetic classifier and enrollment fixtures remain local.
+  const requestDraft = await call(
+    `/v1/sessions/${sessionIdA}/workshop`,
+    {
+      type: "claim-draft",
+      title: "A bounded residue question target",
+      body_md: "A separate finite target for a directed research question.",
+      publication: {
+        kind: "conjecture",
+        statement: "The residues of the integers zero through three modulo four are distinct.",
+        falsifier: "Two distinct integers in this stated domain have the same residue modulo four.",
+      },
+    },
+    authorA,
+    201,
+    "request-notice-draft",
+  );
+  const requestClaim = await call(
+    `/v1/sessions/${sessionIdA}/promote`,
+    { workshop_id: requestDraft.workshop_id, expected_workshop_version: requestDraft.version },
+    authorA,
+    201,
+    "request-notice-claim",
+  );
+  const requestPath = `/v1/sessions/${sessionIdB}/questions`;
+  const requestBody = {
+    body_md: "Which explicit pairwise comparisons establish the finite residue claim?",
+    target_refs: [
+      `${requestClaim.claim_id}@1`,
+      requestClaim.claim_id,
+      `${requestClaim.claim_id}@1`,
+      refutingReview.review_id,
+      "C-99999@1",
+    ],
+    blocking: `${requestClaim.claim_id}@1`,
+  };
+  const directed = await call(requestPath, requestBody, reviewerB, 201, "directed-question");
+  assert.deepEqual(
+    await call(requestPath, requestBody, reviewerB, 200, "directed-question"),
+    directed,
+  );
+  const requestSource = await env.DB.prepare(
+    "SELECT id FROM events WHERE problem_id=? AND object_id=? AND type='question.asked'",
+  )
+    .bind(problemId, directed.question_id)
+    .first();
+  assert.ok(requestSource);
+  await drainAnswers();
+  const directedNotices = questionNotices(await inbox(authorA), directed.question_id);
+  assert.equal(directedNotices.length, 1, "multiple references to one author yield one notice");
+  const directedNotice = directedNotices[0];
+  assert.equal(directedNotice.caused_by_event_id, requestSource.id);
+  assert.deepEqual(
+    directedNotice.next_actions.map((action) => action.url),
+    [`/p/${problemId}/questions.json?target=${directed.question_id}`],
+  );
+  const requestRead = await call(directedNotice.next_actions[0].url);
+  assert.deepEqual(requestRead.questions[0].target_refs, requestBody.target_refs);
+  assert.equal(requestRead.questions[0].blocking, requestBody.blocking);
+  assert.deepEqual(questionNotices(await inbox(reviewerB), directed.question_id), []);
+  assert.equal(questionNotices(await sponsorInbox(), directed.question_id).length, 1);
+  assert.ok(!JSON.stringify(directedNotice).includes(requestBody.body_md));
+  const requestControl = (target, kind, action) =>
+    operatorCall("POST", "/v1/operators/content-control", "operator.content.control", {
+      target_id: `${problemId}/${target}`,
+      target_kind: kind,
+      action,
+      reason: "Directed research questions must follow current source and target visibility.",
+    });
+  await requestControl(requestClaim.claim_id, "claim", "hide");
+  assert.deepEqual(questionNotices(await inbox(authorA), directed.question_id), []);
+  assert.deepEqual(questionNotices(await sponsorInbox(), directed.question_id), []);
+  assert.equal(
+    (await call("/v1/inbox/ack", { notice_ids: [directedNotice.id] }, authorA)).acknowledged_count,
+    0,
+  );
+  await requestControl(requestClaim.claim_id, "claim", "restore");
+  assert.equal(
+    questionNotices(await inbox(authorA), directed.question_id)[0].id,
+    directedNotice.id,
+  );
+  await requestControl(directed.question_id, "question", "hide");
+  assert.deepEqual(questionNotices(await inbox(authorA), directed.question_id), []);
+  await requestControl(directed.question_id, "question", "restore");
+  assert.equal(
+    (await call("/v1/inbox/ack", { notice_ids: [directedNotice.id] }, authorA)).acknowledged_count,
+    1,
+  );
+  await drainAnswers();
+  const replayedRequestNotice = questionNotices(await inbox(authorA), directed.question_id);
+  assert.equal(replayedRequestNotice.length, 1);
+  assert.equal(replayedRequestNotice[0].id, directedNotice.id);
+  assert.ok(replayedRequestNotice[0].acknowledged_at);
+  const blockingOnly = await call(
+    requestPath,
+    {
+      body_md: "Which explicit domain boundary makes the residue comparison finite?",
+      target_refs: [],
+      blocking: `${requestClaim.claim_id}@1`,
+    },
+    reviewerB,
+    201,
+    "blocking-only-question",
+  );
+  await drainAnswers();
+  assert.equal(questionNotices(await inbox(authorA), blockingOnly.question_id).length, 1);
+  await call(
+    `/v1/sessions/${sessionIdB}/questions/${blockingOnly.question_id}/withdraw`,
+    {
+      reason: "The question is no longer blocking this analysis.",
+    },
+    reviewerB,
+    200,
+    "withdraw-blocking-question",
+  );
+  assert.deepEqual(questionNotices(await inbox(authorA), blockingOnly.question_id), []);
+  assert.deepEqual(questionNotices(await sponsorInbox(), blockingOnly.question_id), []);
+  console.log(
+    JSON.stringify({
+      stage: "question-request-inbox",
+      status: "pass",
+      target_authors_and_blocking_refs: true,
+      duplicate_self_and_unknown_refs: true,
+      exact_question_read: true,
+      source_target_visibility_and_withdrawal: true,
+      replay_preserves_acknowledgment: true,
+    }),
+  );
+
   console.log(
     JSON.stringify({
       stage: "questions-retractions-real-bindings",
@@ -1422,6 +1960,9 @@ await runLocalWorkerJourney(async (context) => {
       author_authority_p9_verified: true,
       leasing_and_answering_verified: true,
       private_answer_inbox_delivery_verified: true,
+      private_question_request_inbox_delivery_verified: true,
+      unanswered_question_arrival_packs_verified: true,
+      question_pack_visibility_budget_and_review_isolation_verified: true,
       answer_inbox_exact_reads_and_visibility_verified: true,
       self_answer_and_replay_do_not_duplicate_inbox_verified: true,
       self_corrected_vs_externally_refuted_verified: true,

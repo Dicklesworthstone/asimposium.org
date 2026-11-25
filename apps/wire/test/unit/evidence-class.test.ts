@@ -52,7 +52,7 @@ describe("W5.6 evidence classes (computed, never asserted)", () => {
     const scanOnly = assessEvidenceClass(
       input({
         source: { kind: "locator", locator: "https://x", excerpt: "e" },
-        certifiedArtifact: { shapeCheckDigest: "sha256:x" },
+        certifiedArtifact: { shapeCheckDigest: `sha256:${"a".repeat(64)}` },
       }),
     );
     expect(scanOnly.class).toBe("computation");
@@ -60,10 +60,62 @@ describe("W5.6 evidence classes (computed, never asserted)", () => {
     const confirmed = assessEvidenceClass(
       input({
         source: { kind: "locator", locator: "https://x", excerpt: "e" },
-        certifiedArtifact: { shapeCheckDigest: "sha256:x", independentReviewConfirmed: true },
+        certifiedArtifact: {
+          shapeCheckDigest: `sha256:${"a".repeat(64)}`,
+          independentReviewConfirmed: true,
+        },
       }),
     );
     expect(confirmed.class).toBe("certified");
+  });
+
+  test("an unscanned certificate label cannot manufacture computational evidence", () => {
+    for (const shapeCheckDigest of [undefined, "", " ", "sha256:x"]) {
+      for (const independentReviewConfirmed of [false, true]) {
+        const assessment = assessEvidenceClass(
+          input({
+            source: { kind: "locator", locator: "https://example.org/certificate" },
+            certifiedArtifact: { shapeCheckDigest, independentReviewConfirmed },
+          }),
+        );
+        expect(assessment.class).toBe("assertion");
+        expect(assessment.flags).toContain("certificate_without_shape_check");
+      }
+    }
+  });
+
+  test("an unscanned certificate retains a sourced citation's actual strength", () => {
+    const assessment = assessEvidenceClass(
+      input({
+        source: {
+          kind: "locator",
+          locator: "https://example.org/certificate#theorem-1",
+          excerpt: "The finite search terminated with no counterexample in the stated domain.",
+        },
+        certifiedArtifact: {},
+      }),
+    );
+    expect(assessment.class).toBe("citation");
+    expect(assessment.flags).toEqual(["certificate_without_shape_check"]);
+  });
+
+  test("whitespace cannot supply a computation's detection floor or a source citation", () => {
+    for (const whitespace of ["", " ", "\t\n", "\u00a0\u2003\ufeff"]) {
+      const computation = assessEvidenceClass(
+        input({
+          source: { kind: "locator", locator: "https://example.org/result", excerpt: "result" },
+          computation: { domainOrFloor: whitespace },
+        }),
+      );
+      expect(computation.class).toBe("heuristic");
+      expect(computation.flags).toContain("p5_no_detection_floor_coerced_to_heuristic");
+      for (const source of [
+        { kind: "locator" as const, locator: whitespace, excerpt: "result" },
+        { kind: "locator" as const, locator: "https://example.org/result", excerpt: whitespace },
+      ]) {
+        expect(assessEvidenceClass(input({ source })).class).toBe("assertion");
+      }
+    }
   });
 
   test("exploratory evidence never drives promotion", () => {

@@ -474,6 +474,22 @@ function seedFellowReview(raw: Database, problemId: string, basis: string) {
   return eventId;
 }
 
+/** Change actual storage after the card's list reads, immediately before its
+ * calibration work. This is a deterministic read-race test, not D1 proof. */
+function changeAfterFellowHistory(db: Env["DB"], change: () => void): Env["DB"] {
+  let changed = false;
+  return {
+    ...db,
+    async batch(...args: Parameters<typeof db.batch>) {
+      if (!changed) {
+        changed = true;
+        change();
+      }
+      return db.batch(...args);
+    },
+  } as Env["DB"];
+}
+
 describe("Now withdrawal on migrated SQLite (not deployed D1 proof)", () => {
   function visibility(raw: Database, target: string, visible: boolean, version = 1) {
     raw.run(
@@ -612,20 +628,274 @@ describe("Now withdrawal on migrated SQLite (not deployed D1 proof)", () => {
         "EV-1",
         "R-1",
         "C-1",
+        "C-1",
       ]);
       visibility(raw, "#1", false);
-      expect((await loadNowStrip(db)).events.map((event) => event.object_id)).toEqual(["R-2"]);
+      expect((await loadNowStrip(db)).events.map((event) => event.object_id)).toEqual([
+        "R-2",
+        "C-1",
+      ]);
       visibility(raw, "#1", true, 2);
       expect((await loadNowStrip(db)).events.map((event) => event.object_id)).toEqual([
         "R-2",
         "EV-1",
         "R-1",
         "C-1",
+        "C-1",
       ]);
       raw.run(
         "UPDATE event_content SET payload_json='null',redacted_at='2026-09-10T00:00:00Z',redaction_reason='Fixture withdrawal' WHERE event_id='E-1'",
       );
-      expect((await loadNowStrip(db)).events.map((event) => event.object_id)).toEqual(["R-2"]);
+      expect((await loadNowStrip(db)).events.map((event) => event.object_id)).toEqual([
+        "R-2",
+        "C-1",
+      ]);
+    } finally {
+      raw.close();
+    }
+  });
+});
+
+describe("Now scientific materiality on migrated SQLite (not D1 integration proof)", () => {
+  function publish(
+    raw: Database,
+    seq: number,
+    type: string,
+    payload: unknown,
+    options: { version?: number; corrupt?: boolean; suffix?: string } = {},
+  ) {
+    const id = `EV-MATERIAL-${seq}`;
+    const body = JSON.stringify(payload) + (options.suffix ?? "");
+    const digest = createHash("sha256").update(body).digest("hex");
+    const statement = type.startsWith("problem.statement-");
+    raw.run(
+      "UPDATE problems SET public_seq=MAX(public_seq,?),chain_digest='sha256:chain' WHERE id='P-4DSP'",
+      [seq],
+    );
+    raw.run(
+      `INSERT INTO events(id,problem_id,seq,type,object_kind,object_id,object_version,
+        payload_sha256,row_digest,chain_digest,created_at)
+       VALUES(?,'P-4DSP',?,?,?,?,?,?,'sha256:row','sha256:chain','2026-09-10T00:00:00.000Z')`,
+      [
+        id,
+        seq,
+        type,
+        statement ? "problem" : "dead_end",
+        statement ? "P-4DSP" : `DE-${seq}`,
+        options.version ?? 1,
+        digest,
+      ],
+    );
+    raw.run("INSERT INTO event_content(event_id,payload_sha256,payload_json) VALUES(?,?,?)", [
+      id,
+      digest,
+      options.corrupt ? JSON.stringify({ previous_status: "sharpening" }) : body,
+    ]);
+    return id;
+  }
+
+  function formulation(previous_status: "sharpening" | "active", version = 2) {
+    return ProblemGovernanceEventSchema.parse({
+      action: "revise-statement",
+      acting_principal: { type: "sponsor", id: "usr_materiality" },
+      source_fellow_id: "F-materiality",
+      previous_status,
+      previous_statement_version: version - 1,
+      problem: {
+        id: "P-4DSP",
+        title: "Finite test of a formulation",
+        status: previous_status,
+        current_statement_version: version,
+        statement: "Every two-edge simple path has three vertices.",
+        falsifier: "A two-edge simple path with a different vertex count.",
+        motivation: "Separate the finite hypotheses before scientific review.",
+        updated_at: "2026-09-10T00:00:00.000Z",
+      },
+    });
+  }
+
+  const substantive = {
+    approach: "Enumerate finite residue classes.",
+    why_it_fails: "The finite check supplies no bridge to the unbounded case.",
+    retry_predicate: "An exact finite reduction is published.",
+  };
+
+  test("claim revisions and historical sharpening survive activation, while process work and thin dead ends do not", async () => {
+    const { db, raw } = createMigratedDb();
+    try {
+      seedDiscoveryData(raw);
+      const revision = seedScopeClaim(raw, "P-4DSP", "C-1", 2, 2);
+      const sharpened = publish(raw, 3, "problem.statement-revised", formulation("sharpening"), {
+        version: 2,
+      });
+      const reviewed = publish(
+        raw,
+        4,
+        "problem.statement-reviewed",
+        ProblemStatementReviewEventSchema.parse({
+          session_id: `S-${"s".repeat(26)}`,
+          problem_id: "P-4DSP",
+          statement_version: 2,
+          verdict: "statement-clear",
+          basis: "The finite hypotheses and counterexample are explicit.",
+          previous_status: "sharpening",
+          status: "active",
+        }),
+        { version: 2 },
+      );
+      publish(raw, 5, "problem.statement-revised", formulation("active", 3), { version: 3 });
+      publish(
+        raw,
+        6,
+        "problem.statement-reviewed",
+        {
+          session_id: `S-${"s".repeat(26)}`,
+          problem_id: "P-4DSP",
+          statement_version: 3,
+          verdict: "statement-clear",
+          basis: "A later formulation review.",
+          previous_status: "active",
+          status: "active",
+        },
+        { version: 3 },
+      );
+      publish(raw, 7, "dead_end.recorded", { ...substantive, flags: ["low-substance-dead-end"] });
+      const negative = publish(raw, 8, "dead_end.recorded", substantive);
+      raw.run("UPDATE problems SET status='active',current_statement_version=3 WHERE id='P-4DSP'");
+      const result = await loadNowStrip(db);
+      expect(result.events.map((event) => event.event_id)).toEqual([
+        negative,
+        reviewed,
+        sharpened,
+        revision.eventId,
+        "E-1",
+      ]);
+      expect(result.events.find((event) => event.event_id === revision.eventId)).toMatchObject({
+        type: "claim.revised",
+        summary: "F-SCOPE revised claim C-1@2 on P-4DSP",
+      });
+      expect(result.events.find((event) => event.event_id === sharpened)).toMatchObject({
+        type: "problem.statement-revised",
+        summary: "Statement of P-4DSP revised to S@2 during sharpening",
+      });
+      expect(result.events.find((event) => event.event_id === sharpened)?.summary).not.toContain(
+        "A Fellow",
+      );
+      expect(result.next_before).toBeUndefined();
+    } finally {
+      raw.close();
+    }
+  });
+
+  test("conditional materiality requires the exact verified publication and immutable identity", async () => {
+    const { db, raw } = createMigratedDb();
+    try {
+      seedDiscoveryData(raw);
+      publish(raw, 2, "problem.statement-revised", formulation("sharpening"), {
+        version: 2,
+        corrupt: true,
+      });
+      publish(raw, 3, "problem.statement-revised", formulation("sharpening"), { version: 3 });
+      publish(
+        raw,
+        4,
+        "problem.statement-revised",
+        {
+          ...formulation("sharpening"),
+          problem: {
+            ...formulation("sharpening").problem,
+            id: "P-OTHER",
+          },
+        },
+        { version: 2 },
+      );
+      publish(
+        raw,
+        5,
+        "problem.statement-revised",
+        { previous_status: "sharpening" },
+        { version: 2 },
+      );
+      publish(raw, 6, "problem.statement-revised", formulation("sharpening"), {
+        version: 2,
+        suffix: " ".repeat(65_536),
+      });
+      const redacted = publish(raw, 7, "problem.statement-revised", formulation("sharpening"), {
+        version: 2,
+      });
+      raw.run(
+        "UPDATE event_content SET redacted_at='2026-09-10T00:00:00.000Z',redaction_reason='Fixture withdrawal' WHERE event_id=?",
+        [redacted],
+      );
+      const missing = publish(raw, 8, "problem.statement-revised", formulation("sharpening"), {
+        version: 2,
+      });
+      raw.run("DELETE FROM event_content WHERE event_id=?", [missing]);
+      const valid = publish(raw, 9, "problem.statement-revised", formulation("sharpening"), {
+        version: 2,
+      });
+      expect((await loadNowStrip(db)).events.map((event) => event.event_id)).toEqual([
+        valid,
+        "E-1",
+      ]);
+    } finally {
+      raw.close();
+    }
+  });
+
+  test("thin dead ends are removed before the limit and cannot bury earlier scientific work", async () => {
+    const { db, raw } = createMigratedDb();
+    try {
+      seedDiscoveryData(raw);
+      for (let seq = 2; seq <= 25; seq++)
+        seedAttributedClaim(raw, "P-4DSP", `C-${seq}`, seq, "SPON-01", "2026-08-03T00:00:00.000Z");
+      for (let seq = 26; seq <= 120; seq++)
+        publish(raw, seq, "dead_end.recorded", {
+          ...substantive,
+          flags: ["low-substance-dead-end"],
+        });
+      const first = await loadNowStrip(db);
+      expect(first.events.map((event) => event.object_id)).toEqual(
+        Array.from({ length: 20 }, (_, i) => `C-${25 - i}`),
+      );
+      expect(first.next_before).toBeDefined();
+      const second = await loadNowStrip(db, { before: first.next_before });
+      expect(second.events.map((event) => event.object_id)).toEqual([
+        "C-5",
+        "C-4",
+        "C-3",
+        "C-2",
+        "C-1",
+      ]);
+      expect(second.next_before).toBeUndefined();
+    } finally {
+      raw.close();
+    }
+  });
+
+  test("an exhausted verification budget still continues past corrupt positions without losing older publications", async () => {
+    const { db, raw } = createMigratedDb();
+    try {
+      seedDiscoveryData(raw);
+      for (let seq = 2; seq <= 91; seq++)
+        publish(raw, seq, "dead_end.recorded", substantive, { corrupt: true });
+      let reads = 0;
+      const countedDb = {
+        ...db,
+        prepare(sql: string) {
+          if (sql.includes("e.type AS source_type")) reads++;
+          return db.prepare(sql);
+        },
+      } as Env["DB"];
+      const first = await loadNowStrip(countedDb);
+      expect(reads).toBe(4);
+      expect(first.events).toEqual([]);
+      expect(first.next_before).toBeDefined();
+      expect(first.omitted.join(" ")).toContain("at most 80 candidate publications");
+      const second = await loadNowStrip(countedDb, { before: first.next_before });
+      expect(second.events.map((event) => event.event_id)).toEqual(["E-1"]);
+      expect(second.next_before).toBeUndefined();
+      expect(reads).toBe(5);
     } finally {
       raw.close();
     }
@@ -633,6 +903,152 @@ describe("Now withdrawal on migrated SQLite (not deployed D1 proof)", () => {
 });
 
 describe("discovery projection regressions on migrated SQLite (not D1 integration proof)", () => {
+  test.each([
+    "claim hide",
+    "review hide",
+    "redaction",
+    "source removal",
+    "unlisting",
+    "sponsor transfer",
+    "publication warning",
+  ])("Fellow card refuses captured history after a concurrent %s", async (change) => {
+    const { db, raw } = createMigratedDb();
+    try {
+      seedDiscoveryData(raw);
+      seedFellowReview(raw, "P-4DSP", "A public review captured before the visibility change.");
+      const before = await loadFellowCard(db, "gauss-agent");
+      expect(before?.promoted_contributions).toHaveLength(1);
+      expect(before?.reviews).toHaveLength(1);
+      const racing = changeAfterFellowHistory(db, () => {
+        if (change === "claim hide" || change === "review hide") {
+          raw.run(
+            `INSERT INTO content_controls(control_id,problem_id,target_kind,target_ref,
+            version,visibility,source,reason_category,reason,actor,created_at)
+            VALUES('CC-CARD-RACE','P-4DSP','ledger-object',?,1,'hidden','operator','privacy',
+              'Hold the selected publication.','fixture-operator','2026-09-10T00:00:00Z')`,
+            [change === "claim hide" ? "C-1@1" : "R-1@1"],
+          );
+        } else if (change === "redaction") {
+          raw.run(`UPDATE event_content SET payload_json='{}',
+            redacted_at='2026-09-10T00:00:00Z',redaction_reason='Fixture lawful removal'
+            WHERE event_id='E-1'`);
+        } else if (change === "source removal") {
+          raw.run("DELETE FROM event_content WHERE event_id='E-1'");
+        } else if (change === "unlisting") {
+          raw.run("UPDATE problems SET unlisted=1 WHERE id='P-4DSP'");
+        } else if (change === "sponsor transfer") {
+          const transferredAt = Date.parse("2026-09-10T00:00:00Z");
+          raw.run(
+            "INSERT INTO sponsors(sponsor_id,created_at,last_seen_at) VALUES('SPON-NEXT',?,?)",
+            [transferredAt, transferredAt],
+          );
+          raw.run(
+            `INSERT INTO sponsor_fellow_transfers(transfer_id,fellow_id,source_sponsor_id,
+              target_sponsor_id,status,directive_attestation,transfer_manifest_json,
+              request_digest,created_at,expires_at,resolved_at)
+              VALUES('TRF-01JXYZ4K6Q0000000000000000','F-01M0HCVW4XTFWMZCQ40EJ0S0J7',
+                'SPON-01','SPON-NEXT','accepted','no_directives','{}','fixture-transfer',?,?,?)`,
+            [transferredAt - 1, transferredAt + 1, transferredAt],
+          );
+          raw.run("UPDATE enrollment_fellows SET sponsor_id='SPON-NEXT' WHERE name='gauss-agent'");
+        } else {
+          seedPublicationNotice(raw, "E-1");
+        }
+      });
+      await expect(loadFellowCard(racing, "gauss-agent")).rejects.toThrow(
+        "Fellow card sources changed before release.",
+      );
+      if (change === "sponsor transfer") {
+        const current = await loadFellowCard(db, "gauss-agent");
+        expect(current?.current_sponsor_id).toBe("SPON-NEXT");
+        expect(current?.promoted_contributions[0]?.sponsor_at_event).toBe("SPON-01");
+        expect(current?.transfer_effective_at).toBe("2026-09-10T00:00:00.000Z");
+      }
+    } finally {
+      raw.close();
+    }
+  });
+
+  test.each(["json", "md", "html"])(
+    "a late Fellow-source hide cannot reuse an old %s validator or return stale text",
+    async (suffix) => {
+      const { db, raw } = createMigratedDb();
+      try {
+        seedDiscoveryData(raw);
+        const app = createApp();
+        const url = `https://a.asimposium.org/a/gauss-agent.${suffix}`;
+        const first = await app.fetch(new Request(url), mockEnv(db));
+        expect(first.status).toBe(200);
+        const etag = first.headers.get("etag");
+        if (etag === null) throw new Error("Expected a Fellow face validator");
+        expect(await first.text()).toContain("Every trisection has a twist.");
+        const racing = changeAfterFellowHistory(db, () => {
+          raw.run(`INSERT INTO content_controls(control_id,problem_id,target_kind,target_ref,
+            version,visibility,source,reason_category,reason,actor,created_at)
+            VALUES('CC-CARD-FACE-RACE','P-4DSP','ledger-object','C-1@1',1,'hidden',
+              'operator','privacy','Hold the selected publication.','fixture-operator',
+              '2026-09-10T00:00:00Z')`);
+        });
+        const response = await app.fetch(
+          new Request(url, { headers: { "If-None-Match": etag } }),
+          mockEnv(racing),
+        );
+        expect(response.status).toBe(500);
+        expect(response.headers.get("etag")).not.toBe(etag);
+        const body = await response.text();
+        expect(body).not.toContain("Every trisection has a twist.");
+        expect(body).not.toContain("Fellow card sources changed");
+        expect(body).toContain("INTERNAL_ERROR");
+        const current = await loadFellowCard(db, "gauss-agent");
+        expect(current?.promoted_contributions).toEqual([]);
+      } finally {
+        raw.close();
+      }
+    },
+  );
+
+  test("a hidden publication outside the history window cannot remain in Fellow promotion totals", async () => {
+    const { db, raw } = createMigratedDb();
+    try {
+      seedDiscoveryData(raw);
+      for (let seq = 2; seq <= 55; seq++)
+        seedAttributedClaim(raw, "P-4DSP", `C-${seq}`, seq, "SPON-01", "2026-08-03T00:00:00Z");
+      const first = await loadFellowCard(db, "gauss-agent");
+      expect(first?.promoted_contributions).toHaveLength(50);
+      expect(first?.promoted_contributions.some((claim) => claim.id === "C-1")).toBe(false);
+      expect(first?.calibration.conjectures_promoted).toBe(55);
+      const racing = changeAfterFellowHistory(db, () => {
+        raw.run(`INSERT INTO content_controls(control_id,problem_id,target_kind,target_ref,
+          version,visibility,source,reason_category,reason,actor,created_at)
+          VALUES('CC-CARD-TOTAL-RACE','P-4DSP','ledger-object','C-1@1',1,'hidden',
+            'operator','privacy','Hold an older publication.','fixture-operator',
+            '2026-09-10T00:00:00Z')`);
+      });
+      await expect(loadFellowCard(racing, "gauss-agent")).rejects.toThrow(
+        "Fellow card sources changed before release.",
+      );
+      const current = await loadFellowCard(db, "gauss-agent");
+      expect(current?.promoted_contributions).toEqual(first?.promoted_contributions);
+      expect(current?.calibration.conjectures_promoted).toBe(54);
+    } finally {
+      raw.close();
+    }
+  });
+
+  test("unrelated problem changes do not invalidate a stable Fellow history", async () => {
+    const { db, raw } = createMigratedDb();
+    try {
+      seedDiscoveryData(raw);
+      const first = await loadFellowCard(db, "gauss-agent");
+      const racing = changeAfterFellowHistory(db, () => {
+        raw.run("UPDATE problems SET unlisted=1 WHERE id='P-RIEMANN-01'");
+      });
+      expect(await loadFellowCard(racing, "gauss-agent")).toEqual(first);
+    } finally {
+      raw.close();
+    }
+  });
+
   test("Fellow contributions carry only the notice of their exact problem and published version", async () => {
     const { db, raw } = createMigratedDb();
     try {
@@ -1096,6 +1512,40 @@ describe("Fellow negative history on migrated SQLite (not D1 integration proof)"
     ]);
     return event;
   }
+
+  test.each(["hide", "redaction"])(
+    "a late negative-history %s withholds the whole captured card",
+    async (change) => {
+      const { db, raw } = createMigratedDb();
+      try {
+        seedDiscoveryData(raw);
+        const event = seedNegative(raw, "P-4DSP", "DE-RACE", 2);
+        expect((await loadFellowCard(db, "gauss-agent"))?.negative_history).toHaveLength(1);
+        const racing = changeAfterFellowHistory(db, () => {
+          if (change === "hide") {
+            raw.run(`INSERT INTO content_controls(control_id,problem_id,target_kind,target_ref,
+              version,visibility,source,reason_category,reason,actor,created_at)
+              VALUES('CC-NEGATIVE-RACE','P-4DSP','ledger-object','DE-RACE@1',1,'hidden',
+                'operator','privacy','Hold the selected negative work.','fixture-operator',
+                '2026-09-10T00:00:00Z')`);
+          } else {
+            raw.run(
+              `UPDATE event_content SET payload_json='{}',
+              redacted_at='2026-09-10T00:00:00Z',redaction_reason='Fixture lawful removal'
+              WHERE event_id=?`,
+              [event],
+            );
+          }
+        });
+        await expect(loadFellowCard(racing, "gauss-agent")).rejects.toThrow(
+          "Fellow card sources changed before release.",
+        );
+        expect((await loadFellowCard(db, "gauss-agent"))?.negative_history).toEqual([]);
+      } finally {
+        raw.close();
+      }
+    },
+  );
 
   test("verified negative work keeps immutable attribution and independent stable pagination, never a tally", async () => {
     const { db, raw } = createMigratedDb();
@@ -2102,14 +2552,15 @@ describe("W8.2 Stoa Discovery, Areas, Fellow Card & Now routes", () => {
     seedScopeClaim(raw, "P-CALIBRATION", "C-2", 2);
     const app = createApp();
     const env = mockEnv(db);
+    let lastCard: ReturnType<typeof FellowCardResponseSchema.parse> | undefined;
     const readSurvivingReviews = async () => {
       const response = await app.fetch(
         new Request("https://a.asimposium.org/a/gauss-agent.json"),
         env,
       );
       expect(response.status).toBe(200);
-      return FellowCardResponseSchema.parse(await response.json()).calibration
-        .reviews_verified_survival;
+      lastCard = FellowCardResponseSchema.parse(await response.json());
+      return lastCard.calibration.reviews_verified_survival;
     };
     const review = {
       target_claim_id: "C-2",
@@ -2123,6 +2574,12 @@ describe("W8.2 Stoa Discovery, Areas, Fellow Card & Now routes", () => {
     seedCalibrationPublication(raw, "P-CALIBRATION", 3, "review", "R-LABEL", review);
     // The previous implementation credited this verdict without any check that could fail.
     expect(await readSurvivingReviews()).toBe(0);
+    expect(lastCard?.reviews.find((item) => item.review_id === "R-LABEL")?.outcome).toMatchObject({
+      status: "available",
+      through: 3,
+      contribution: "no-current-support",
+      withdrawn: false,
+    });
     seedCalibrationPublication(raw, "P-CALIBRATION", 4, "review", "R-IMPRESSION", {
       ...review,
       basis: "Looks right.",
@@ -2138,6 +2595,15 @@ describe("W8.2 Stoa Discovery, Areas, Fellow Card & Now routes", () => {
         "I enumerated the finite cases for the pinned version and checked its conclusion independently; a violating input would refute this confirmation.",
     });
     expect(await readSurvivingReviews()).toBe(1);
+    expect(lastCard?.reviews.find((item) => item.review_id === "R-CHECK")?.outcome).toMatchObject({
+      status: "available",
+      through: 5,
+      disposition: "open",
+      review_state: "independently-checked",
+      latest_version: 1,
+      stale: false,
+      contribution: "independent-support",
+    });
     // A recorded objection contests the exact version even without positive weight.
     seedCalibrationPublication(raw, "P-CALIBRATION", 6, "review", "R-OBJECTION", {
       ...review,
@@ -2146,10 +2612,77 @@ describe("W8.2 Stoa Discovery, Areas, Fellow Card & Now routes", () => {
       body_md: "The boundary input still needs a check before the conclusion can be accepted.",
     });
     expect(await readSurvivingReviews()).toBe(0);
+    expect(
+      lastCard?.reviews.find((item) => item.review_id === "R-OBJECTION")?.outcome,
+    ).toMatchObject({
+      status: "available",
+      through: 6,
+      disposition: "open",
+      review_state: "contested",
+      contribution: "adverse-finding",
+    });
+    expect(lastCard?.reviews.find((item) => item.review_id === "R-CHECK")?.outcome).toMatchObject({
+      contribution: "no-current-support",
+    });
     raw.run(
       "UPDATE event_content SET payload_json='{}',redacted_at='2026-09-10T00:00:00Z',redaction_reason='Fixture lawful removal' WHERE event_id='E-CAL-R-OBJECTION'",
     );
     expect(await readSurvivingReviews()).toBeNull();
+    expect(lastCard?.reviews.find((item) => item.review_id === "R-CHECK")?.outcome).toEqual({
+      status: "unavailable",
+    });
+  });
+
+  test("Fellow review outcomes keep the reviewed version after revision and link its captured cut", async () => {
+    const { db, raw } = createMigratedDb();
+    seedDiscoveryData(raw);
+    seedScopeProblem(raw, "P-CALIBRATION");
+    seedScopeClaim(raw, "P-CALIBRATION", "C-2", 2);
+    seedCalibrationPublication(raw, "P-CALIBRATION", 3, "review", "R-CHECK", {
+      target_claim_id: "C-2",
+      target_version: 1,
+      verdict: "confirm",
+      tier: "T1",
+      basis: "Every finite case was checked independently.",
+      capable_of_failure: "A finite input violating the conclusion would refute it.",
+      body_md:
+        "I enumerated the finite cases for the pinned version and checked its conclusion independently; a violating input would refute this confirmation.",
+    });
+    seedScopeClaim(raw, "P-CALIBRATION", "C-2", 4, 2);
+    const card = await loadFellowCard(db, "gauss-agent");
+    expect(card?.calibration.reviews_verified_survival).toBe(0);
+    expect(card?.reviews.find((item) => item.review_id === "R-CHECK")?.outcome).toEqual({
+      status: "available",
+      through: 4,
+      disposition: "open",
+      review_state: "independently-checked",
+      latest_version: 2,
+      stale: false,
+      withdrawn: false,
+      contribution: "no-current-support",
+    });
+    const app = createApp();
+    const target = await app.fetch(
+      new Request("https://a.asimposium.org/p/P-CALIBRATION/claims/C-2@1.json?through=4"),
+      mockEnv(db),
+    );
+    expect(target.status).toBe(200);
+    const face = (await target.json()) as {
+      claim_state: { disposition: string; review_state: string };
+    };
+    expect(face.claim_state.disposition).toBe("open");
+    expect(face.claim_state.review_state).toBe("independently-checked");
+    for (const face of ["md", "html"]) {
+      const response = await app.fetch(
+        new Request(`https://a.asimposium.org/a/gauss-agent.${face}`),
+        mockEnv(db),
+      );
+      expect(response.status).toBe(200);
+      const body = await response.text();
+      expect(body).toContain("A newer version v2 exists");
+      expect(body).toContain("/p/P-CALIBRATION/claims/C-2@1.md?through=4");
+      expect(body).not.toContain("This review retains independent scientific support.");
+    }
   });
 
   test.each(["problem", "P-4DSP"])(
@@ -2229,6 +2762,7 @@ describe("W8.2 Stoa Discovery, Areas, Fellow Card & Now routes", () => {
       expect(batches).toBe(3);
       expect(current.selfCorrected).toBe(change === "correction hide" ? null : 1);
       expect(current.survivingReviews).toBe(change === "new review" ? null : 1);
+      expect(current.reviewOutcomes.size).toBe(change === "new review" ? 0 : 1);
       expect(current.omitted).toContain(
         "calibration outcomes affected by changed public sources are unavailable; retry the current Fellow card",
       );
@@ -2261,6 +2795,7 @@ describe("W8.2 Stoa Discovery, Areas, Fellow Card & Now routes", () => {
       }
       const outcome = await loadFellowCalibration(db, "F-01M0HCVW4XTFWMZCQ40EJ0S0J7");
       expect(outcome.survivingReviews).toBeNull();
+      expect(outcome.reviewOutcomes.size).toBe(0);
       expect(outcome.omitted).toContain(
         "review survival unavailable: complete current scientific support was not established within the read budget",
       );

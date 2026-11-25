@@ -13,6 +13,8 @@ import {
   type SynthesisItem,
 } from "@asimposium/contracts";
 import { stoaProblemGovernance } from "./problem-governance";
+import { stoaFetchClaimFace } from "./public-ledger";
+import type { ResultClaimPreview } from "./result-claim-view";
 import {
   callStoa,
   configuredStoaOrigin,
@@ -50,6 +52,9 @@ export type ProblemSynthesisPreviewResult =
       readonly retryable: false;
       readonly refreshRequired?: true;
     };
+export type ProblemResultClaimPreviewResult =
+  | { readonly ok: true; readonly preview: ResultClaimPreview }
+  | { readonly ok: false; readonly message: string; readonly refreshRequired?: true };
 
 export const MAX_PROBLEM_CLOSING_SYNTHESIS_BYTES = 262_144;
 type ClosingSynthesisRead = StoaCall<ClosingSynthesisPreview> | {
@@ -83,6 +88,37 @@ export function parseProblemResearchCommand(input: unknown): ProblemResearchComm
 
 function discard(response: Response): void {
   try { void response.body?.cancel().catch(() => undefined); } catch { /* Best effort only. */ }
+}
+
+/** A selected collection row supplies an identity, never present-day admission authority. */
+export async function stoaProblemResultClaim(
+  principalId: string,
+  problemId: string,
+  claimId: string,
+  version: number,
+): Promise<StoaCall<ResultClaimPreview>> {
+  const command = parseProblemResearchCommand({
+    action: "enter-result-review", result_claim: { claim_id: claimId, version },
+  });
+  if (!validProblemResearchTarget(problemId) || command?.action !== "enter-result-review")
+    return { ok: false, reason: "refused", status: 400 };
+  const governance = await stoaProblemGovernance(principalId, problemId);
+  if (!governance.ok) return governance;
+  if ((!governance.data.authority.owner && !governance.data.authority.steward) ||
+      !["active", "dormant", "under-result-review"].includes(governance.data.problem.status))
+    return { ok: false, reason: "refused", status: 422 };
+  const target = `${claimId}@${version}`;
+  const read = await stoaFetchClaimFace(problemId, target);
+  if (read.state !== "ok") return read.state === "not_found"
+    ? { ok: false, reason: "refused", status: 404 }
+    : { ok: false, reason: "unreachable" };
+  const publication = read.data.items.find((item) =>
+    item.kind === "claim-detail" && item.id === target && item.scope === "ledger");
+  if (publication === undefined) return { ok: false, reason: "unreachable" };
+  return { ok: true, data: {
+    problemId, cursor: read.data.cursor, origin: read.origin,
+    state: read.data.claim_state, publication, command,
+  } };
 }
 
 /** Preview is a fresh read, not an eligibility promise or a retry prerequisite. */

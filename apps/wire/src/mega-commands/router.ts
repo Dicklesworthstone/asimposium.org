@@ -12,10 +12,11 @@ import type { D1Database } from "@cloudflare/workers-types";
 import { type Context, Hono } from "hono";
 import { cancelUnconsumedRequestBody, SERVICE_ENVELOPE_HEADER } from "../auth/http.ts";
 import { wrongPrincipalProblem } from "../auth/refusal.ts";
-import { buildHelloResponse } from "../enrollment/router.ts";
+import { buildHelloResponse, completeHelloInboxFeedback } from "../enrollment/router.ts";
 import type { EnrollmentService, FellowCredentialBinding } from "../enrollment/service.ts";
 import type { Env } from "../env.ts";
 import { validatedProblem as problem } from "../http/envelope.ts";
+import { InboxReadAuthorityError } from "../inbox/store.ts";
 import { readRosterRoleSuggestion } from "../problems/roster.ts";
 import { admitFellowRead, fellowReadBudgetHeaders } from "../sessions/read-quota.ts";
 import { renderProblemNextMarkdown, renderTriageMarkdown } from "./markdown.ts";
@@ -103,7 +104,7 @@ export function createMegaCommandsRouter(
     const readBudget = await admitFellowRead(db, auth.fellowId);
     if (readBudget instanceof Response) return readBudget;
 
-    const hello = await buildHelloResponse({
+    const base = await buildHelloResponse({
       binding: auth,
       service: options.service,
       db,
@@ -114,10 +115,36 @@ export function createMegaCommandsRouter(
 
     const triageResult = await movesProvider.triageMove({
       fellowId: auth.fellowId,
-      assignments: hello.assignments ?? [],
+      assignments: base.assignments ?? [],
       db,
       credential: auth,
+      sponsorPromotionRateLimit:
+        options.sponsorPromotionRateLimit ?? env.SPONSOR_PROMOTION_RATE_LIMIT,
     });
+
+    let hello: typeof base;
+    try {
+      hello = await completeHelloInboxFeedback(base, db, {
+        binding: auth,
+        revalidate: () => options.service.credentialBinding(bearerToken(c.req.raw) ?? ""),
+      });
+    } catch (error) {
+      if (!(error instanceof InboxReadAuthorityError))
+        return problem({
+          status: 503,
+          code: "INTERNAL_ERROR",
+          title: "Private discovery is unavailable",
+          detail: "Current authority could not be confirmed for this private response.",
+          fixHint: "Retry the same request with a current Fellow credential.",
+        });
+      return problem({
+        status: 401,
+        code: "FELLOW_TOKEN_INVALID",
+        title: "Fellow bearer token is not accepted",
+        detail: "The current credentials cannot authorize this private read.",
+        fixHint: "Use a current Fellow bearer token from an explicitly approved enrollment flow.",
+      });
+    }
 
     const response: TriageResponse = TriageResponseSchema.parse({
       hello,
@@ -129,7 +156,7 @@ export function createMegaCommandsRouter(
         : {}),
     });
 
-    await logMegaCommand({
+    const logging = logMegaCommand({
       endpoint: "triage",
       startedAt,
       status: 200,
@@ -140,6 +167,12 @@ export function createMegaCommandsRouter(
       degraded: response.degraded,
       degradedReason: response.degraded_reason,
     });
+    try {
+      c.executionCtx.waitUntil(logging);
+    } catch {
+      // In-process callers have no execution context. Logging is contained;
+      // do not await diagnostics after the final private inbox snapshot.
+    }
 
     const wantsMarkdown =
       forcedFormat === "md" ||
@@ -269,6 +302,8 @@ export function createMegaCommandsRouter(
       effectivePermissions,
       db,
       credential: auth,
+      sponsorPromotionRateLimit:
+        options.sponsorPromotionRateLimit ?? env.SPONSOR_PROMOTION_RATE_LIMIT,
     });
 
     const selectedRole = movesResult.viewerRole ?? role;

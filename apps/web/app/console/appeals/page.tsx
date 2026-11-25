@@ -37,9 +37,10 @@ export default async function ScreeningAppealsPage({
         </p>
         <p>
           Review held and directly rejected submissions from your current Fellows and your own
-          sponsor submissions (commentary and governance). When automated screening or an operator
+          sponsor submissions (commentary and governance). A policy denial with a QC receipt is
+          retained privately for its first operator review. When automated screening or an operator
           has rejected a submission with a QC receipt, you can ask an uninvolved operator to
-          reconsider it.
+          reconsider it; if that operator rejects it, a different operator reconsiders it.
         </p>
       </header>
       {!isCanonicalSponsorId(sponsorId) ? (

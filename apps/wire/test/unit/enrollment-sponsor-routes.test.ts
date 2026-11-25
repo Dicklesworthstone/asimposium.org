@@ -24,6 +24,7 @@ import { toHex } from "../../src/auth/canonical";
 import { authenticateServiceEnvelopeRequest } from "../../src/auth/http";
 import { VerificationKeyring } from "../../src/auth/keyring";
 import { MemoryNonceStore } from "../../src/auth/nonce";
+import { D1EnrollmentStore } from "../../src/enrollment/d1-store.ts";
 import { createEnrollmentRouter, type EnrollmentRouterOptions } from "../../src/enrollment/router";
 import {
   EnrollmentError,
@@ -41,14 +42,6 @@ const readBudgetDatabases: ReturnType<typeof migratedSqliteD1>["sqlite"][] = [];
 afterEach(() => {
   for (const sqlite of readBudgetDatabases.splice(0)) sqlite.close();
 });
-
-// Keep the sponsor/operator fixture's intentionally absent DB unchanged. An
-// authenticated Hello uses the real counter binding supplied by the Worker.
-function readBudgetEnv() {
-  const { db, sqlite } = migratedSqliteD1();
-  readBudgetDatabases.push(sqlite);
-  return { DB: db };
-}
 
 /**
  * Sponsor-route proof for Propylon W3.3/W3.4: mint, proposal list, decision,
@@ -76,6 +69,7 @@ async function fixture(url: URL): Promise<unknown> {
 interface Harness {
   app: ReturnType<typeof createEnrollmentRouter>;
   service: EnrollmentService;
+  db?: ReturnType<typeof migratedSqliteD1>["db"];
   sign(
     body: string | Uint8Array,
     route: string,
@@ -93,6 +87,7 @@ async function harness(options?: {
   readonly verifiedOperator?: EnrollmentRouterOptions["verifiedOperator"];
   readonly clock?: { now(): number };
   readonly store?: InMemoryEnrollmentStore;
+  readonly persistentIdentity?: boolean;
 }): Promise<Harness> {
   const keypair = (await crypto.subtle.generateKey({ name: "Ed25519" }, true, [
     "sign",
@@ -106,10 +101,14 @@ async function harness(options?: {
     },
   ]);
   const nonces = new MemoryNonceStore();
+  const database = options?.persistentIdentity ? migratedSqliteD1() : undefined;
+  if (database) readBudgetDatabases.push(database.sqlite);
   const service = new EnrollmentService({
     stoaOrigin: TEST_STOA_ORIGIN,
     agoraOrigin: "https://asimposium.org",
-    store: options?.store ?? new InMemoryEnrollmentStore(),
+    store:
+      options?.store ??
+      (database ? new D1EnrollmentStore(database.db) : new InMemoryEnrollmentStore()),
     replayProtector: enrollmentReplayProtectorFromBase64Url(
       "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
     ),
@@ -199,7 +198,7 @@ async function harness(options?: {
         }),
   });
 
-  return { app, service, sign };
+  return { app, service, sign, db: database?.db };
 }
 
 function envelopeRequest(
@@ -958,7 +957,7 @@ describe("sponsor enrollment routes", () => {
   });
 
   test("the full loop: mint, claim, card, approve, token, hello, fellows", async () => {
-    const h = await harness();
+    const h = await harness({ persistentIdentity: true });
     const { enrollmentId, secret } = await mintOne(h);
     const flowHandle = await claimOne(h, enrollmentId, secret);
 
@@ -1039,7 +1038,7 @@ describe("sponsor enrollment routes", () => {
       new Request(`${origin}/v1/hello`, {
         headers: { authorization: `Bearer ${outcome.token}` },
       }),
-      readBudgetEnv(),
+      { DB: h.db! },
     );
     expect(hello.status).toBe(200);
     const helloBody = EnrollmentHelloResponseSchema.parse(await hello.json());
@@ -1054,6 +1053,12 @@ describe("sponsor enrollment routes", () => {
         url: `${TEST_STOA_ORIGIN}/v1/directives/active`,
         reason:
           "Before acting, read global sponsor instructions and follow every next_url while has_more is true. After choosing a problem, read again with problem_id; global instructions alone are incomplete for it. ACK does not withdraw instructions.",
+      },
+      {
+        action: "read",
+        url: `${TEST_STOA_ORIGIN}/v1/inbox?unread_only=true`,
+        reason:
+          "0 unacknowledged notices. Read feedback before acting; page with next_cursor while has_more, then acknowledge received notice IDs. Reading alone does not acknowledge them.",
       },
       {
         action: "protocol.ack",
@@ -1597,7 +1602,7 @@ describe("sponsor enrollment routes", () => {
   });
 
   test("hello hides session.open when the Fellow lifecycle cannot admit a session", async () => {
-    const h = await harness({ clock: { now: () => NOW * 1_000 } });
+    const h = await harness({ clock: { now: () => NOW * 1_000 }, persistentIdentity: true });
     const fixture = await issuedLifecycleFixture(h, "route-suspicious-hello");
     const body = JSON.stringify({
       fellow_id: fixture.fellow.fellowId,
@@ -1615,13 +1620,14 @@ describe("sponsor enrollment routes", () => {
       new Request(`${origin}/v1/hello`, {
         headers: { authorization: `Bearer ${fixture.token}` },
       }),
-      readBudgetEnv(),
+      { DB: h.db! },
     );
     expect(hello.status).toBe(200);
     const helloBody = EnrollmentHelloResponseSchema.parse(await hello.json());
     expect(helloBody.next_actions.map(({ action, url }) => ({ action, url }))).toEqual([
       { action: "read", url: `${TEST_STOA_ORIGIN}/protocol.md` },
       { action: "read", url: `${TEST_STOA_ORIGIN}/v1/directives/active` },
+      { action: "read", url: `${TEST_STOA_ORIGIN}/v1/inbox?unread_only=true` },
       { action: "protocol.ack", url: `${TEST_STOA_ORIGIN}/v1/protocol/ack` },
       { action: "triage", url: `${TEST_STOA_ORIGIN}/v1/triage` },
       { action: "reference", url: `${TEST_STOA_ORIGIN}/skill.md` },
@@ -2484,7 +2490,7 @@ describe("sponsor enrollment routes", () => {
   });
 
   test("the device loop: start, lookup, approve, keyed poll, hello", async () => {
-    const h = await harness();
+    const h = await harness({ persistentIdentity: true });
 
     // An unaffiliated agent starts the flow with its full proposal.
     const start = await h.app.fetch(
@@ -2568,7 +2574,7 @@ describe("sponsor enrollment routes", () => {
       new Request(`${origin}/v1/hello`, {
         headers: { authorization: `Bearer ${outcome.token}` },
       }),
-      readBudgetEnv(),
+      { DB: h.db! },
     );
     expect(hello.status).toBe(200);
 

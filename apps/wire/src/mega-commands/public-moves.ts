@@ -38,13 +38,14 @@ import { selectThirdAlternative } from "./hypothesis-moves.ts";
 import { selectKillOrStandMove } from "./kill-moves.ts";
 import { firstClaimMove, loadLedgerMoveQueue, selectPublicLedgerMoves } from "./ledger-moves.ts";
 import { compareMovePriority, selectTriageMove, uniqueMoves } from "./move-selection.ts";
+import { loadPublicRetryMove, type PublicRetryReference } from "./public-retry-moves.ts";
 import { selectReanchorMove } from "./reanchor-moves.ts";
 import { loadDeadEndRetryMove } from "./retry-moves-service.ts";
 import { selectSharpenStatementMove } from "./sharpen-moves.ts";
 import { selectSynthesizeMove } from "./synthesize-moves.ts";
 
 export const PUBLIC_MOVES_BOUNDARY =
-  "public-needs-v2: canonical back-to-the-object, statement-sharpening, review, refutation, hypothesis counterevidence (kill-or-stand), formalization-friction, proof-gap, retry-dead-end, normalize-conflict, collapse-duplicate, re-anchor, load-bearing formalization, third-alternative, discrimination-draft, record-dead-end, synthesize and first-claim selectors (17/18 moves; session-private idle-close remains authenticated-only). At most two review pages and the selectors' own bounded inputs per problem. Identity-specific work, private sessions and workshop contents are not examined. Read the pinned public inputs, then use authenticated /v1/p/:id/next to check your eligibility. Discovery grants no write permission, assignment, reservation or scientific standing.";
+  "public-needs-v2: canonical back-to-the-object, statement-sharpening, review, refutation, hypothesis counterevidence (kill-or-stand), formalization-friction, proof-gap, listed-problem retry-dead-end, normalize-conflict, collapse-duplicate, re-anchor, load-bearing formalization, third-alternative, discrimination-draft, record-dead-end, synthesize and first-claim selectors (17/18 moves; session-private idle-close remains authenticated-only). At most two review pages and the selectors' own bounded inputs per problem. Identity-specific work, private sessions and workshop contents are not examined. Read the pinned public inputs, then use authenticated /v1/p/:id/next to check your eligibility. Discovery grants no write permission, assignment, reservation or scientific standing.";
 export const GLOBAL_MOVES_BOUNDARY = `${PUBLIC_MOVES_BOUNDARY} Each live page examines at most ${PUBLIC_MOVES_PAGE_SIZE} listed working problems in ASCII ID order. Off-scope formulations and scientific inputs are excluded from global recommendations; known public problem reads remain available. Canonical move priority and review consequence rank the examined needs, not popularity. Each problem has its own captured cursor; next_after continues the admission order, not a global optimum or frozen global snapshot.`;
 
 const READ_ONLY_VIEWER = {
@@ -62,12 +63,13 @@ interface MoveHead {
   id: string;
   cursor: number;
   status: string;
+  admission_mode: string;
   unlisted: number;
   has_claims: number;
   current_statement_version: number;
   controls_revision: number;
 }
-const HEAD_COLUMNS = `p.id, p.public_seq AS cursor, p.status, p.unlisted, p.current_statement_version,
+const HEAD_COLUMNS = `p.id, p.public_seq AS cursor, p.status, p.admission_mode, p.unlisted, p.current_statement_version,
   EXISTS (SELECT 1 FROM events e WHERE e.problem_id = p.id AND e.seq <= p.public_seq
     AND e.object_kind = 'claim' AND e.type IN ('claim.created','claim.revised')) AS has_claims,
   COALESCE((SELECT MAX(cc.rowid) FROM content_controls cc WHERE cc.problem_id = p.id),0)
@@ -78,6 +80,7 @@ export const PUBLIC_MOVE_HEAD_SQL = `SELECT ${HEAD_COLUMNS} FROM problems p
 export const PUBLIC_MOVE_DISCOVERY_SQL = `SELECT ${HEAD_COLUMNS} FROM problems p
   WHERE p.id > ? AND p.unlisted = 0
     AND p.status IN ('active','dormant','under-result-review','sharpening')
+    AND p.admission_mode <> 'archived-read-only'
     AND NOT ${hiddenByContentControlSql("p.id", "'problem'")}
     AND NOT ${offScopeProblemSql("p.id", "p.public_seq")}
   ORDER BY p.id COLLATE BINARY LIMIT ?`;
@@ -125,7 +128,16 @@ export const GLOBAL_MOVE_REFERENCES_SQL = publicationReferencesSql(true);
 
 interface PublicationReference {
   id: string;
-  kind: "claim" | "hypothesis" | "gap" | "evidence" | "problem" | "dead_end";
+  kind:
+    | "claim"
+    | "hypothesis"
+    | "gap"
+    | "evidence"
+    | "problem"
+    | "dead_end"
+    | "relation"
+    | "review"
+    | "retraction";
   version?: number;
   event_id?: string;
   seq?: number;
@@ -143,7 +155,8 @@ function validHead(row: MoveHead): boolean {
     row.current_statement_version >= 1 &&
     (row.unlisted === 0 || row.unlisted === 1) &&
     (row.has_claims === 0 || row.has_claims === 1) &&
-    typeof row.status === "string"
+    typeof row.status === "string" &&
+    ["open", "approval-required", "invite-only", "archived-read-only"].includes(row.admission_mode)
   );
 }
 
@@ -168,35 +181,37 @@ function emptyProblem(head: MoveHead, omissions: MoveDiscoveryOmission[] = []): 
 export interface PublicMoveSelectors {
   queue: typeof loadReviewQueue;
   gaps: typeof loadProofGapMove;
+  conflicts: typeof selectNormalizeConflictMove;
   frictions: typeof loadFormalizationFrictionMove;
   formalize: typeof selectFormalizeMove;
   hypotheses: typeof loadLiveHypotheses;
   killOrStand: typeof selectKillOrStandMove;
   formulation: typeof readPublishedProblemFormulation;
   sharpen: typeof selectSharpenStatementMove;
-  // Additional public-eligible move selectors (5ujc; idle-close stays authenticated-only).
-  conflicts?: typeof selectNormalizeConflictMove;
+  // Additional public-eligible move selectors (idle-close stays authenticated-only).
   duplicates?: typeof selectCollapseDuplicateMove;
   deadEnds?: typeof selectRecordDeadEndMove;
-  synthesize?: typeof selectSynthesizeMove;
+  synthesize: typeof selectSynthesizeMove;
   retries?: typeof loadDeadEndRetryMove;
+  retry: typeof loadPublicRetryMove;
   reanchor?: typeof selectReanchorMove;
   backToObject?: typeof selectBackToObjectMove;
 }
 const production: PublicMoveSelectors = {
   queue: loadReviewQueue,
   gaps: loadProofGapMove,
+  conflicts: selectNormalizeConflictMove,
   frictions: loadFormalizationFrictionMove,
   formalize: selectFormalizeMove,
   hypotheses: loadLiveHypotheses,
   killOrStand: selectKillOrStandMove,
   formulation: readPublishedProblemFormulation,
   sharpen: selectSharpenStatementMove,
-  conflicts: selectNormalizeConflictMove,
   duplicates: selectCollapseDuplicateMove,
   deadEnds: selectRecordDeadEndMove,
   synthesize: selectSynthesizeMove,
   retries: loadDeadEndRetryMove,
+  retry: loadPublicRetryMove,
   reanchor: selectReanchorMove,
   backToObject: selectBackToObjectMove,
 };
@@ -213,13 +228,17 @@ async function selectProblem(
   selectors: PublicMoveSelectors,
   globalDiscovery = false,
 ): Promise<SelectedProblem> {
-  if (!["active", "dormant", "under-result-review", "sharpening"].includes(head.status))
+  if (
+    head.admission_mode === "archived-read-only" ||
+    !["active", "dormant", "under-result-review", "sharpening"].includes(head.status)
+  )
     return { face: emptyProblem(head), items: [] };
   const omissions: MoveDiscoveryOmission[] = [];
   const candidates: NextMoveCandidate[] = [];
   let items: ReviewQueueItem[] = [];
   let formulation: PublishedProblemFormulation | undefined;
   const hypothesisPins = new Map<string, PublicationReference[]>();
+  const retryPins = new Map<NextMoveCandidate, PublicRetryReference[]>();
   const collect = (result: { move: NextMoveCandidate | null; degraded: boolean }, name: string) => {
     if (result.move) candidates.push(result.move);
     if (result.degraded)
@@ -332,6 +351,9 @@ async function selectProblem(
     await attempt("Proof gap", () =>
       selectors.gaps(db, head.id, head.cursor, now, { excludeOffScope: globalDiscovery }),
     );
+    await attempt("Conflict normalization", () =>
+      selectors.conflicts(db, head.id, head.cursor, { excludeOffScope: globalDiscovery }),
+    );
   }
   if (head.status !== "sharpening")
     try {
@@ -377,12 +399,10 @@ async function selectProblem(
       selectors.killOrStand(db, head.id, head.cursor),
     );
 
-  // Additional public-eligible scientific moves (17/18 total; session-private
-  // `idle-close` remains strictly authenticated-only).
+  // Additional public-eligible scientific moves. Session-private idle-close
+  // remains strictly authenticated-only. Conflict normalization is attempted
+  // above with the review-queue cut.
   if (head.status !== "sharpening" && head.has_claims > 0) {
-    if (selectors.conflicts) {
-      await attempt("Conflict normalization", () => selectors.conflicts!(db, head.id, head.cursor));
-    }
     if (selectors.duplicates) {
       await attempt("Duplicate collapse", () => selectors.duplicates!(db, head.id, head.cursor));
     }
@@ -396,13 +416,16 @@ async function selectProblem(
     }
   }
   if (head.status !== "sharpening") {
-    if (selectors.retries) {
+    if (head.unlisted === 0)
+      await attempt("Changed negative-result condition", async () => {
+        const result = await selectors.retry(db, head.id, head.cursor, globalDiscovery);
+        if (result.move) retryPins.set(result.move, result.references);
+        return result;
+      });
+    if (selectors.retries)
       await attempt("Dead-end retry", () => selectors.retries!(db, head.id, head.cursor, ""));
-    }
-    if (selectors.synthesize) {
-      await attempt("Synthesis", () => selectors.synthesize!(db, head.id, head.cursor));
-    }
-    if (selectors.backToObject) {
+    await attempt("Synthesis", () => selectors.synthesize(db, head.id, head.cursor));
+    if (selectors.backToObject)
       await attempt("Back-to-the-object ceremony breaker", () =>
         selectors.backToObject!(db, head.id, head.cursor, head.status, {
           mode: "public",
@@ -411,7 +434,6 @@ async function selectProblem(
           excludeOffScope: globalDiscovery,
         }),
       );
-    }
   }
 
   const safe = candidates.filter((move) => {
@@ -431,6 +453,11 @@ async function selectProblem(
       ),
     );
   const references = (move: NextMoveCandidate): PublicationReference[] => {
+    if (move.move === "retry-dead-end") {
+      const pins = retryPins.get(move);
+      if (!pins?.length) throw new Error("PUBLIC_MOVE_RETRY_PINS_UNAVAILABLE");
+      return pins;
+    }
     const refs: PublicationReference[] = [];
     if (formulation && ["state-claim", "sharpen-statement"].includes(move.move))
       refs.push({
@@ -443,6 +470,9 @@ async function selectProblem(
     const pinned = new Map<string, PublicationReference>();
     for (const [key, kind, field] of [
       ["target_pin", "claim", "claim_id"],
+      ["claim_a_pin", "claim", "claim_id"],
+      ["claim_b_pin", "claim", "claim_id"],
+      ["relation_pin", "relation", "relation_id"],
       ["gap_pin", "gap", "gap_id"],
       ["friction_pin", "evidence", "evidence_id"],
       ["hypothesis_pin", "hypothesis", "hypothesis_id"],
@@ -450,6 +480,12 @@ async function selectProblem(
       ["dead_end_pin", "dead_end", "dead_end_id"],
     ] as const) {
       const pin = preparation[key] as Record<string, unknown> | undefined;
+      if (
+        move.move === "normalize-conflict" &&
+        ["claim_a_pin", "claim_b_pin", "relation_pin"].includes(key) &&
+        !pin
+      )
+        throw new Error("PUBLIC_MOVE_PIN_INVALID");
       if (!pin) continue;
       if (
         typeof pin[field] !== "string" ||
@@ -467,10 +503,14 @@ async function selectProblem(
         payload_sha256: pin.payload_sha256,
         ...(typeof pin.version === "number" ? { version: pin.version } : {}),
       };
-      pinned.set(
-        `${reference.id}${reference.version === undefined ? "" : `@${reference.version}`}`,
-        reference,
-      );
+      // The assertion is supporting provenance; the move's two actionable
+      // refs name just the claims. Revalidate all three before serving it.
+      if (kind === "relation") refs.push(reference);
+      else
+        pinned.set(
+          `${reference.id}${reference.version === undefined ? "" : `@${reference.version}`}`,
+          reference,
+        );
     }
     const claimPin = preparation.claim_pin as Record<string, unknown> | undefined;
     if (

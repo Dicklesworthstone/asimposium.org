@@ -9,7 +9,11 @@ import {
 } from "@asimposium/contracts";
 import { tryBuildEvidenceArtifactDiscovery } from "@asimposium/contracts/artifact-publications";
 import { eventTailPath } from "@asimposium/contracts/event-tail";
-import { neutralizeUntrustedBody, type PackCandidate } from "@asimposium/render";
+import {
+  neutralizeUntrustedBody,
+  type PackCandidate,
+  screeningNoticeText,
+} from "@asimposium/render";
 import type { D1PreparedStatement, D1Result } from "@cloudflare/workers-types";
 import type { Env } from "../env";
 import { eventContentHiddenSql } from "../krater/public-content";
@@ -947,7 +951,10 @@ export async function readLedgerPackSection(
           ? {}
           : { screening_notice: relation.screening_notice }),
         why_included:
-          "digest-checked relation assertion and available dispute at the pack cursor; not an established implication",
+          "digest-checked relation assertion and available dispute at the pack cursor; not an established implication" +
+          (relation.dispute?.screening_notice === undefined
+            ? ""
+            : `. Recorded dispute (#${relation.dispute.seq}): ${screeningNoticeText(relation.dispute.screening_notice)}`),
         stable_prefix: 20 + index,
       });
       if (dispute?.screening_notice !== undefined) {

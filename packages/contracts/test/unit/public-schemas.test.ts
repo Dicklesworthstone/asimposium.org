@@ -18,6 +18,7 @@ import { generateDiscriminationSchema } from "../../src/discrimination.ts";
 import { generateFormalRecordsSchema } from "../../src/formal-records.ts";
 import { generateFrictionSchema } from "../../src/formalization-friction.ts";
 import { generateHypothesesSchema } from "../../src/hypotheses-schema.ts";
+import { generateIntegrityCasesSchema } from "../../src/integrity-cases.ts";
 import { generateReportsSchema } from "../../src/moderation.ts";
 import { generateProofGapsSchema } from "../../src/proof-gaps-schema.ts";
 import {
@@ -29,6 +30,7 @@ import {
   PUBLIC_SCHEMA_EXCLUSIONS,
   PUBLIC_SCHEMA_IDS,
 } from "../../src/public-schemas.ts";
+import { generateResearchListsSchema } from "../../src/research-lists.ts";
 import { generateReviewRequestsSchema } from "../../src/review-requests-artifact.ts";
 import { generateScientificWithdrawalsSchema } from "../../src/scientific-withdrawals.ts";
 import {
@@ -37,6 +39,7 @@ import {
   WorkshopPublicationRequestSchema,
   WorkshopPushRequestSchema,
 } from "../../src/sessions.ts";
+import { generateSponsorActivitySchema } from "../../src/sponsor-activity.ts";
 import { generateSponsorFollowsSchema } from "../../src/sponsor-follows.ts";
 import { generateStatementsSchema } from "../../src/statements.ts";
 import { generateWorkshopSearchSchema } from "../../src/workshop-search.ts";
@@ -65,6 +68,7 @@ const EXPECTED_PUBLIC_SCHEMA_IDS = [
   "formalization-friction",
   "hypotheses",
   "inbox",
+  "integrity-cases",
   "internal-health",
   "ledger",
   "moves",
@@ -74,6 +78,7 @@ const EXPECTED_PUBLIC_SCHEMA_IDS = [
   "questions",
   "readiness",
   "reports",
+  "research-lists",
   "retractions",
   "review-queue",
   "review-requests",
@@ -82,6 +87,7 @@ const EXPECTED_PUBLIC_SCHEMA_IDS = [
   "screening",
   "screening-appeals",
   "sessions",
+  "sponsor-activity",
   "sponsor-follows",
   "sponsor-suspensions",
   "statements",
@@ -195,11 +201,14 @@ test("the public schema registry serves exact artifact or canonical inline-gener
     ["formal-records", generateFormalRecordsSchema()],
     ["formalization-friction", generateFrictionSchema()],
     ["hypotheses", generateHypothesesSchema()],
+    ["integrity-cases", generateIntegrityCasesSchema()],
     ["proof-gaps", generateProofGapsSchema()],
     ["reports", generateReportsSchema()],
+    ["research-lists", generateResearchListsSchema()],
     ["review-requests", generateReviewRequestsSchema()],
     ["scientific-withdrawals", generateScientificWithdrawalsSchema()],
     ["screening-appeals", generateScreeningAppealsSchema()],
+    ["sponsor-activity", generateSponsorActivitySchema()],
     ["sponsor-follows", generateSponsorFollowsSchema()],
     ["sponsor-suspensions", generateSponsorSuspensionsSchema()],
     ["statements", generateStatementsSchema()],
@@ -238,11 +247,14 @@ test("the public schema classification is pinned to approved served ids and excl
     "formal-records",
     "formalization-friction",
     "hypotheses",
+    "integrity-cases",
     "proof-gaps",
     "reports",
+    "research-lists",
     "review-requests",
     "scientific-withdrawals",
     "screening-appeals",
+    "sponsor-activity",
     "sponsor-follows",
     "sponsor-suspensions",
     "statements",
@@ -402,9 +414,16 @@ test("schema slice paths accept only registry ids and own property names", () =>
 });
 
 test("nearest slices rank distinctive tokens over request/response", () => {
-  expect(nearestPublicSchemaSlices("sessions", "workshop_request")[0]).toBe(
+  expect(nearestPublicSchemaSlices("sessions", "workshop_request")).toEqual([
+    "/schemas/sessions.v1/workshop_create_request.json",
     "/schemas/sessions.v1/workshop_push_request.json",
-  );
+    "/schemas/sessions.v1/workshop_revise_request.json",
+  ]);
+  for (const kind of ["create", "revise"] as const) {
+    expect(nearestPublicSchemaSlices("sessions", `workshop_${kind}_request`)[0]).toBe(
+      `/schemas/sessions.v1/workshop_${kind}_request.json`,
+    );
+  }
   expect(nearestPublicSchemaSlices("sessions", "close_request")[0]).toBe(
     "/schemas/sessions.v1/session_close_request.json",
   );

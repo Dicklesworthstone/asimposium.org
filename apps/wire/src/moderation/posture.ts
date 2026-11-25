@@ -40,14 +40,41 @@ export interface PostureState {
   readonly since: string | null;
 }
 
-/** Refusals that still count: inside the window and after the latest clearance. */
+/** A refused envelope counts once for this Fellow, even if the provider later
+ * changes its verdict. Retain historical rows for the audit trail, but derive
+ * the first occurrence before applying clearance or time windows so an old
+ * retry cannot become a fresh refusal. The expression is code-owned SQL. */
+function unclearedDistinctRefusalsSql(fellowId: string): string {
+  return `SELECT r.input_digest, MIN(r.created_at) AS created_at
+    FROM screening_refusals r WHERE r.fellow_id = ${fellowId}
+    GROUP BY r.input_digest
+    HAVING MIN(r.created_at) > COALESCE(
+      (SELECT MAX(c.created_at) FROM screening_posture_clearances c
+        WHERE c.fellow_id = r.fellow_id), '')`;
+}
+
+/** The rolling window decides when posture engages, not when it expires.
+ * Find a threshold-sized cluster after the last clearance, even when all of
+ * its refusals have since aged out. LAG examines consecutive refusals once;
+ * a lifetime total would incorrectly quarantine sparse historical refusals.
+ * ISO millisecond strings preserve the strict seven-day boundary without
+ * floating-point timestamp subtraction. The expression is code-owned SQL. */
+function engagedPostureSinceSql(fellowId: string): string {
+  return `SELECT MIN(cluster_start) FROM (
+    SELECT r.created_at AS cluster_end,
+      LAG(r.created_at, ${POSTURE_REFUSAL_THRESHOLD - 1}) OVER (
+        ORDER BY r.created_at, r.input_digest) AS cluster_start
+    FROM (${unclearedDistinctRefusalsSql(fellowId)}) r
+  ) WHERE cluster_start > strftime('%Y-%m-%dT%H:%M:%fZ', cluster_end,
+    '-${POSTURE_WINDOW_MS / 1000} seconds')`;
+}
+
+/** Keep recent refusal counts separate from the latched publication posture. */
 const COUNTING_SQL = `
-  SELECT COUNT(*) AS n, MIN(r.created_at) AS since
-    FROM screening_refusals r
-   WHERE r.fellow_id = ?1
-     AND r.created_at > ?2
-     AND r.created_at > COALESCE(
-       (SELECT MAX(c.created_at) FROM screening_posture_clearances c WHERE c.fellow_id = ?1), '')`;
+  SELECT COUNT(*) AS n, MIN(r.created_at) AS since,
+    (${engagedPostureSinceSql("?1")}) AS engaged_since
+    FROM (${unclearedDistinctRefusalsSql("?1")}) r
+   WHERE r.created_at > ?2`;
 
 function windowStart(now = Date.now()): string {
   return new Date(now - POSTURE_WINDOW_MS).toISOString();
@@ -57,22 +84,23 @@ export async function postureOf(db: D1Database, fellowId: string): Promise<Postu
   const row = await db
     .prepare(COUNTING_SQL)
     .bind(fellowId, windowStart())
-    .first<{ n: number; since: string | null }>();
+    .first<{ n: number; since: string | null; engaged_since: string | null }>();
   // An aggregate always returns one row, even for an author with no refusals.
   // Missing or malformed state cannot be interpreted as permission to publish.
   if (
     row === null ||
     !Number.isSafeInteger(row.n) ||
     row.n < 0 ||
-    (row.n > 0 && typeof row.since !== "string")
+    (row.n > 0 && typeof row.since !== "string") ||
+    (row.engaged_since !== null && typeof row.engaged_since !== "string")
   ) {
     throw new Error("SCREENING_POSTURE_UNAVAILABLE");
   }
   const count = row.n;
   return {
-    quarantineFirst: count >= POSTURE_REFUSAL_THRESHOLD,
+    quarantineFirst: row.engaged_since !== null,
     refusalsInWindow: count,
-    since: row?.since ?? null,
+    since: row.engaged_since ?? row.since,
   };
 }
 
@@ -97,27 +125,21 @@ export function screeningPostureGuardStatement(
   return db
     .prepare(
       `SELECT CASE WHEN NOT EXISTS (SELECT 1 FROM events WHERE id = ?1)
-        OR (CASE WHEN ?4 IS NULL THEN
-          (SELECT COUNT(*) FROM screening_refusals r
-            WHERE r.fellow_id = ?2 AND r.created_at > ?3
-              AND r.created_at > COALESCE(
-                (SELECT MAX(c.created_at) FROM screening_posture_clearances c
-                  WHERE c.fellow_id = ?2), '')) < ?8
+        OR (CASE WHEN ?3 IS NULL THEN
+          (${engagedPostureSinceSql("?2")}) IS NULL
         ELSE EXISTS (SELECT 1 FROM screening_cases c
-          WHERE c.case_id = ?4 AND ${screeningCaseReleasedSql("c")}
-            AND c.fellow_id = ?2 AND c.problem_id = ?5
-            AND c.input_digest = ?6 AND c.context_digest = ?7) END)
+          WHERE c.case_id = ?3 AND ${screeningCaseReleasedSql("c")}
+            AND c.fellow_id = ?2 AND c.problem_id = ?4
+            AND c.input_digest = ?5 AND c.context_digest = ?6) END)
         THEN 1 ELSE json_extract('[]', '$[${POSTURE_CHANGED_MARKER}]') END`,
     )
     .bind(
       input.eventId,
       input.fellowId,
-      windowStart(),
       input.reviewCaseId ?? null,
       input.problemId,
       input.inputDigest,
       input.contextDigest,
-      POSTURE_REFUSAL_THRESHOLD,
     );
 }
 
@@ -134,7 +156,10 @@ export interface RefusalInput {
  * Build the atomic D1 statements for recording one content refusal (and its
  * threshold-crossing Fellow notice). Returned as statements so callers like
  * `recordRejectedScreeningCase` can commit the refusal in the exact same D1
- * batch as the durable `screening_cases` row.
+ * batch as the durable `screening_cases` row. Idempotent per (Fellow, bytes),
+ * across outcomes. When this refusal is the one that crosses the threshold,
+ * the Fellow is told privately (coarse, no detector detail) that its writes
+ * now wait for review.
  */
 export async function recordRefusalStatements(
   db: D1Database,
@@ -147,18 +172,15 @@ export async function recordRefusalStatements(
   // refused (asimposiumorg-ij2e).
   if ((await postureOf(db, input.fellowId)).quarantineFirst) return [];
   const refusalId = mintModerationId("SR");
-  const since = windowStart(now);
   return [
     db
       .prepare(
         `INSERT INTO screening_refusals
          (refusal_id, fellow_id, sponsor_id, problem_id, outcome, coarse_category, input_digest, created_at)
        SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8
-       WHERE (SELECT COUNT(*) FROM screening_refusals r
-                WHERE r.fellow_id = ?2 AND r.created_at > ?9
-                  AND r.created_at > COALESCE(
-                    (SELECT MAX(c.created_at) FROM screening_posture_clearances c
-                       WHERE c.fellow_id = ?2), '')) < ?10
+       WHERE (${engagedPostureSinceSql("?2")}) IS NULL
+         AND NOT EXISTS (SELECT 1 FROM screening_refusals prior
+           WHERE prior.fellow_id = ?2 AND prior.input_digest = ?7)
        ON CONFLICT (fellow_id, input_digest, outcome) DO NOTHING
        RETURNING refusal_id`,
       )
@@ -171,8 +193,6 @@ export async function recordRefusalStatements(
         input.coarseCategory,
         input.inputDigest,
         new Date(now).toISOString(),
-        since,
-        POSTURE_REFUSAL_THRESHOLD,
       ),
     // Test the threshold while holding the same transaction as the refusal.
     // Concurrent producers cannot all observe a later count and miss the
@@ -193,19 +213,8 @@ export async function recordRefusalStatements(
       },
       {
         sql: `EXISTS (SELECT 1 FROM screening_refusals WHERE refusal_id = ? AND fellow_id = ?)
-          AND (SELECT COUNT(*) FROM screening_refusals r
-                WHERE r.fellow_id = ? AND r.created_at > ?
-                  AND r.created_at > COALESCE(
-                    (SELECT MAX(c.created_at) FROM screening_posture_clearances c
-                       WHERE c.fellow_id = ?), '')) = ?`,
-        bindings: [
-          refusalId,
-          input.fellowId,
-          input.fellowId,
-          since,
-          input.fellowId,
-          POSTURE_REFUSAL_THRESHOLD,
-        ],
+          AND (${engagedPostureSinceSql("?")}) IS NOT NULL`,
+        bindings: [refusalId, input.fellowId, input.fellowId],
       },
     ),
   ];
@@ -242,11 +251,7 @@ export async function clearPosture(
        SELECT ?1, ?2, ?3, ?4, ?5, ?6
        WHERE (?3 = 'operator' OR EXISTS (
          SELECT 1 FROM enrollment_fellows f WHERE f.fellow_id = ?2 AND f.sponsor_id = ?4))
-         AND (SELECT COUNT(*) FROM screening_refusals r
-           WHERE r.fellow_id = ?2 AND r.created_at > ?7
-             AND r.created_at > COALESCE(
-               (SELECT MAX(c.created_at) FROM screening_posture_clearances c
-                 WHERE c.fellow_id = ?2), '')) >= ?8
+         AND (${engagedPostureSinceSql("?2")}) IS NOT NULL
        RETURNING clearance_id, created_at`,
     )
     .bind(
@@ -256,8 +261,6 @@ export async function clearPosture(
       input.clearedBy,
       input.reason,
       clearedAt,
-      windowStart(),
-      POSTURE_REFUSAL_THRESHOLD,
     )
     .first<{ clearance_id: string; created_at: string }>();
   if (cleared === null) throw new PostureClearanceRefusedError();
@@ -271,34 +274,44 @@ export interface SponsorPostureRow {
   readonly since: string | null;
 }
 
-/** This sponsor's Fellows with counting refusals (none listed means all clear). */
+/** Recent refusals and every latched posture remain visible to the current sponsor. */
 export async function sponsorPostures(
   db: D1Database,
   sponsorId: string,
 ): Promise<SponsorPostureRow[]> {
   const fellows = await db
     .prepare(
-      `SELECT DISTINCT f.fellow_id AS fellow_id, f.name AS name
-         FROM enrollment_fellows f
-         JOIN screening_refusals r ON r.fellow_id = f.fellow_id
-        WHERE f.sponsor_id = ? AND r.created_at > ?
-        ORDER BY f.fellow_id
+      `WITH postures AS MATERIALIZED (
+        SELECT f.fellow_id, f.name,
+          (${engagedPostureSinceSql("f.fellow_id")}) AS engaged_since,
+          (SELECT MIN(r.created_at) FROM (${unclearedDistinctRefusalsSql("f.fellow_id")}) r
+            WHERE r.created_at > ?2) AS recent_since
+        FROM enrollment_fellows f WHERE f.sponsor_id = ?1
+      ) SELECT fellow_id, name, engaged_since, recent_since FROM postures
+        WHERE engaged_since IS NOT NULL OR recent_since IS NOT NULL
+        ORDER BY fellow_id
         LIMIT 100`,
     )
     .bind(sponsorId, windowStart())
-    .all<{ fellow_id: string; name: string }>();
-  const rows: SponsorPostureRow[] = [];
-  for (const fellow of fellows.results ?? []) {
-    const posture = await postureOf(db, fellow.fellow_id);
-    if (posture.refusalsInWindow === 0) continue;
-    rows.push({
+    .all<{
+      fellow_id: string;
+      name: string;
+      engaged_since: string | null;
+      recent_since: string | null;
+    }>();
+  return (fellows.results ?? []).map((fellow) => {
+    if (
+      (fellow.engaged_since !== null && typeof fellow.engaged_since !== "string") ||
+      (fellow.recent_since !== null && typeof fellow.recent_since !== "string")
+    )
+      throw new Error("SCREENING_POSTURE_UNAVAILABLE");
+    return {
       fellow_id: fellow.fellow_id,
       name: fellow.name,
-      quarantine_first: posture.quarantineFirst,
-      since: posture.since,
-    });
-  }
-  return rows;
+      quarantine_first: fellow.engaged_since !== null,
+      since: fellow.engaged_since ?? fellow.recent_since,
+    };
+  });
 }
 
 /** Whether `sponsorId` currently sponsors `fellowId`. */

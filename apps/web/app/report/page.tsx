@@ -1,9 +1,11 @@
-import { ProblemIdSchema, REPORT_TARGET_PATTERN } from "@asimposium/contracts";
 import type { Metadata } from "next";
 import Link from "next/link";
 
+import { auth, signIn } from "@/auth";
 import { ReportPanel } from "@/components/report-panel";
+import { parseReportTarget, reportPageHref } from "@/lib/report-submission";
 import { SITE } from "@/lib/site";
+import { isCanonicalSponsorId } from "@/lib/sponsor-id";
 
 export const dynamic = "force-dynamic";
 
@@ -16,21 +18,7 @@ interface ReportPageProps {
   readonly searchParams?: Promise<{
     readonly problem_id?: string | string[];
     readonly target?: string | string[];
-    readonly report?: string | string[];
   }>;
-}
-
-function one(value: string | string[] | undefined): string | undefined {
-  return typeof value === "string" ? value : undefined;
-}
-
-function isValidReportTarget(target: string | undefined): target is string {
-  return (
-    target !== undefined &&
-    target.length >= 1 &&
-    target.length <= 96 &&
-    REPORT_TARGET_PATTERN.test(target)
-  );
 }
 
 function reportBackHref(problemId: string, target: string): string {
@@ -41,7 +29,8 @@ function reportBackHref(problemId: string, target: string): string {
   if (target.startsWith("SYNTH-")) return `${problemPath}/syntheses/${encodeURIComponent(target)}`;
   if (target.startsWith("L-")) return `${problemPath}/citations/${encodeURIComponent(target)}`;
   if (target.startsWith("G-")) return `${problemPath}/gaps?target=${encodeURIComponent(target)}`;
-  if (target.startsWith("CF-")) return `${problemPath}/conflicts?target=${encodeURIComponent(target)}`;
+  if (target.startsWith("CF-"))
+    return `${problemPath}/conflicts?target=${encodeURIComponent(target)}`;
   if (target.startsWith("Q-")) return `${problemPath}/questions?target=${encodeURIComponent(target)}`;
   if (target.startsWith("DE-")) return `${problemPath}/dead-ends#${encodeURIComponent(target)}`;
   if (target.startsWith("E-")) return `/r${problemPath}/evidence/${encodeURIComponent(target)}`;
@@ -56,11 +45,11 @@ function reportBackHref(problemId: string, target: string): string {
  */
 export default async function ReportPage({ searchParams }: ReportPageProps) {
   const query = (await searchParams) ?? {};
-  const problemId = one(query.problem_id);
-  const target = one(query.target);
-  const validProblem = problemId !== undefined && ProblemIdSchema.safeParse(problemId).success;
-  const valid = validProblem && isValidReportTarget(target);
-  const back = valid ? reportBackHref(problemId, target) : "/explore";
+  const target = parseReportTarget(query.problem_id, query.target);
+  const session = target === null ? null : await auth();
+  const sponsorId = isCanonicalSponsorId(session?.user?.id) ? session.user.id : null;
+  const back = target === null ? "/explore" : reportBackHref(target.problem_id, target.target);
+  const returnPath = target === null ? "/report" : reportPageHref(target);
   return (
     <>
       <main className="landing col" id="content">
@@ -70,12 +59,34 @@ export default async function ReportPage({ searchParams }: ReportPageProps) {
             <Link href={back}>← Back</Link>
           </p>
         </header>
-        {valid ? (
-          <ReportPanel problemId={problemId} target={target} status={one(query.report)} />
+        {target !== null && sponsorId !== null ? (
+          <ReportPanel problemId={target.problem_id} target={target.target} sponsorId={sponsorId} />
+        ) : target !== null ? (
+          <section className="card">
+            <h2>Sign in to report this public record</h2>
+            <p>
+              Reports are private and attributed to an accountable sponsor. Sign in with Google to
+              report{" "}
+              <code>
+                {target.problem_id} / {target.target}
+              </code>
+              .
+            </p>
+            <form
+              action={async () => {
+                "use server";
+                await signIn("google", { redirectTo: returnPath });
+              }}
+            >
+              <button className="btn-google" type="submit">
+                Sign in with Google
+              </button>
+            </form>
+          </section>
         ) : (
           <p className="quiet">
-            Open this page from the Report link on a public problem, claim, hypothesis, synthesis,
-            citation, dead-end, gap, conflict, or question page.
+            Open this page from the Report link on a public scientific record: a problem, claim,
+            hypothesis, synthesis, citation, dead-end, gap, conflict, question, evidence, or review.
           </p>
         )}
       </main>

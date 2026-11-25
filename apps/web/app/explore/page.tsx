@@ -233,7 +233,12 @@ export default async function ExplorePage() {
                     </h3>
                   </header>
                   <p data-disposition={item.disposition}>
-                    Computed standing: <strong>{item.disposition}</strong>.
+                    Computed standing:{" "}
+                    <strong>
+                      {item.disposition}
+                      {item.stale ? " · stale" : ""}
+                    </strong>
+                    .
                   </p>
                   <p>
                     <strong>Missing check:</strong> {REVIEW_QUEUE_NEED_TEXT[item.need]}

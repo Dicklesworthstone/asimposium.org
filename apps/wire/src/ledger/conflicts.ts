@@ -21,6 +21,11 @@ import type { D1Database } from "@cloudflare/workers-types";
 import { sha256Hex } from "../krater/krater.ts";
 import { eventContentHiddenSql, hiddenByContentControlSql } from "../krater/public-content.ts";
 import { publicationScreeningNotice } from "../screening/publication-notice.ts";
+import {
+  checkedScientificPayload,
+  type ScientificContentIdentity,
+  ScientificInputError,
+} from "./scientific-checks.ts";
 
 /**
  * W5.5 / Fable §6.1, ADR-21:
@@ -126,6 +131,101 @@ const CONFLICT_UNAVAILABLE = "Some conflict content or lifecycle history is unav
 const publicProblemSql = `status <> 'private-draft'
   AND NOT ${hiddenByContentControlSql("problems.id", "'problem'")}`;
 
+export interface ConflictResolutionSource extends ScientificContentIdentity {
+  readonly conflictId: string;
+}
+
+/** Resolve an open normalization from its immutable publication before paid
+ * screening. A retained projection cannot authorize settlement after the
+ * source is withheld, corrupted, or replaced by another lifecycle event. */
+export async function findConflictResolutionSource(
+  db: D1Database,
+  problemId: string,
+  conflictId: string,
+): Promise<ConflictResolutionSource | null> {
+  const row = await db
+    .prepare(`SELECT e.id AS event_id, e.payload_sha256, c.payload_json,
+      e.actor_fellow_id AS fellow_id,
+      cf.claim_a_id, cf.claim_a_version, cf.claim_b_id, cf.claim_b_version
+    FROM conflicts cf JOIN problems p ON p.id = cf.problem_id
+    JOIN events e ON e.problem_id = cf.problem_id AND e.seq = cf.seq
+      AND e.object_id = cf.conflict_id AND e.object_kind = 'conflict'
+      AND e.type = 'conflict.normalized' AND e.object_version = 1
+    JOIN event_content c ON c.event_id = e.id AND c.payload_sha256 = e.payload_sha256
+      AND c.redacted_at IS NULL
+    WHERE cf.problem_id = ? AND cf.conflict_id = ? AND cf.status = 'open'
+      AND p.status <> 'private-draft' AND e.seq <= p.public_seq
+      AND NOT ${eventContentHiddenSql("e")}
+      AND length(CAST(c.payload_json AS BLOB)) <= ${CONFLICT_CONTENT_BYTES}
+      AND NOT EXISTS (SELECT 1 FROM events other
+        WHERE other.problem_id = e.problem_id AND other.object_id = e.object_id
+          AND other.object_kind = 'conflict' AND other.seq <= p.public_seq AND other.id <> e.id)`)
+    .bind(problemId, conflictId)
+    .first<{
+      event_id: string;
+      payload_sha256: string;
+      payload_json: string;
+      fellow_id: string | null;
+      claim_a_id: string;
+      claim_a_version: number;
+      claim_b_id: string;
+      claim_b_version: number;
+    }>();
+  if (row === null) return null;
+  try {
+    const payload = await checkedScientificPayload(row);
+    const parsed = NormalizeConflictRequestSchema.safeParse({
+      claims: payload.claims,
+      aligned_definitions: payload.aligned_definitions,
+      aligned_scope: payload.aligned_scope,
+      aligned_quantifiers: payload.aligned_quantifiers,
+      smallest_disagreement: payload.smallest_disagreement,
+      agreed_facts: payload.agreed_facts,
+      discriminating_tests: payload.discriminating_tests,
+    });
+    if (!parsed.success) return null;
+    const [claimA, claimB] = parsed.data.claims;
+    if (
+      claimA === undefined ||
+      claimB === undefined ||
+      payload.conflict_id !== conflictId ||
+      payload.problem_id !== problemId ||
+      payload.status !== "open" ||
+      typeof row.fellow_id !== "string" ||
+      payload.author_fellow_id !== row.fellow_id ||
+      claimA.claim_id !== row.claim_a_id ||
+      claimA.version !== row.claim_a_version ||
+      claimB.claim_id !== row.claim_b_id ||
+      claimB.version !== row.claim_b_version
+    )
+      return null;
+    return {
+      conflictId,
+      eventId: row.event_id,
+      payloadDigest: row.payload_sha256,
+      payloadJson: row.payload_json,
+      problemId,
+    };
+  } catch (error) {
+    if (error instanceof ScientificInputError) return null;
+    throw error;
+  }
+}
+
+/** Run before the settlement event in the same transaction. Source-byte guards
+ * separately enforce current visibility and exact content in that batch. */
+export const CONFLICT_RESOLUTION_STATE_SQL = ` AND EXISTS (
+  SELECT 1 FROM conflicts cf JOIN problems p ON p.id = cf.problem_id
+  JOIN events source ON source.id = ? AND source.problem_id = cf.problem_id
+    AND source.seq = cf.seq AND source.object_id = cf.conflict_id
+    AND source.object_kind = 'conflict' AND source.type = 'conflict.normalized'
+    AND source.object_version = 1
+  WHERE cf.problem_id = ? AND cf.conflict_id = ? AND cf.status = 'open'
+    AND p.status <> 'private-draft' AND source.seq <= p.public_seq
+    AND NOT EXISTS (SELECT 1 FROM events newer
+      WHERE newer.problem_id = cf.problem_id AND newer.object_id = cf.conflict_id
+        AND newer.object_kind = 'conflict' AND newer.seq > source.seq))`;
+
 interface ConflictReadRow {
   conflict_id: string;
   problem_id: string;
@@ -141,7 +241,7 @@ interface ConflictReadRow {
   created_at: string;
   payload_json: string | null;
   payload_sha256: string;
-  screening_provenance: string | null;
+  screening_provenance_json: string | null;
   last_event_id: string;
   last_seq: number;
   last_type: string;
@@ -155,7 +255,7 @@ interface ConflictReadRow {
   last_created_at: string;
   last_payload_json: string | null;
   last_payload_sha256: string;
-  resolution_screening_provenance: string | null;
+  last_screening_provenance_json: string | null;
   content_limited: number;
   withheld: number;
 }
@@ -238,8 +338,8 @@ export async function loadProblemConflicts(
           AND length(CAST(ec.payload_json AS BLOB)) <= ${CONFLICT_CONTENT_BYTES}
           THEN ec.payload_json END AS payload_json,
         e.payload_sha256,
-        CASE WHEN length(CAST(ns.provenance_json AS BLOB)) > 4096 THEN ''
-          ELSE ns.provenance_json END AS screening_provenance,
+        CASE WHEN length(CAST(sp.provenance_json AS BLOB)) > 4096 THEN ''
+          ELSE sp.provenance_json END AS screening_provenance_json,
         h.id AS last_event_id, h.seq AS last_seq, h.type AS last_type,
         h.object_version AS last_object_version, h.created_at AS last_created_at,
         h.actor_fellow_id AS last_actor_fellow_id, h.actor_sponsor_id AS last_actor_sponsor_id,
@@ -252,8 +352,9 @@ export async function loadProblemConflicts(
           AND length(CAST(hc.payload_json AS BLOB)) <= ${CONFLICT_CONTENT_BYTES}
           THEN hc.payload_json END AS last_payload_json,
         h.payload_sha256 AS last_payload_sha256,
-        CASE WHEN length(CAST(rs.provenance_json AS BLOB)) > 4096 THEN ''
-          ELSE rs.provenance_json END AS resolution_screening_provenance,
+        CASE WHEN h.id = e.id THEN NULL
+          WHEN length(CAST(hp.provenance_json AS BLOB)) > 4096 THEN ''
+          ELSE hp.provenance_json END AS last_screening_provenance_json,
         CASE WHEN ec.redacted_at IS NOT NULL OR hc.redacted_at IS NOT NULL
           OR ${eventContentHiddenSql("e")} OR ${eventContentHiddenSql("h")}
           THEN 1 ELSE 0 END AS withheld
@@ -266,13 +367,13 @@ export async function loadProblemConflicts(
       )
       LEFT JOIN event_content ec ON ec.event_id = e.id AND ec.payload_sha256 = e.payload_sha256
       LEFT JOIN event_content hc ON hc.event_id = h.id AND hc.payload_sha256 = h.payload_sha256
-      LEFT JOIN screening_publications ns ON ns.event_id = e.id
-      LEFT JOIN screening_publications rs ON rs.event_id = h.id AND h.id <> e.id
+      LEFT JOIN screening_publications sp ON sp.event_id = e.id
+      LEFT JOIN screening_publications hp ON hp.event_id = h.id AND h.id <> e.id
     ), budgeted AS (
       SELECT *, SUM(COALESCE(length(CAST(payload_json AS BLOB)), 0)
         + COALESCE(length(CAST(last_payload_json AS BLOB)), 0)
-        + COALESCE(length(CAST(screening_provenance AS BLOB)), 0)
-        + COALESCE(length(CAST(resolution_screening_provenance AS BLOB)), 0))
+        + COALESCE(length(CAST(screening_provenance_json AS BLOB)), 0)
+        + COALESCE(length(CAST(last_screening_provenance_json AS BLOB)), 0))
         OVER (ORDER BY seq ROWS UNBOUNDED PRECEDING) AS content_bytes
       FROM sources
     )
@@ -285,10 +386,10 @@ export async function loadProblemConflicts(
       withheld,
       CASE WHEN content_bytes <= ${CONFLICT_READ_BYTES} THEN payload_json END AS payload_json,
       CASE WHEN content_bytes <= ${CONFLICT_READ_BYTES} THEN last_payload_json END AS last_payload_json,
-      CASE WHEN content_bytes <= ${CONFLICT_READ_BYTES} THEN screening_provenance END
-        AS screening_provenance,
-      CASE WHEN content_bytes <= ${CONFLICT_READ_BYTES} THEN resolution_screening_provenance END
-        AS resolution_screening_provenance,
+      CASE WHEN content_bytes <= ${CONFLICT_READ_BYTES} THEN screening_provenance_json END
+        AS screening_provenance_json,
+      CASE WHEN content_bytes <= ${CONFLICT_READ_BYTES} THEN last_screening_provenance_json END
+        AS last_screening_provenance_json,
       content_bytes > ${CONFLICT_READ_BYTES} AS content_limited
     FROM budgeted ORDER BY seq
   `;
@@ -439,11 +540,17 @@ export async function loadProblemConflicts(
       unavailable();
       continue;
     }
-    let notice: ReturnType<typeof publicationScreeningNotice>;
-    let resolutionNotice: ReturnType<typeof publicationScreeningNotice>;
+    // Each account retains the notice from its own immutable publication.
+    // A malformed receipt withholds this record rather than erasing a warning.
+    // An open conflict has no resolution account, so it cannot show one.
+    let screeningNotice: ConflictItem["screening_notice"];
+    let resolutionScreeningNotice: ConflictItem["screening_notice"];
     try {
-      notice = publicationScreeningNotice(row.screening_provenance);
-      resolutionNotice = publicationScreeningNotice(row.resolution_screening_provenance);
+      screeningNotice = publicationScreeningNotice(row.screening_provenance_json);
+      resolutionScreeningNotice =
+        status === "open"
+          ? undefined
+          : publicationScreeningNotice(row.last_screening_provenance_json);
     } catch {
       unavailable();
       continue;
@@ -455,7 +562,7 @@ export async function loadProblemConflicts(
       seq: row.seq,
       status,
       resolution,
-      ...(notice === undefined ? {} : { screening_notice: notice }),
+      ...(screeningNotice === undefined ? {} : { screening_notice: screeningNotice }),
       author_fellow_id: row.actor_fellow_id,
       sponsor_id: row.actor_sponsor_id ?? undefined,
       session_id: row.actor_session_id ?? undefined,
@@ -475,7 +582,9 @@ export async function loadProblemConflicts(
               model_string_self_declared: row.last_model_string_self_declared,
               harness: row.last_harness,
               created_at: row.last_created_at,
-              ...(resolutionNotice === undefined ? {} : { screening_notice: resolutionNotice }),
+              ...(resolutionScreeningNotice === undefined
+                ? {}
+                : { screening_notice: resolutionScreeningNotice }),
             },
     };
 
@@ -527,6 +636,7 @@ export function renderConflictsMarkdown(
 
     parts.push(`## Conflict \`${c.conflict_id}\``);
     parts.push("");
+    if (c.screening_notice !== undefined) parts.push(screeningNoticeText(c.screening_notice), "");
     parts.push(`- **Conflicting Claims**: \`${claimAText}\` vs \`${claimBText}\``);
     parts.push(`- **Status**: ${c.status}`);
     parts.push(`- **Author**: ${safeInlineProse(c.author_fellow_id)}`);
@@ -573,7 +683,7 @@ export function renderConflictsMarkdown(
     if (c.resolution) {
       parts.push("### Resolution");
       parts.push("");
-      if (c.resolution_event?.screening_notice)
+      if (c.resolution_event?.screening_notice !== undefined)
         parts.push(`> ${screeningNoticeText(c.resolution_event.screening_notice)}`, "");
       parts.push(neutralizeUntrustedBody(c.resolution).text);
       if (c.resolution_event) {
@@ -664,7 +774,7 @@ export function renderConflictsHtml(
         ? `<aside role="note">${escapeHtml(screeningNoticeText(c.screening_notice))}</aside>`
         : "";
       const resolutionNotice = resolutionEvent?.screening_notice
-        ? `<aside role="note">${escapeHtml(screeningNoticeText(resolutionEvent.screening_notice))}</aside>`
+        ? `<aside role="note" data-screening-notice="${escapeHtml(resolutionEvent.screening_notice.notice)}">${escapeHtml(screeningNoticeText(resolutionEvent.screening_notice))}</aside>`
         : "";
       const resolutionAttribution = resolutionEvent
         ? `<p class="text-xs">Recorded by ${escapeHtml(resolutionEvent.author_fellow_id)} in event ${escapeHtml(resolutionEvent.event_id)} (sequence #${resolutionEvent.seq}).</p>
@@ -685,6 +795,7 @@ export function renderConflictsHtml(
 
       return `
       <article class="p-6 bg-white dark:bg-slate-900 rounded-lg border border-slate-200 dark:border-slate-800 shadow-sm" data-conflict-id="${safeId}">
+        ${c.screening_notice === undefined ? "" : `<aside role="note" data-screening-notice="${escapeHtml(c.screening_notice.notice)}">${escapeHtml(screeningNoticeText(c.screening_notice))}</aside>`}
         <div class="flex items-center justify-between">
           <div class="flex items-center space-x-3">
             <h3 class="text-lg font-bold font-mono text-slate-900 dark:text-slate-100">${safeId}</h3>

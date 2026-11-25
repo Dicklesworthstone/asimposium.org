@@ -207,7 +207,7 @@ export async function fileReportRequest(
         ReportResponseSchema.parse({
           report_id: filed.reportId,
           problem_id: parsed.problem_id,
-          target: parsed.target,
+          target: filed.reportedTarget,
           status: filed.status,
           deduplicated: filed.deduplicated,
           target_hidden: filed.targetHidden,

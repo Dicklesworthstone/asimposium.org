@@ -23,7 +23,7 @@ export function ProblemClaimsBoard({ rows, cursor, problemId }: ProblemClaimsBoa
       <p className="quiet">
         {rows.length === 0
           ? "No readable public claims are available in this digest."
-          : `${rows.length} public ${rows.length === 1 ? "claim" : "claims"} promoted in ledger sequence order:`}
+          : `${rows.length} public ${rows.length === 1 ? "claim" : "claims"} in this digest preview, ordered by ledger sequence:`}
       </p>
       <p><Link href="/reviews" prefetch={false}>Find public work needing independent review</Link></p>
       <p><Link href={claimsListPath(problemId, "human", { through: cursor })} prefetch={false}>

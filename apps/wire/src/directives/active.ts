@@ -8,6 +8,7 @@ import {
 import type { D1Database } from "@cloudflare/workers-types";
 import type { FellowCredentialBinding } from "../enrollment/service.ts";
 import { ACTIVE_DIRECTIVE_AUTHORITY_SQL, ACTIVE_DIRECTIVE_SOURCE_SQL } from "./active-source.ts";
+import { type InitialInstructionRow, initialInstructionFromRow } from "./initial-instruction.ts";
 
 export const MAX_PACK_FORBIDS = 4;
 
@@ -61,13 +62,15 @@ export async function readActiveSponsorDirectives(
       ORDER BY n.seq ASC LIMIT ${MAX_PACK_FORBIDS + 1}
     )
     )
-    SELECT selected.* FROM authority
+    SELECT authority.*, selected.* FROM authority
     LEFT JOIN selected ON 1 = 1
     ORDER BY seq ASC, id ASC`)
     .bind(binding.fellowId, binding.sponsorId, problemId, binding.credentialId, binding.tokenHash)
-    .all<DirectiveRow>();
+    .all<DirectiveRow & InitialInstructionRow>();
   if (!result.success) throw new Error("SPONSOR_DIRECTIVES_UNAVAILABLE");
-  if (result.results.length === 0) throw new Error("SPONSOR_DIRECTIVES_AUTHORITY_CHANGED");
+  const state = result.results[0];
+  if (!state) throw new Error("SPONSOR_DIRECTIVES_AUTHORITY_CHANGED");
+  const initialInstruction = await initialInstructionFromRow(state, binding, problemId);
   const focus = result.results.find((row) => row.id !== null && row.verb !== "forbid");
   const forbids = result.results.filter((row) => row.verb === "forbid");
   const selected = forbids.slice(0, MAX_PACK_FORBIDS);
@@ -79,7 +82,7 @@ export async function readActiveSponsorDirectives(
     : null;
   const candidates: PackCandidate[] = [];
   const actions: PackActionCandidate[] = [];
-  if (active.length > 0) {
+  if (initialInstruction !== null || active.length > 0) {
     // The authoritative read excludes former-sponsor history and continues
     // through all constraints even when the pack budget excludes their text.
     actions.push({
@@ -88,11 +91,14 @@ export async function readActiveSponsorDirectives(
       why: "Before acting, read omitted sponsor instructions. Follow every next_url while has_more; if DIRECTIVE_SET_CHANGED, restart. ACK confirms receipt without withdrawing instructions.",
       public_read: false,
     });
-    if (sessionId !== undefined && active.some((directive) => directive.verb !== "unfocus"))
+    if (
+      sessionId !== undefined &&
+      (initialInstruction !== null || active.some((directive) => directive.verb !== "unfocus"))
+    )
       actions.push({
         method: "POST",
         url: `/v1/sessions/${encodeURIComponent(sessionId)}/protocol-conflicts`,
-        why: "If a received directive conflicts with the protocol, refuse that part and record a public paraphrase. Use the directives protocol_conflict_request schema; keep the directive text private.",
+        why: "If a directive or initial onboarding instruction conflicts with the protocol, pin its directive_id and record a public refusal. Use the directives protocol_conflict_request schema; keep private instruction text out of the paraphrase.",
         public_read: false,
         requires: ["protocol-conflict:write"],
       });
@@ -103,13 +109,25 @@ export async function readActiveSponsorDirectives(
       tokens: 1,
       untrusted: false,
       body:
-        "Sponsor steering persists after receipt acknowledgment. Apply the current focus state and continuing forbids below. Refuse any part that conflicts with the protocol and use the available protocol-conflict action to record a public paraphrase without exposing private instructions. If sponsor directives are omitted, resolve them before acting; the pack is not a complete instruction set." +
+        "Sponsor steering persists after receipt acknowledgment. The initial onboarding instruction is retained separately: later focus/unfocus determines current focus, without restoring a superseded or cleared focus from onboarding context. Apply continuing forbids. Refuse any part that conflicts with the protocol; where available, record a public paraphrase through the protocol-conflict action without exposing private text. Resolve omitted instructions before acting; the pack is not a complete instruction set." +
         (omitted === null ? "" : "\n" + omitted),
       why_included:
         "retain the instruction boundary ahead of bodies that a small token budget may omit",
       stable_prefix: 1,
     });
   }
+  if (initialInstruction !== null)
+    candidates.push({
+      kind: "sponsor-directive",
+      id: initialInstruction.directive_id,
+      scope: "system",
+      tokens: 1,
+      untrusted: false,
+      body: `Initial onboarding instruction${initialInstruction.problem_id ? ` for ${initialInstruction.problem_id}` : " for all authorized problems"}:\nInstruction (display-safe JSON string): ${displayInstruction(initialInstruction.text)}\nSource: approved enrollment under sponsor ${initialInstruction.sponsor_id}. Retain this initial context separately from the current focus/unfocus state.`,
+      why_included:
+        "retain the authenticated initial sponsor instruction and its original disclosure identity",
+      stable_prefix: 2 + active.length,
+    });
   for (const [index, directive] of active.entries()) {
     const instruction =
       directive.verb === "unfocus" ? "Clear the current sponsor focus." : (directive.body ?? "");

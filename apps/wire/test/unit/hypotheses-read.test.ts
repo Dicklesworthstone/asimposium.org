@@ -195,7 +195,10 @@ test("hypothesis warnings follow the exact visible creation across lists, items 
       assert.deepEqual(face.hypotheses[0]?.screening_notice, receipt.public_action);
       assert.ok(!JSON.stringify(face).includes(receipt.input_digest));
       assert.ok(!JSON.stringify(face).includes(receipt.model_version));
-      assert.ok(!JSON.stringify(face).includes('"category":"injection"'));
+      assert.deepEqual(
+        face.hypotheses[0]?.last_event_screening_notice,
+        face.cursor < 3 ? undefined : { ...receipt.public_action, category: "injection" },
+      );
       assert.ok(
         renderHypothesesMarkdown(face).includes("screening context notice: dual-use-boundary"),
       );
@@ -228,8 +231,21 @@ test("hypothesis warnings follow the exact visible creation across lists, items 
     assert.equal(hidden.hypotheses[0]?.content, null);
     assert.equal(hidden.hypotheses[0]?.screening_notice, undefined);
     assert.ok(!JSON.stringify(hidden).includes("PRIVATE-DETECTOR-CANARY"));
-    assert.ok(!renderHypothesesMarkdown(hidden).includes("screening context notice"));
-    assert.ok(!renderHypothesesHtml(hidden).includes("data-screening-notice"));
+    assert.deepEqual(hidden.hypotheses[0]?.last_event_screening_notice, {
+      ...receipt.public_action,
+      category: "injection",
+    });
+    assert.ok(
+      !renderHypothesesMarkdown(hidden).includes("screening context notice: dual-use-boundary"),
+    );
+    assert.ok(renderHypothesesMarkdown(hidden).includes("screening context notice: injection"));
+    f.sql.exec("INSERT INTO content_controls VALUES('P-DEMO','#3','hidden',1)");
+    const hiddenDecision = (await loadPublicHypotheses(f.db, "P-DEMO"))!.face;
+    assert.equal(hiddenDecision.hypotheses[0]?.kill, null);
+    assert.equal(hiddenDecision.hypotheses[0]?.last_event_screening_notice, undefined);
+    assert.ok(!renderHypothesesMarkdown(hiddenDecision).includes("screening context notice"));
+    assert.ok(!renderHypothesesHtml(hiddenDecision).includes("data-screening-notice"));
+    f.sql.exec("INSERT INTO content_controls VALUES('P-DEMO','#3','visible',2)");
 
     f.sql
       .query("UPDATE screening_publications SET provenance_json=? WHERE event_id=?")
@@ -266,6 +282,47 @@ test("public reader returns committed hypotheses and full original attribution w
     f.sql.close();
   }
 });
+test("latest-decision notices follow historical lifecycle heads and fail closed on damaged receipts", async () => {
+  const f = fixture();
+  const receipt = JSON.parse(
+    readFileSync(
+      new URL(
+        "../../../../packages/contracts/test/fixtures/valid/screening-publication-warning-provenance.json",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+  try {
+    f.event(1, "H-1");
+    const deferred = f.event(2, "H-1", "hypothesis.deferred");
+    f.sql
+      .query("INSERT INTO screening_publications VALUES(?,?)")
+      .run(deferred, JSON.stringify(receipt));
+    const read = async (through?: string) =>
+      (await loadPublicHypothesisItem(f.db, "P-DEMO", "H-1", { through }))!.face.hypotheses[0]!;
+    const current = await read();
+    assert.equal(current.status, "deferred");
+    assert.equal(current.screening_notice, undefined);
+    assert.deepEqual(current.last_event_screening_notice, receipt.public_action);
+    f.event(3, "H-1", "hypothesis.resumed");
+    assert.equal((await read()).status, "active");
+    assert.equal((await read()).last_event_screening_notice, undefined);
+    assert.deepEqual((await read("2")).last_event_screening_notice, receipt.public_action);
+    f.sql
+      .query("UPDATE screening_publications SET provenance_json=? WHERE event_id=?")
+      .run(JSON.stringify({ ...receipt, private_detail: "PRIVATE-DECISION-CANARY" }), deferred);
+    await assert.rejects(read("2"), /PUBLIC_SCREENING_RECEIPT_UNAVAILABLE/);
+    f.sql.exec("INSERT INTO content_controls VALUES('P-DEMO','#2','hidden',1)");
+    const hidden = await read("2");
+    assert.equal(hidden.lifecycle, null);
+    assert.equal(hidden.last_event_screening_notice, undefined);
+    assert.ok(!JSON.stringify(hidden).includes("PRIVATE-DECISION-CANARY"));
+  } finally {
+    f.sql.close();
+  }
+});
+
 test("production decoding preserves sponsor publication, batch ancestry and legacy atomic ids", async () => {
   const f = fixture();
   try {

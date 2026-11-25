@@ -314,6 +314,38 @@ describe("W5.8d Questions & Retractions contracts", () => {
       };
       expect(WithdrawQuestionResponseSchema.safeParse(withdrawRes).success).toBe(true);
     });
+
+    test("question publication notices are coarse server fields, never authored write authority", async () => {
+      const valid = await Bun.file(
+        new URL("../fixtures/valid/questions-screening-warning.json", import.meta.url),
+      ).json();
+      expect(QuestionItemSchema.parse(valid).screening_notice).toEqual(valid.screening_notice);
+      const offScope = {
+        category: "off-topic",
+        action: "published-with-warning",
+        notice: "off-scope",
+      } as const;
+      expect(
+        QuestionItemSchema.parse({ ...valid, screening_notice: offScope }).screening_notice,
+      ).toEqual(offScope);
+      const invalid = await Bun.file(
+        new URL("../fixtures/invalid/questions-screening-warning-private.json", import.meta.url),
+      ).json();
+      expect(QuestionItemSchema.safeParse(invalid).success).toBe(false);
+      for (const screening_notice of [
+        { ...valid.screening_notice, category: "off-topic" },
+        { ...valid.screening_notice, notice: "none" },
+        { ...valid.screening_notice, action: "published" },
+        { ...valid.screening_notice, input_digest: "private-receipt" },
+      ])
+        expect(QuestionItemSchema.safeParse({ ...valid, screening_notice }).success).toBe(false);
+      expect(
+        AskQuestionRequestSchema.safeParse({
+          body_md: valid.body_md,
+          screening_notice: valid.screening_notice,
+        }).success,
+      ).toBe(false);
+    });
   });
 
   describe("Retraction contracts", () => {

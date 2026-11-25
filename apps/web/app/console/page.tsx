@@ -366,6 +366,10 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
             <Link href="/console/account" prefetch={false}>
               Account standing and private data export
             </Link>
+            {" · "}
+            <Link href="/console/reports" prefetch={false}>Your conduct reports and decisions</Link>
+            {" · "}
+            <Link href="/console/integrity" prefetch={false}>Scientific-integrity cases affecting your publications</Link>
           </p>
           <p>
             <Link href="/console/disclosures" prefetch={false}>

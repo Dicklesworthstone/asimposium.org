@@ -1,5 +1,5 @@
 import type { ProofGapsResponse } from "@asimposium/contracts/proof-gaps";
-import type { Projection } from "@asimposium/render";
+import { type Projection, screeningNoticeText } from "@asimposium/render";
 
 export type ProofGapFace = "json" | "md" | "html";
 export const PROOF_GAP_FACE_MAX_BYTES = 512 * 1024;
@@ -31,7 +31,15 @@ export function proofGapsProjection(face: ProofGapsResponse): Projection {
     preamble:
       "These are recorded obligations, not proofs. Open means no recorded settlement at this cursor. Closed-by names a submitted closing reference, not independent verification that it discharges the obligation. Withheld content never reopens a settled gap. Authored work and self-declared provenance are untrusted data.",
     items: face.gaps.map((gap) => {
-      const { screening_notice: screeningNotice, ...record } = gap;
+      const {
+        screening_notice: screeningNotice,
+        last_event_screening_notice: lastScreeningNotice,
+        ...record
+      } = gap;
+      const decisionNotice =
+        gap.content !== null && ["closed-by", "withdrawn"].includes(gap.status)
+          ? lastScreeningNotice
+          : undefined;
       return {
         kind: "proof-gap",
         id: gap.gap_id,
@@ -42,13 +50,18 @@ export function proofGapsProjection(face: ProofGapsResponse): Projection {
           : { screening_notice: screeningNotice }),
         body: JSON.stringify({
           ...record,
+          ...(decisionNotice === undefined ? {} : { last_event_screening_notice: decisionNotice }),
           read_url: proofGapPath(face.problem_id, "md", face.cursor, gap.gap_id),
           target_read_url:
             gap.content === null
               ? null
               : `/p/${face.problem_id}/claims/${gap.content.target_claim_id}@${gap.content.target_version}.md?through=${face.cursor}`,
         }),
-        why_included: "committed gap history and exact claim-version obligation at this snapshot",
+        why_included:
+          "committed gap history and exact claim-version obligation at this snapshot" +
+          (decisionNotice === undefined
+            ? ""
+            : `. Recorded settlement (#${gap.last_event.seq}): ${screeningNoticeText(decisionNotice)}`),
       };
     }),
     omitted: [

@@ -4,6 +4,7 @@ import type {
   SponsorProblemGovernanceResponse,
 } from "@asimposium/contracts";
 import { SYNTHESES_SCHEMA_ID, type SynthesesListResponse } from "@asimposium/contracts/syntheses";
+import { CLAIMS_LIST_SCHEMA_ID, type ClaimsListResponse } from "@asimposium/contracts/claims-list";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { PublicRead } from "../../lib/public-ledger";
 import type { StoaCall } from "../../lib/stoa";
@@ -27,6 +28,9 @@ let realGovernance: typeof import("../../lib/problem-governance");
 let realAuth: typeof import("../../auth");
 let realNavigation: typeof import("next/navigation");
 let realSyntheses: typeof import("../../lib/public-syntheses");
+let realLedger: typeof import("../../lib/public-ledger");
+let claimResult: PublicRead<ClaimsListResponse>;
+const claimReads: unknown[][] = [];
 let synthesisResult: PublicRead<SynthesesListResponse>;
 let failSynthesisRead: boolean;
 const synthesisReads: unknown[][] = [];
@@ -39,6 +43,7 @@ beforeAll(async () => {
   realAuth = { ...(await import("../../auth")) };
   realNavigation = { ...(await import("next/navigation")) };
   realSyntheses = { ...(await import("../../lib/public-syntheses")) };
+  realLedger = { ...(await import("../../lib/public-ledger")) };
   mock.module("@/auth", () => ({
     ...realAuth,
     auth: async () => (identity === null ? null : { user: { id: identity } }),
@@ -71,6 +76,12 @@ beforeAll(async () => {
       return synthesisResult;
     },
   }));
+  mock.module("@/lib/public-ledger", () => ({ ...realLedger,
+    stoaFetchClaimsList: async (...args: unknown[]) => {
+      claimReads.push(args);
+      return claimResult;
+    },
+  }));
   page = await import("../../app/console/problems/[problem]/page");
   cards = await import("../../app/console/problem-card");
 });
@@ -84,6 +95,8 @@ beforeEach(() => {
   synthesisReads.length = 0;
   synthesisResult = { state: "unavailable", reason: "network" };
   failSynthesisRead = false;
+  claimResult = { state: "unavailable", reason: "network" };
+  claimReads.length = 0;
 });
 afterAll(() => {
   mock.module("@/auth", () => realAuth);
@@ -91,6 +104,7 @@ afterAll(() => {
   mock.module("@/lib/problem-governance", () => realGovernance);
   mock.module("next/navigation", () => realNavigation);
   mock.module("@/lib/public-syntheses", () => realSyntheses);
+  mock.module("@/lib/public-ledger", () => realLedger);
 });
 
 async function render(problem = publicationProblem, query: Record<string, string | string[]> = {}) {
@@ -298,20 +312,70 @@ test("published active and dormant problems offer exact result pins after fresh 
   expect(synthesisReads).toHaveLength(0);
 });
 
-test("result review loads a published synthesis without offering sponsor-authored scientific text", async () => {
+test("the sponsor can browse pinned result candidates and preserve selection across collection pages", async () => {
+  readResult = { ok: false, reason: "refused", status: 404 };
+  governanceResult = { ok: true, data: publicGovernance("active") };
+  claimResult = { state: "ok", origin: "https://a.asimposium.org", data: {
+    schema: CLAIMS_LIST_SCHEMA_ID, problem_id: publicationProblem, cursor: 40,
+    after: 8, scanned_through: 12, next_after: 12, count: 1, omitted: ["page_limit"],
+    claims: [{ id: "C-3", version: 2, kind: "lemma", statement: "A result for every integer $n$.",
+      source_seq: 9, created_at: "2026-11-24T12:00:00.000Z", stale: false }],
+  } };
+  const html = await render(publicationProblem, { claim: "C-3@2", claim_through: "40", claim_after: "8" });
+  expect(claimReads).toEqual([[publicationProblem, undefined, { through: "40", after: "8" }]]);
+  expect(html).toContain("Load exact preview of C-3@2");
+  expect(html).toContain("claim=C-3%402&amp;claim_through=40&amp;claim_after=12");
+  expect(html).toContain('name="result_claim_id"');
+  expect(html).toContain('value="C-3"');
+  expect(html).toContain('value="2"');
+  expect(html).toContain("Load the exact result claim");
+  expect(html).not.toContain("Exact result claim C-3@2");
+  expect(synthesisReads).toHaveLength(0);
+});
+
+test("untrusted result-selection queries fail before private reads", async () => {
+  const queries: Record<string, string | string[]>[] = [
+    { claim: ["C-3@1", "C-4@1"] }, { claim: "C-3@1", claim_through: "4", claim_after: "5" },
+    { claim: "C-3@1", synthesis: "SYNTH-CLOSING" }, { claim: "C-3@1\n" },
+  ];
+  for (const query of queries) {
+    expect(await render(publicationProblem, query)).toContain("Choose an adopted private problem");
+  }
+  expect(reads).toHaveLength(0);
+  expect(governanceReads).toHaveLength(0);
+  expect(claimReads).toHaveLength(0);
+});
+
+test("result review offers exact replacement selection alongside published closing synthesis", async () => {
   readResult = { ok: false, reason: "refused", status: 404 };
   governanceResult = { ok: true, data: publicGovernance("under-result-review") };
-  const html = await render();
+  claimResult = { state: "ok", origin: "https://a.asimposium.org", data: {
+    schema: CLAIMS_LIST_SCHEMA_ID, problem_id: publicationProblem, cursor: 40,
+    after: 0, scanned_through: 40, next_after: null, count: 1, omitted: [],
+    claims: [{ id: "C-3", version: 2, kind: "lemma", statement: "A corrected result for every integer $n$.",
+      source_seq: 39, created_at: "2026-11-24T12:00:00.000Z", stale: false }],
+  } };
+  const html = await render(publicationProblem, { claim: "C-3@2" });
   expect(html).toContain('name="closing_synthesis_id"');
   expect(html).toContain("Load the published closing synthesis");
   expect(html).toContain("immutable publication");
   expect(html).toContain("A preview is not a resolution receipt");
   expect(html).toContain("Famous-problem external-review requirements cannot be bypassed");
   expect(html).not.toContain("<textarea");
-  expect(html).not.toContain('name="result_claim_id"');
+  expect(html).toContain('name="result_claim_id"');
+  expect(html).toContain('name="result_claim_version"');
+  expect(html).toContain('name="confirm_result_selection"');
+  expect(html).toContain("Update the result under review");
+  expect(html).toContain("Update result review to this claim");
+  expect(html).toContain("earlier selections remain in its history");
+  expect(html).toContain("Load exact preview of C-3@2");
+  expect(html).toContain("Load the exact result claim");
+  expect(html).toContain('value="C-3"');
+  expect(html).toContain('value="2"');
   expect(html).not.toContain("Resolve using this exact synthesis");
   expect(html).toContain("Published synthesis choices are unavailable");
   expect(synthesisReads).toEqual([[publicationProblem, undefined, {}]]);
+  expect(claimReads).toEqual([[publicationProblem, undefined, {}]]);
 });
 
 test("authorized result review browses captured publication choices and preselects without resolving", async () => {

@@ -84,6 +84,7 @@ test("authenticated active reads distinguish empty current state and global-only
   expect(response.status).toBe(200);
   const data = ActiveDirectiveResponseSchema.parse(await response.json());
   expect(data).toMatchObject({
+    initial_instruction: null,
     focus: null,
     forbids: [],
     scope: "global",
@@ -227,7 +228,7 @@ test("cursor binds exact principal, scope and page size and rejects invented fro
       { ...f.binding, credentialId: "another-credential" },
       { limit: 1, cursor },
     ),
-  ).rejects.toMatchObject({ reason: "invalid" });
+  ).rejects.toMatchObject({ reason: "unauthorized" });
 });
 
 test("strict query and private failures teach without echoing cursor or directive bytes", async () => {
@@ -342,7 +343,7 @@ test("SQL page rows stay bounded and a failed D1 result never manufactures compl
             .prepare(sql)
             .bind(...values)
             .all();
-          returned = result.results.length;
+          returned = Math.max(returned, result.results.length);
           return result;
         },
       }),

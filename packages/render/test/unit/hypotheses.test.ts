@@ -92,3 +92,36 @@ test("creation warnings remain explicit platform context beside the complete unt
     expect(text).toContain("excluded from global recommendations");
   }
 });
+
+test("latest-decision context stays distinct from creation context outside the untrusted record", () => {
+  const f = face("The original route remains available.");
+  const record = f.hypotheses[0]!;
+  record.status = "killed";
+  record.last_event = { ...record.publication, event_id: "EV-3", seq: 3 };
+  record.kill = {
+    hypothesis_id: record.hypothesis_id,
+    killed_by_evidence_id: "E-2",
+    reason: "The independent boundary check fires the original falsifier.",
+  };
+  record.screening_notice = {
+    category: "off-topic",
+    action: "published-with-warning",
+    notice: "off-scope",
+  };
+  record.last_event_screening_notice = {
+    category: "dual-use-boundary",
+    action: "published-with-warning",
+    notice: "screening-warning",
+  };
+  const md = renderHypothesesMarkdown(f),
+    html = renderHypothesesHtml(f);
+  const label = "Latest route decision (#3): Published with a screening context notice";
+  for (const text of [md, html]) {
+    expect(text).toContain("Off-scope science");
+    expect(text).toContain(label);
+    expect(text).toContain(record.kill.reason);
+  }
+  expect(md.indexOf(label)).toBeLessThan(md.indexOf("```json"));
+  expect(html.indexOf(label)).toBeLessThan(html.indexOf("<pre>"));
+  expect(html).toContain('data-screening-event="3" data-screening-notice="screening-warning"');
+});

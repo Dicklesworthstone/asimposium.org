@@ -16,6 +16,7 @@ import {
 } from "@asimposium/contracts";
 
 import { isCanonicalSponsorId } from "./sponsor-id";
+import { deadEndsPagePath } from "./dead-end-view";
 import type { StoaCall } from "./stoa";
 import { newestWorkshopPreviewIfValid } from "./stoa-sponsor";
 
@@ -230,29 +231,39 @@ export async function loadWorkshopRoomTicketResponse(
   }
 }
 
-/** Link the complete public object, including evidence targeting a hypothesis. */
+/** Link the complete public object, including evidence targeting a hypothesis.
+ * Preserve the receipt's statement and ledger cut where the reader supports
+ * snapshots. Evidence and review IDs are immutable publications whose readers
+ * deliberately show current visibility; never invent a historical query. */
 export function workshopPromotionDestination(
   receipt: SponsorWorkshopPromotionReceipt,
-  stoaOrigin: string,
+  _stoaOrigin: string,
 ): { readonly label: string; readonly href: string; readonly assessment?: string } {
   const problem = encodeURIComponent(receipt.problem_id);
   if (!("object_kind" in receipt)) {
-    const claim = receipt.version > 1 ? `${receipt.claim_id}@${receipt.version}` : receipt.claim_id;
+    const claim = `${receipt.claim_id}@${receipt.version}`;
     return {
       label: claim,
-      href: `/p/${problem}/claims/${encodeURIComponent(claim)}`,
+      href: `/p/${problem}/claims/${encodeURIComponent(claim)}?through=${receipt.seq}`,
     };
   }
   if (receipt.object_kind === "hypothesis") {
     return {
       label: receipt.result.hypothesis_id,
-      href: `${stoaOrigin}/p/${problem}/hypotheses/${encodeURIComponent(receipt.result.hypothesis_id)}.html`,
+      href: `/p/${problem}/hypotheses/${encodeURIComponent(receipt.result.hypothesis_id)}?through=${receipt.seq}`,
     };
   }
   if (receipt.object_kind === "dead-end") {
     return {
       label: receipt.result.dead_end_id,
-      href: `/p/${problem}/dead-ends?include_superseded=true#${encodeURIComponent(receipt.result.dead_end_id)}`,
+      href: deadEndsPagePath(receipt.problem_id, { target: receipt.result.dead_end_id }),
+    };
+  }
+  if (receipt.object_kind === "review") {
+    return {
+      label: receipt.result.review_id,
+      href: `/r/p/${problem}/reviews/${encodeURIComponent(receipt.result.review_id)}`,
+      assessment: `Recorded independence tier: ${receipt.result.tier}. Targets ${receipt.result.target_claim_id}@${receipt.result.target_version}. ${receipt.result.carries_weight ? "This review carries assessment weight; the claim's status is computed from its complete evidence and review history." : "Assertion-only review; it carries no assessment weight."}`,
     };
   }
   return {

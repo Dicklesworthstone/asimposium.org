@@ -2,6 +2,7 @@ import { afterAll, beforeAll, beforeEach, expect, mock, test } from "bun:test";
 import type { ProblemResearchReceipt } from "../../lib/problem-research";
 import type { StoaCall } from "../../lib/stoa";
 import {
+  researchClaimPreview,
   researchPreview,
   researchProblem,
   researchResolutionReceipt,
@@ -17,9 +18,11 @@ let principal: string | null;
 let authCalls: number;
 let mutationResult: StoaCall<ProblemResearchReceipt>;
 let previewResult: Awaited<ReturnType<typeof import("../../lib/problem-research")["stoaProblemClosingSynthesis"]>>;
+let claimResult: Awaited<ReturnType<typeof import("../../lib/problem-research")["stoaProblemResultClaim"]>>;
 let failMutation: boolean;
 const writes: unknown[][] = [];
 const reads: unknown[][] = [];
+const claimReads: unknown[][] = [];
 let realResearch: typeof import("../../lib/problem-research");
 let realAuth: typeof import("../../auth");
 let actions: typeof import("../../app/console/problems/[problem]/actions");
@@ -41,6 +44,10 @@ beforeAll(async () => {
       reads.push(args);
       return previewResult;
     },
+    stoaProblemResultClaim: async (...args: unknown[]) => {
+      claimReads.push(args);
+      return claimResult;
+    },
   }));
   const specifier: string = "../../app/console/problems/[problem]/actions?hermetic-research-actions-test";
   actions = await import(specifier) as typeof actions;
@@ -50,13 +57,37 @@ beforeEach(() => {
   authCalls = 0;
   mutationResult = { ok: true, data: researchReviewReceipt };
   previewResult = { ok: true, data: researchPreview };
+  claimResult = { ok: true, data: researchClaimPreview };
   failMutation = false;
   writes.length = 0;
   reads.length = 0;
+  claimReads.length = 0;
 });
 afterAll(() => {
   mock.module("@/auth", () => realAuth);
   mock.module("@/lib/problem-research", () => realResearch);
+});
+
+test("claim selection reauthenticates before its exact preview and sends no transition", async () => {
+  expect(await actions.previewProblemResultClaim(researchSponsor, researchProblem, "C-3", 1))
+    .toEqual({ ok: true, preview: researchClaimPreview });
+  expect(claimReads).toEqual([[researchSponsor, researchProblem, "C-3", 1]]);
+  expect(writes).toHaveLength(0);
+  for (const changed of [null, "person@example.invalid", "usr_fedcba0987654321"]) {
+    principal = changed;
+    expect(await actions.previewProblemResultClaim(researchSponsor, researchProblem, "C-3", 1))
+      .toMatchObject({ ok: false, refreshRequired: true });
+  }
+  expect(claimReads).toHaveLength(1);
+  expect(writes).toHaveLength(0);
+});
+
+test("a failed claim preview returns no private transport details or scientific clearance", async () => {
+  claimResult = { ok: false, reason: "refused", status: 404, detail: "PRIVATE_SOURCE_FAILURE" };
+  const result = await actions.previewProblemResultClaim(researchSponsor, researchProblem, "C-3", 1);
+  expect(result).toMatchObject({ ok: false });
+  expect(JSON.stringify(result)).not.toContain("PRIVATE_SOURCE_FAILURE");
+  expect(writes).toHaveLength(0);
 });
 
 test("both public actions reauthenticate and an account change cannot discard an earlier uncertain command", async () => {

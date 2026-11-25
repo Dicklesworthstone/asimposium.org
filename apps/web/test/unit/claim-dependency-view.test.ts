@@ -161,7 +161,11 @@ test("dependency metadata cannot mint machine-checked status or alter scientific
   assert.equal(f.view().badges.machineChecked.earned, false);
   assert.equal(f.view().badges.disposition, "open");
   f.state.certified_artifact = true;
+  assert.equal(f.view().badges.machineChecked.earned, false);
+  f.state.disposition = "strongly-supported";
   assert.equal(f.view().badges.machineChecked.earned, true);
+  f.state.stale = true;
+  assert.equal(f.view().badges.machineChecked.earned, false);
 });
 
 test("the Worker staleness facet is preserved independently of structural completeness", () => {

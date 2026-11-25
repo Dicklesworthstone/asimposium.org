@@ -15,7 +15,9 @@ interface DigestSnapshot extends DigestCounts {
   readonly control_count: number;
   readonly content_count: number;
 }
-export type DigestPackInput = Omit<WorkingMovesPackInput, "effectivePermissions">;
+export type DigestPackInput = Omit<WorkingMovesPackInput, "effectivePermissions"> & {
+  readonly quotaUnavailable?: boolean;
+};
 export interface DigestPackSection {
   readonly candidates: PackCandidate[];
   readonly actions: PackActionCandidate[];
@@ -125,6 +127,8 @@ export async function readDigestPack(
         session_open: true,
         workshop_push: true,
         promote: true,
+        evidence: true,
+        dead_end: true,
         review: true,
       },
     }),
@@ -161,12 +165,13 @@ export async function readDigestPack(
         refs: refs.slice(0, 2),
         ...(refs.length > 2 ? { refs_omitted: refs.length - 2 } : {}),
       };
-      moveStatus = moves.degraded ? "partial" : "available";
-    } else if (!moves.degraded) moveStatus = "none-permitted";
+      moveStatus = moves.degraded || input.quotaUnavailable ? "partial" : "available";
+    } else if (!moves.degraded && !input.quotaUnavailable) moveStatus = "none-permitted";
     if (moves.degraded) fail("digest_moves_incomplete");
     if (moves.omitted.some((item) => item.reason === "moves_permission_filtered"))
       omitted.push({ reason: "moves_permission_filtered" });
   } else fail("digest_moves_unavailable");
+  if (input.quotaUnavailable) fail("promotion_budget_unavailable");
 
   // Counts, formulation and recommendations are independent reads. A newer
   // public write or content control must not be relabelled with the old cut.

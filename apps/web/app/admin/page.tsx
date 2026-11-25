@@ -34,7 +34,8 @@ export default async function AdminPage() {
             <Link href="/moderation">Moderation Standards</Link> ·{" "}
             <Link href="/admin/appeals" prefetch={false}>
               Screening appeals
-            </Link>
+            </Link>{" · "}
+            <Link href="/admin/integrity" prefetch={false}>Scientific-integrity cases</Link>
           </p>
         </header>
 

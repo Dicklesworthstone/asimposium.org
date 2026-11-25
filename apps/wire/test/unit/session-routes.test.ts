@@ -59,11 +59,16 @@ import {
 import { PublicHypothesisIdSchema } from "@asimposium/contracts/hypotheses";
 import { getPublicSchemaSlice } from "@asimposium/contracts/public-schemas";
 import {
+  EvidenceListResponseSchema,
+  ReviewListResponseSchema,
+} from "@asimposium/contracts/research-lists";
+import {
   WorkshopDirectoryResponseSchema,
   workshopDirectoryPath,
 } from "@asimposium/contracts/workshop-directory";
 import { protocolVersionPair } from "@asimposium/protocol";
 import type { ExecutionContext } from "@cloudflare/workers-types";
+import Ajv2020 from "ajv/dist/2020.js";
 import { createApp } from "../../src/app.ts";
 import {
   readDirectiveDisclosureState,
@@ -97,8 +102,10 @@ import { diffProjections } from "../../src/krater/projection-replay.ts";
 import { PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL } from "../../src/krater/public-content.ts";
 import { CLAIM_RELATIONS_READ_SQL } from "../../src/ledger/claim-relations-read.ts";
 import { EVENT_TAIL_SELECT } from "../../src/ledger/event-tail-read.ts";
+import { createEvidenceListRoutes } from "../../src/ledger/evidence-list-http.ts";
 import { loadPublicHypothesisItem } from "../../src/ledger/hypotheses-service.ts";
 import { proofGapsSql } from "../../src/ledger/proof-gaps-read.ts";
+import { createReviewListRoutes } from "../../src/ledger/reviews-list-router.ts";
 import { findScientificClaim } from "../../src/ledger/scientific-checks.ts";
 import { readScientificDispositions } from "../../src/ledger/scientific-disposition.ts";
 import { createMegaCommandsRouter } from "../../src/mega-commands/router.ts";
@@ -1362,8 +1369,39 @@ describe("scientific settlement references", () => {
       target_refs: ["C-1@1"],
       body_md: "Which recorded work product addresses the finite covering obligation?",
     });
-    const answerPath = `${f.path}/questions/${question.question_id}/answer`;
+    const questionId = String(question.question_id);
+    const answerPath = `${f.path}/questions/${questionId}/answer`;
     const evidenceId = String(f.evidence.evidence_id);
+    const questionSource = async (type: "question.asked" | "question.leased") => {
+      const row = await f.db
+        .prepare(`SELECT e.id AS event_id, c.payload_json, c.redacted_at
+          FROM events e JOIN event_content c ON c.event_id = e.id
+          WHERE e.problem_id='P-4DSP' AND e.object_kind='question'
+            AND e.object_id=? AND e.type=? ORDER BY e.seq DESC LIMIT 1`)
+        .bind(questionId, type)
+        .first<{ event_id: string; payload_json: string; redacted_at: string | null }>();
+      assert.ok(row);
+      return row;
+    };
+    const gapSource = async () => {
+      const row = await f.db
+        .prepare(`SELECT e.id AS event_id, c.payload_json, c.redacted_at
+          FROM events e JOIN event_content c ON c.event_id = e.id
+          WHERE e.problem_id='P-4DSP' AND e.object_kind='gap'
+            AND e.object_id=? AND e.type='gap.filed'`)
+        .bind(f.gap.gap_id)
+        .first<{ event_id: string; payload_json: string; redacted_at: string | null }>();
+      assert.ok(row);
+      return row;
+    };
+    const leaseQuestion = async () => {
+      const response = await send(`${f.path}/questions/${questionId}/lease`, {
+        objective: "Check the finite covering obligation.",
+        deliverable: "A published source that addresses the requested check.",
+      });
+      expect(response.status, await response.clone().text()).toBe(200);
+      return LeaseQuestionResponseSchema.parse(await response.json());
+    };
     const state = async () => ({
       events: (await f.db.prepare("SELECT id, seq, type FROM events ORDER BY seq").all()).results,
       head: await f.db
@@ -1378,6 +1416,14 @@ describe("scientific settlement references", () => {
         .prepare("SELECT status, resolved_by_object FROM questions WHERE question_id=?")
         .bind(question.question_id)
         .first(),
+      leases: (
+        await f.db
+          .prepare(
+            "SELECT lease_id, status, released_by, released_at FROM leases WHERE object_kind='question' AND object_id=? ORDER BY lease_id",
+          )
+          .bind(questionId)
+          .all()
+      ).results,
       replays: (
         await f.db
           .prepare(
@@ -1386,12 +1432,15 @@ describe("scientific settlement references", () => {
           .all()
       ).results,
     });
-    const hide = async (target: string) => {
+    const hide = async (target: string, visibility: "hidden" | "visible" = "hidden") => {
       await f.db
         .prepare(`INSERT INTO content_controls
         (control_id,problem_id,target_kind,target_ref,visibility,source,reason_category,actor,reason,version,created_at)
-        VALUES(?,'P-4DSP','ledger-object',?,'hidden','operator','privacy','settlement-fixture','Withhold this source.',1,?)`)
-        .bind(`CC-${crypto.randomUUID()}`, target, new Date().toISOString())
+        SELECT ?,'P-4DSP','ledger-object',?,?,'operator','privacy','settlement-fixture',
+          'Exercise source visibility.',COALESCE(MAX(version),0)+1,?
+        FROM content_controls WHERE problem_id='P-4DSP' AND target_kind='ledger-object'
+          AND target_ref=?`)
+        .bind(`CC-${crypto.randomUUID()}`, target, visibility, new Date().toISOString(), target)
         .run();
     };
     const withdraw = async (
@@ -1464,8 +1513,349 @@ describe("scientific settlement references", () => {
       expect(result.review_id).toMatch(/^R-/);
       return { id: result.review_id!, path, call: reviewer.call };
     };
-    return { ...f, send, answerPath, evidenceId, state, hide, withdraw, retractClaim, review };
+    return {
+      ...f,
+      send,
+      answerPath,
+      questionId,
+      questionSource,
+      gapSource,
+      leaseQuestion,
+      evidenceId,
+      state,
+      hide,
+      withdraw,
+      retractClaim,
+      review,
+    };
   }
+
+  test("unavailable question publications cannot be completed from retained projections", async () => {
+    const f = await settlementFixture();
+    // Fault-injected corruption and restoration, not permitted ledger writes.
+    await f.db.prepare("DROP TRIGGER event_content_lawful_redaction_only").run();
+    const creation = await f.questionSource("question.asked");
+    const refuse = async () => {
+      const before = await f.state();
+      const response = await f.send(f.answerPath, { resolved_by_object: f.evidenceId });
+      expect(response.status, await response.clone().text()).toBe(404);
+      expect(await response.json()).toMatchObject({ code: "QUESTION_NOT_FOUND" });
+      expect(await f.state()).toEqual(before);
+    };
+    // A retained projection cannot stand in for unreadable creation bytes.
+    for (const damage of ["payload", "redaction"] as const) {
+      await f.db
+        .prepare(
+          damage === "payload"
+            ? "UPDATE event_content SET payload_json=payload_json || ' ' WHERE event_id=?"
+            : "UPDATE event_content SET redacted_at='2026-11-24T00:00:00.000Z' WHERE event_id=?",
+        )
+        .bind(creation.event_id)
+        .run();
+      await refuse();
+      await f.db
+        .prepare("UPDATE event_content SET payload_json=?, redacted_at=? WHERE event_id=?")
+        .bind(creation.payload_json, creation.redacted_at, creation.event_id)
+        .run();
+    }
+
+    await f.leaseQuestion();
+    const latest = await f.questionSource("question.leased");
+    await f.db
+      .prepare("UPDATE event_content SET redacted_at='2026-11-24T00:00:00.000Z' WHERE event_id=?")
+      .bind(latest.event_id)
+      .run();
+    await refuse();
+    await f.db
+      .prepare("UPDATE event_content SET redacted_at=? WHERE event_id=?")
+      .bind(latest.redacted_at, latest.event_id)
+      .run();
+
+    await f.hide(f.questionId);
+    await refuse();
+    expect((await f.state()).leases).toEqual([expect.objectContaining({ status: "active" })]);
+  });
+
+  test("question completion rechecks its original and latest source before committing", async () => {
+    let interleave: (() => Promise<void>) | undefined;
+    const f = await settlementFixture({
+      beforeBatch: async () => {
+        const action = interleave;
+        interleave = undefined;
+        await action?.();
+      },
+    });
+    // Fault-injected corruption and restoration, not permitted ledger writes.
+    await f.db.prepare("DROP TRIGGER event_content_lawful_redaction_only").run();
+    await f.leaseQuestion();
+    for (const fault of [
+      "creation-content",
+      "latest-content",
+      "lifecycle-head",
+      "visibility",
+    ] as const) {
+      const altered =
+        fault === "creation-content" || fault === "latest-content"
+          ? await f.questionSource(
+              fault === "creation-content" ? "question.asked" : "question.leased",
+            )
+          : undefined;
+      let before: Awaited<ReturnType<typeof f.state>> | undefined;
+      interleave = async () => {
+        if (altered) {
+          await f.db
+            .prepare(
+              fault === "creation-content"
+                ? "UPDATE event_content SET payload_json=payload_json || ' ' WHERE event_id=?"
+                : "UPDATE event_content SET redacted_at='2026-11-24T00:00:00.000Z' WHERE event_id=?",
+            )
+            .bind(altered.event_id)
+            .run();
+        } else if (fault === "lifecycle-head") {
+          // Renewal preserves the projection's leased status but appends a new
+          // question lifecycle publication. The captured head must still match.
+          await f.leaseQuestion();
+        } else {
+          await f.hide(f.questionId);
+        }
+        before = await f.state();
+      };
+      const response = await f.send(f.answerPath, { resolved_by_object: f.evidenceId });
+      expect(interleave).toBeUndefined();
+      expect(response.status, await response.clone().text()).toBe(409);
+      expect(await response.json()).toMatchObject({ code: "OBJECT_VERSION_CONFLICT" });
+      assert.ok(before);
+      expect(await f.state()).toEqual(before);
+      expect(before.leases).toEqual([expect.objectContaining({ status: "active" })]);
+      if (altered)
+        await f.db
+          .prepare("UPDATE event_content SET payload_json=?, redacted_at=? WHERE event_id=?")
+          .bind(altered.payload_json, altered.redacted_at, altered.event_id)
+          .run();
+    }
+  });
+
+  test("unavailable gap filings cannot be settled from retained projections", async () => {
+    let screened = 0;
+    const f = await settlementFixture({
+      screenPromotion: async (input) => {
+        if (input.kind === "gap-close") screened += 1;
+        return { decision: "pass", coarse_category: "benign-context", provider_status: "ok" };
+      },
+    });
+    // Fault-injected corruption and restoration, not permitted ledger writes.
+    await f.db.prepare("DROP TRIGGER event_content_lawful_redaction_only").run();
+    const filing = await f.gapSource();
+    const refuse = async () => {
+      for (const body of [
+        { gap_id: f.gap.gap_id, outcome: "closed-by", closed_by: f.evidenceId },
+        { gap_id: f.gap.gap_id, outcome: "withdrawn" },
+      ]) {
+        const before = await f.state();
+        const response = await f.send(`${f.path}/gaps/close`, body);
+        expect(response.status, await response.clone().text()).toBe(404);
+        expect(await response.json()).toMatchObject({ code: "GAP_NOT_FOUND" });
+        expect(await f.state()).toEqual(before);
+      }
+    };
+    for (const damage of ["payload", "redaction"] as const) {
+      await f.db
+        .prepare(
+          damage === "payload"
+            ? "UPDATE event_content SET payload_json=payload_json || ' ' WHERE event_id=?"
+            : "UPDATE event_content SET redacted_at='2026-11-24T00:00:00.000Z' WHERE event_id=?",
+        )
+        .bind(filing.event_id)
+        .run();
+      await refuse();
+      await f.db
+        .prepare("UPDATE event_content SET payload_json=?, redacted_at=? WHERE event_id=?")
+        .bind(filing.payload_json, filing.redacted_at, filing.event_id)
+        .run();
+    }
+    await f.hide(f.gap.gap_id);
+    await refuse();
+    expect(screened).toBe(0);
+  });
+
+  test("gap settlements recheck the filing source in the commit batch", async () => {
+    let interleave: (() => Promise<void>) | undefined;
+    let writeReady = false;
+    const f = await settlementFixture({
+      afterFirstRead: async (sql) => {
+        if (
+          interleave !== undefined &&
+          sql === "SELECT public_seq, chain_digest, chain_version FROM problems WHERE id = ?"
+        )
+          writeReady = true;
+      },
+      beforeBatch: async () => {
+        if (!writeReady) return;
+        writeReady = false;
+        const action = interleave;
+        interleave = undefined;
+        await action?.();
+      },
+    });
+    // A different Fellow isolates these source guards from the screen's
+    // existing same-Fellow publication-history checks.
+    const closer = await addApprovedFellow(f, {
+      suffix: "gap-source-closer",
+      scopes: ["promote"],
+    });
+    let key = 0;
+    const send = (path: string, body: unknown) =>
+      closer.call(path, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": `gap-source-race-${++key}`,
+        },
+        body: JSON.stringify(body),
+      });
+    const opened = await send("/v1/sessions", { problem_id: "P-4DSP", intent: "explore" });
+    expect(opened.status, await opened.clone().text()).toBe(201);
+    const session = SessionOpenResponseSchema.parse(await opened.json());
+    const path = `/v1/sessions/${session.session_id}/gaps/close`;
+    // Fault-injected corruption and restoration, not permitted ledger writes.
+    await f.db.prepare("DROP TRIGGER event_content_lawful_redaction_only").run();
+    const filing = await f.gapSource();
+    for (const fault of ["payload", "redaction", "visibility"] as const) {
+      for (const body of [
+        { gap_id: f.gap.gap_id, outcome: "closed-by", closed_by: f.evidenceId },
+        { gap_id: f.gap.gap_id, outcome: "withdrawn" },
+      ]) {
+        let before: Awaited<ReturnType<typeof f.state>> | undefined;
+        interleave = async () => {
+          if (fault === "visibility") await f.hide(f.gap.gap_id);
+          else
+            await f.db
+              .prepare(
+                fault === "payload"
+                  ? "UPDATE event_content SET payload_json=payload_json || ' ' WHERE event_id=?"
+                  : "UPDATE event_content SET redacted_at='2026-11-24T00:00:00.000Z' WHERE event_id=?",
+              )
+              .bind(filing.event_id)
+              .run();
+          before = await f.state();
+        };
+        const response = await send(path, body);
+        expect(interleave).toBeUndefined();
+        expect(writeReady).toBe(false);
+        expect(response.status, await response.clone().text()).toBe(409);
+        expect(await response.json()).toMatchObject({ code: "OBJECT_VERSION_CONFLICT" });
+        assert.ok(before);
+        expect(await f.state()).toEqual(before);
+        if (fault === "visibility") await f.hide(f.gap.gap_id, "visible");
+        else
+          await f.db
+            .prepare("UPDATE event_content SET payload_json=?, redacted_at=? WHERE event_id=?")
+            .bind(filing.payload_json, filing.redacted_at, filing.event_id)
+            .run();
+      }
+    }
+  });
+
+  test("a concurrent gap withdrawal preserves the winning settlement without partial loser writes", async () => {
+    let interleave: (() => Promise<void>) | undefined;
+    let writeReady = false;
+    const f = await settlementFixture({
+      afterFirstRead: async (sql) => {
+        if (
+          interleave !== undefined &&
+          sql === "SELECT public_seq, chain_digest, chain_version FROM problems WHERE id = ?"
+        )
+          writeReady = true;
+      },
+      beforeBatch: async () => {
+        if (!writeReady) return;
+        writeReady = false;
+        const action = interleave;
+        interleave = undefined;
+        await action?.();
+      },
+    });
+    // Keep the winner outside the loser's same-Fellow screening history.
+    const closer = await addApprovedFellow(f, {
+      suffix: "gap-race-closer",
+      scopes: ["promote"],
+    });
+    const send = (path: string, body: unknown, key: string) =>
+      closer.call(path, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": key },
+        body: JSON.stringify(body),
+      });
+    const opened = await send(
+      "/v1/sessions",
+      { problem_id: "P-4DSP", intent: "explore" },
+      "gap-race-session",
+    );
+    expect(opened.status, await opened.clone().text()).toBe(201);
+    const session = SessionOpenResponseSchema.parse(await opened.json());
+    const state = async () => ({
+      ...(await f.state()),
+      idempotency: (
+        await f.db
+          .prepare(
+            "SELECT problem_id, idempotency_key, request_digest, event_id, event_seq FROM idempotency ORDER BY problem_id, idempotency_key",
+          )
+          .all()
+      ).results,
+    });
+    let winnerFootprint: Awaited<ReturnType<typeof state>> | undefined;
+    interleave = async () => {
+      const winner = await f.send(
+        `${f.path}/gaps/close`,
+        { gap_id: f.gap.gap_id, outcome: "withdrawn" },
+        "gap-race-winner",
+      );
+      expect(winner.status, await winner.clone().text()).toBe(201);
+      expect(await winner.json()).toMatchObject({ gap_id: f.gap.gap_id, status: "withdrawn" });
+      winnerFootprint = await state();
+    };
+    const loser = await send(
+      `/v1/sessions/${session.session_id}/gaps/close`,
+      { gap_id: f.gap.gap_id, outcome: "closed-by", closed_by: f.evidenceId },
+      "gap-race-loser",
+    );
+    expect(interleave).toBeUndefined();
+    expect(writeReady).toBe(false);
+    expect(loser.status, await loser.clone().text()).toBe(409);
+    expect(await loser.json()).toMatchObject({ code: "OBJECT_VERSION_CONFLICT" });
+    assert.ok(winnerFootprint);
+    expect(winnerFootprint.gap).toMatchObject({ status: "withdrawn", closed_by: null });
+    expect(await state()).toEqual(winnerFootprint);
+  });
+
+  test("settled gap history cannot be reopened by a stale projection", async () => {
+    const f = await settlementFixture();
+    const withdrawal = { gap_id: f.gap.gap_id, outcome: "withdrawn" };
+    const accepted = await f.send(`${f.path}/gaps/close`, withdrawal, "original-gap-withdrawal");
+    expect(accepted.status, await accepted.clone().text()).toBe(201);
+    const receipt = await accepted.json();
+    // Simulate a stale rebuilt projection while preserving the real terminal event.
+    await f.db
+      .prepare("UPDATE proof_gaps SET status='open', closed_by=NULL, closed_at=NULL WHERE gap_id=?")
+      .bind(f.gap.gap_id)
+      .run();
+    const before = await f.state();
+    for (const body of [
+      { gap_id: f.gap.gap_id, outcome: "closed-by", closed_by: f.evidenceId },
+      withdrawal,
+    ]) {
+      const response = await f.send(`${f.path}/gaps/close`, body);
+      expect(response.status, await response.clone().text()).toBe(404);
+      expect(await response.json()).toMatchObject({ code: "GAP_NOT_FOUND" });
+      expect(await f.state()).toEqual(before);
+    }
+    await f.hide(f.gap.gap_id);
+    const beforeReplay = await f.state();
+    const replay = await f.send(`${f.path}/gaps/close`, withdrawal, "original-gap-withdrawal");
+    expect(replay.status, await replay.clone().text()).toBe(200);
+    expect(await replay.json()).toEqual(receipt);
+    expect(await f.state()).toEqual(beforeReplay);
+  });
 
   test("available evidence closes a gap and answers a question with durable replay", async () => {
     const f = await settlementFixture();
@@ -1477,6 +1867,8 @@ describe("scientific settlement references", () => {
     const answered = await f.send(f.answerPath, answerBody, "settlement-answer");
     expect(answered.status, await answered.clone().text()).toBe(200);
     const answerReceipt = await answered.json();
+    await f.hide(f.questionId);
+    await f.hide(f.gap.gap_id);
     await f.withdraw("evidence", f.evidenceId);
     const before = await f.state();
     const closeReplay = await f.send(`${f.path}/gaps/close`, closeBody, "settlement-close");
@@ -2178,6 +2570,306 @@ export async function fixture(options: LocalD1Options = {}) {
   };
 }
 
+describe("conflict publication source integrity", () => {
+  // Real HTTP commands over migrated SQLite. Different authors keep target
+  // integrity races independent of the writer's own screening-history guard.
+  async function conflictFixture() {
+    let screens = 0;
+    let beforeScreen: (() => Promise<void>) | undefined;
+    const f = await fixture({
+      screenPromotion: async (input) => {
+        if (input.kind === "conflict") {
+          screens++;
+          const action = beforeScreen;
+          beforeScreen = undefined;
+          await action?.();
+        }
+        return { decision: "pass", coarse_category: "benign-context", provider_status: "ok" };
+      },
+    });
+    let counter = 0;
+    const send = (
+      path: string,
+      body: unknown,
+      key = `conflict-source-${++counter}`,
+      call = f.call,
+    ) =>
+      call(path, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": key },
+        body: JSON.stringify(body),
+      });
+    const open = async (call = f.call) => {
+      const response = await send(
+        "/v1/sessions",
+        { problem_id: "P-4DSP", intent: "explore" },
+        undefined,
+        call,
+      );
+      expect(response.status, await response.clone().text()).toBe(201);
+      return `/v1/sessions/${SessionOpenResponseSchema.parse(await response.json()).session_id}`;
+    };
+    const path = await open();
+    const publish = async (statement: string, falsifier: string) => {
+      const draft = await send(`${path}/workshop`, {
+        type: "claim-draft",
+        title: "Conflict source",
+        body_md: statement,
+      });
+      expect(draft.status, await draft.clone().text()).toBe(201);
+      const { workshop_id: workshopId } = WorkshopPushResponseSchema.parse(await draft.json());
+      const promoted = await send(`${path}/promote`, {
+        workshop_id: workshopId,
+        kind: "conjecture",
+        statement,
+        falsifier,
+      });
+      expect(promoted.status, await promoted.clone().text()).toBe(201);
+      return PromoteResponseSchema.parse(await promoted.json()).claim_id;
+    };
+    const claimA = await publish("Two is even.", "Two has a nonzero remainder modulo two.");
+    const claimB = await publish("Three is odd.", "Three has zero remainder modulo two.");
+    const normalizer = await addApprovedFellow(f, {
+      suffix: "conflict-normalizer",
+      scopes: ["promote"],
+    });
+    const normalizerPath = await open(normalizer.call);
+    const normalizeBody = {
+      claims: [
+        { claim_id: claimA, version: 1 },
+        { claim_id: claimB, version: 1 },
+      ],
+      aligned_definitions: "Use standard integer arithmetic.",
+      aligned_scope: "Consider positive natural numbers.",
+      aligned_quantifiers: "For every positive natural number.",
+      smallest_disagreement: "Consecutive integers have different parity.",
+      agreed_facts: ["Both supplied numbers are natural numbers."],
+      discriminating_tests: ["Compute each remainder modulo two."],
+    };
+    const normalize = (key?: string) =>
+      send(`${normalizerPath}/conflicts`, normalizeBody, key, normalizer.call);
+    const resolve = (
+      conflictId: string,
+      key?: string,
+      status: "resolved" | "persistent-uncertainty" = "resolved",
+    ) =>
+      send(
+        `${path}/conflicts/${conflictId}/resolve`,
+        { status, resolution: "The recorded modulo two calculation identifies the disagreement." },
+        key,
+      );
+    const createConflict = async () => {
+      const response = await normalize();
+      expect(response.status, await response.clone().text()).toBe(201);
+      return NormalizeConflictResponseSchema.parse(await response.json()).conflict_id;
+    };
+    const source = async (objectId: string) => {
+      const row = await f.db
+        .prepare(`SELECT e.id, e.seq FROM events e
+          WHERE e.problem_id='P-4DSP' AND e.object_id=? AND e.object_version=1
+            AND e.type IN ('claim.created', 'conflict.normalized')`)
+        .bind(objectId)
+        .first<{ id: string; seq: number }>();
+      assert.ok(row);
+      return row;
+    };
+    const hide = async (target: string) => {
+      await f.db
+        .prepare(`INSERT INTO content_controls
+          (control_id,problem_id,target_kind,target_ref,visibility,source,reason_category,actor,reason,version,created_at)
+          VALUES(?,'P-4DSP','ledger-object',?,'hidden','operator','privacy',
+            'conflict-source-fixture','Withhold the exact publication.',1,?)`)
+        .bind(`CC-${crypto.randomUUID()}`, target, new Date().toISOString())
+        .run();
+    };
+    const damage = async (
+      objectId: string,
+      fault: "version-hide" | "event-hide" | "redact" | "corrupt",
+    ) => {
+      const original = await source(objectId);
+      if (fault === "version-hide") await hide(`${objectId}@1`);
+      else if (fault === "event-hide") await hide(`#${original.seq}`);
+      else if (fault === "redact")
+        await redactEventContent(f.db, original.id, "privacy", new Date().toISOString());
+      else {
+        // Deliberate storage corruption, not a legal publication mutation.
+        await f.db.prepare("DROP TRIGGER IF EXISTS event_content_lawful_redaction_only").run();
+        await f.db
+          .prepare("UPDATE event_content SET payload_json=payload_json || ' ' WHERE event_id=?")
+          .bind(original.id)
+          .run();
+      }
+    };
+    const state = async () => ({
+      events: (await f.db.prepare("SELECT id, seq, type FROM events ORDER BY seq").all()).results,
+      head: await f.db
+        .prepare("SELECT public_seq, chain_digest FROM problems WHERE id='P-4DSP'")
+        .first(),
+      cursor: await f.db.prepare("SELECT cursor FROM public_cursor WHERE singleton=1").first(),
+      conflicts: (
+        await f.db
+          .prepare(`SELECT conflict_id, claim_a_id, claim_a_version, claim_b_id, claim_b_version,
+            status, resolution, resolved_at FROM conflicts ORDER BY conflict_id`)
+          .all()
+      ).results,
+      replays: (
+        await f.db
+          .prepare(
+            "SELECT scope, principal_scope, idempotency_key FROM session_write_replays ORDER BY scope, idempotency_key",
+          )
+          .all()
+      ).results,
+    });
+    return {
+      ...f,
+      path,
+      send,
+      claimA,
+      claimB,
+      normalize,
+      resolve,
+      createConflict,
+      damage,
+      hide,
+      state,
+      screens: () => screens,
+      beforeScreen: (action: () => Promise<void>) => {
+        beforeScreen = action;
+      },
+    };
+  }
+
+  test.each(["resolved", "persistent-uncertainty"] as const)(
+    "exact historical claims can be normalized and settled as %s with durable replay",
+    async (status) => {
+      const f = await conflictFixture();
+      const revised = await f.send(`${f.path}/revise`, {
+        claim_id: f.claimA,
+        base_version: 1,
+        kind: "conjecture",
+        statement: "Four is even.",
+        falsifier: "Four has a nonzero remainder modulo two.",
+      });
+      expect(revised.status, await revised.clone().text()).toBe(201);
+      expect(ReviseResponseSchema.parse(await revised.json()).version).toBe(2);
+      const normalized = await f.normalize("conflict-source-normalize-replay");
+      expect(normalized.status, await normalized.clone().text()).toBe(201);
+      const normalization = NormalizeConflictResponseSchema.parse(await normalized.json());
+      const resolved = await f.resolve(
+        normalization.conflict_id,
+        "conflict-source-resolve-replay",
+        status,
+      );
+      expect(resolved.status, await resolved.clone().text()).toBe(200);
+      const resolution = ResolveConflictResponseSchema.parse(await resolved.json());
+      expect(resolution.status).toBe(status);
+      await f.hide(`${f.claimA}@1`);
+      await f.hide(normalization.conflict_id);
+      const before = await f.state();
+      const screens = f.screens();
+      const normalizationReplay = await f.normalize("conflict-source-normalize-replay");
+      expect(normalizationReplay.status).toBe(200);
+      expect(await normalizationReplay.json()).toEqual(normalization);
+      const resolutionReplay = await f.resolve(
+        normalization.conflict_id,
+        "conflict-source-resolve-replay",
+        status,
+      );
+      expect(resolutionReplay.status).toBe(200);
+      expect(await resolutionReplay.json()).toEqual(resolution);
+      expect(f.screens()).toBe(screens);
+      expect(await f.state()).toEqual(before);
+    },
+  );
+
+  test.each(["version-hide", "redact", "corrupt"] as const)(
+    "normalization refuses a %s claim source before screening",
+    async (fault) => {
+      const f = await conflictFixture();
+      await f.damage(f.claimB, fault);
+      const before = await f.state();
+      const response = await f.normalize();
+      expect(response.status, await response.clone().text()).toBe(404);
+      expect(await response.json()).toMatchObject({ code: "CONFLICT_TARGET_UNKNOWN" });
+      expect(f.screens()).toBe(0);
+      expect(await f.state()).toEqual(before);
+    },
+  );
+
+  test.each(["version-hide", "event-hide", "redact", "corrupt"] as const)(
+    "resolution refuses a %s normalization source before screening",
+    async (fault) => {
+      const f = await conflictFixture();
+      const conflictId = await f.createConflict();
+      await f.damage(conflictId, fault);
+      const before = await f.state();
+      const screens = f.screens();
+      const response = await f.resolve(conflictId);
+      expect(response.status, await response.clone().text()).toBe(404);
+      expect(await response.json()).toMatchObject({ code: "CONFLICT_NOT_FOUND" });
+      expect(f.screens()).toBe(screens);
+      expect(await f.state()).toEqual(before);
+    },
+  );
+
+  test.each(["endpoint-pin", "settled-lifecycle"] as const)(
+    "a retained open projection cannot authorize resolution after %s drift",
+    async (fault) => {
+      const f = await conflictFixture();
+      const conflictId = await f.createConflict();
+      if (fault === "endpoint-pin") {
+        // Deliberate projection corruption, not a permitted conflict mutation.
+        await f.db.prepare("DROP TRIGGER conflicts_immutable_update").run();
+        await f.db
+          .prepare("UPDATE conflicts SET claim_a_version=99 WHERE conflict_id=?")
+          .bind(conflictId)
+          .run();
+      } else {
+        const settled = await f.resolve(conflictId);
+        expect(settled.status, await settled.clone().text()).toBe(200);
+        await f.db
+          .prepare(
+            "UPDATE conflicts SET status='open', resolution=NULL, resolved_at=NULL WHERE conflict_id=?",
+          )
+          .bind(conflictId)
+          .run();
+      }
+      const before = await f.state();
+      const screens = f.screens();
+      const response = await f.resolve(conflictId);
+      expect(response.status, await response.clone().text()).toBe(404);
+      expect(await response.json()).toMatchObject({ code: "CONFLICT_NOT_FOUND" });
+      expect(f.screens()).toBe(screens);
+      expect(await f.state()).toEqual(before);
+    },
+  );
+
+  for (const stage of ["normalization", "resolution"] as const) {
+    test.each(["event-hide", "corrupt"] as const)(
+      `${stage} rolls back all public effects when its exact source becomes %s during screening`,
+      async (fault) => {
+        const f = await conflictFixture();
+        const conflictId = stage === "resolution" ? await f.createConflict() : undefined;
+        let before: Awaited<ReturnType<typeof f.state>> | undefined;
+        const screens = f.screens();
+        f.beforeScreen(async () => {
+          await f.damage(conflictId ?? f.claimA, fault);
+          // A content control advances the cursor in its own transaction.
+          // The refused publication must preserve that committed state.
+          before = await f.state();
+        });
+        const response =
+          conflictId === undefined ? await f.normalize() : await f.resolve(conflictId);
+        expect(response.status, await response.clone().text()).toBe(409);
+        expect(await response.json()).toMatchObject({ code: "OBJECT_VERSION_CONFLICT" });
+        expect(f.screens()).toBe(screens + 1);
+        assert.ok(before);
+        expect(await f.state()).toEqual(before);
+      },
+    );
+  }
+});
+
 describe("hypothesis lifecycle coordination", () => {
   async function setup(options: LocalD1Options = {}) {
     const f = await fixture(options);
@@ -2385,6 +3077,275 @@ describe("hypothesis lifecycle coordination", () => {
       .first<{ n: number }>();
     expect(provenance?.n).toBe(1);
   });
+});
+
+describe("explicit shared session handoffs", () => {
+  async function handoffFixture(options: LocalD1Options = {}) {
+    const f = await fixture(options);
+    let key = 0;
+    const post = (path: string, body: unknown, invocation = `shared-handoff-${++key}`) =>
+      f.call(path, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": invocation },
+        body: JSON.stringify(body),
+      });
+    const opened = await post("/v1/sessions", { problem_id: "P-4DSP", intent: "explore" });
+    expect(opened.status, await opened.clone().text()).toBe(201);
+    const session = SessionOpenResponseSchema.parse(await opened.json());
+    const path = `/v1/sessions/${session.session_id}`;
+    const draft = await post(`${path}/workshop`, {
+      type: "claim-draft",
+      title: "Private source calculation",
+      body_md: "PRIVATE-HANDOFF-DRAFT: check the boundary calculation.",
+    });
+    const draftBody = WorkshopPushResponseSchema.parse(await draft.json());
+    const promoted = await post(`${path}/promote`, {
+      workshop_id: draftBody.workshop_id,
+      kind: "conjecture",
+      statement: "The square of an odd integer is odd.",
+      falsifier: "An odd integer with an even square.",
+      relates_to: [],
+    });
+    expect(promoted.status, await promoted.clone().text()).toBe(201);
+    const claim = PromoteResponseSchema.parse(await promoted.json());
+    const published = await post(`${path}/synthesize`, {
+      covers_through: claim.seq,
+      body_md:
+        "PUBLIC-HANDOFF-CONTEXT: C-1 is a recorded conjecture; check negative integers next.",
+      anchors: [{ target_kind: "claim", target_id: claim.claim_id, target_version: 1 }],
+      omitted: ["No independent review is claimed."],
+      selection_policy: "Preserve the exact conjecture and its unresolved boundary cases.",
+    });
+    expect(published.status, await published.clone().text()).toBe(201);
+    const synthesis = SynthesizeResponseSchema.parse(await published.json());
+    const shared_handoff = { synthesis_id: synthesis.synthesis_id, event_id: synthesis.event_id };
+    return { ...f, post, path, session, claim, synthesis, shared_handoff };
+  }
+
+  async function savedPublication(f: Awaited<ReturnType<typeof handoffFixture>>) {
+    const response = await f.post(`${f.path}/workshop`, {
+      type: "claim-draft",
+      title: "Close-time public result",
+      body_md: "PRIVATE-CLOSE-PUBLICATION: derivation notes remain private.",
+      ledger_intent: { kind: "create", target_kind: "claim" },
+      publication: {
+        kind: "conjecture",
+        statement: "The sum of two even integers is even.",
+        falsifier: "Two even integers whose sum is odd.",
+        relates_to: [],
+        depends_on: [],
+      },
+    });
+    expect(response.status, await response.clone().text()).toBe(201);
+    return WorkshopPushResponseSchema.parse(await response.json());
+  }
+
+  test.each([false, true])(
+    "close with promotions=%s shares only the exact public source, keeps private notes, and replays after erasure",
+    async (withPromotion) => {
+      const f = await handoffFixture();
+      const publication = withPromotion ? await savedPublication(f) : undefined;
+      const body = {
+        handback: "PRIVATE-OWNER-HANDBACK: remember my unfinished calculation.",
+        shared_handoff: f.shared_handoff,
+        promote: publication ? [publication.workshop_id] : [],
+      };
+      const closed = await f.post(`${f.path}/close`, body, "share-close");
+      expect(closed.status, await closed.clone().text()).toBe(201);
+      const closedBytes = await closed.text();
+      const receipt = SessionCloseResponseSchema.parse(JSON.parse(closedBytes));
+      expect(receipt.shared_handoff).toMatchObject({
+        ...f.shared_handoff,
+        seq: f.synthesis.sequence,
+        read_url: `/p/P-4DSP/syntheses/${f.synthesis.synthesis_id}.json`,
+      });
+      expect(receipt.shared_handoff?.payload_sha256).toMatch(/^[0-9a-f]{64}$/);
+      expect(receipt.promoted).toEqual(withPromotion ? [`C-${f.synthesis.sequence + 1}`] : []);
+      const stored = await f.db
+        .prepare("SELECT handback, shared_handoff_json FROM sessions WHERE session_id = ?")
+        .bind(f.session.session_id)
+        .first<{ handback: string; shared_handoff_json: string }>();
+      expect(stored?.handback).toBe(body.handback);
+      expect(JSON.parse(stored!.shared_handoff_json)).toEqual({
+        ...f.shared_handoff,
+        seq: f.synthesis.sequence,
+        payload_sha256: receipt.shared_handoff!.payload_sha256,
+      });
+
+      const arriving = await addApprovedFellow(f, {
+        suffix: "handoff-arrival",
+        scopes: ["promote", "review"],
+        sponsor: { type: "sponsor", sponsorId: "usr_handoff_independent" },
+      });
+      const arrivalResponse = await arriving.call("/v1/sessions", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "handoff-arrive" },
+        body: JSON.stringify({ problem_id: "P-4DSP", intent: "explore" }),
+      });
+      expect(arrivalResponse.status, await arrivalResponse.clone().text()).toBe(201);
+      const arrival = SessionOpenResponseSchema.parse(await arrivalResponse.json());
+      const arrivalPath = `/v1/sessions/${arrival.session_id}`;
+      for (const profile of ["orient", "working"] as const) {
+        const response = await arriving.call(
+          `${arrivalPath}/pack?profile=${profile}&max_tokens=8000`,
+        );
+        expect(response.status, await response.clone().text()).toBe(200);
+        const bytes = await response.text();
+        const pack = PackResponseSchema.parse(JSON.parse(bytes));
+        const shared = pack.items.find((item) => item.kind === "shared-handoff");
+        expect(shared?.id).toBe(f.synthesis.synthesis_id);
+        expect(shared?.scope).toBe("ledger");
+        expect(shared?.untrusted).toBe(true);
+        expect(shared?.body).toContain("PUBLIC-HANDOFF-CONTEXT");
+        expect(shared?.body).toContain(f.synthesis.event_id);
+        expect(shared?.body).toContain("No independent review is claimed.");
+        expect(bytes).not.toContain("PRIVATE-OWNER-HANDBACK");
+        expect(bytes).not.toContain("PRIVATE-HANDOFF-DRAFT");
+        expect(bytes).not.toContain("PRIVATE-CLOSE-PUBLICATION");
+      }
+      const resumedResponse = await f.post("/v1/sessions", {
+        problem_id: "P-4DSP",
+        intent: "explore",
+      });
+      const resumed = SessionOpenResponseSchema.parse(await resumedResponse.json());
+      const own = PackResponseSchema.parse(
+        await (
+          await f.call(`/v1/sessions/${resumed.session_id}/pack?profile=working&max_tokens=8000`)
+        ).json(),
+      );
+      const ownIndex = own.items.findIndex((item) => item.kind === "handback");
+      expect(ownIndex).toBeGreaterThanOrEqual(0);
+      expect(own.items[ownIndex]?.body).toContain("PRIVATE-OWNER-HANDBACK");
+      expect(own.items.findIndex((item) => item.kind === "shared-handoff")).toBeGreaterThan(
+        ownIndex,
+      );
+      const review = PackResponseSchema.parse(
+        await (await arriving.call(`${arrivalPath}/pack?profile=review&max_tokens=8000`)).json(),
+      );
+      expect(review.items.some((item) => item.kind === "shared-handoff")).toBe(false);
+      expect(JSON.stringify(review)).not.toContain("PUBLIC-HANDOFF-CONTEXT");
+
+      await redactEventContent(f.db, f.synthesis.event_id, "privacy", new Date().toISOString());
+      const replay = await f.post(`${f.path}/close`, body, "share-close");
+      expect(replay.status, await replay.clone().text()).toBe(200);
+      expect(await replay.text()).toBe(closedBytes);
+      const afterErasure = PackResponseSchema.parse(
+        await (await arriving.call(`${arrivalPath}/pack?profile=working&max_tokens=8000`)).json(),
+      );
+      expect(afterErasure.items.some((item) => item.kind === "shared-handoff")).toBe(false);
+      expect(
+        afterErasure.omitted.some((item) => item.reason === "shared_handoff_unavailable"),
+      ).toBe(true);
+      expect(JSON.stringify(afterErasure)).not.toContain("PUBLIC-HANDOFF-CONTEXT");
+    },
+  );
+
+  test("another Fellow cannot designate the source or close with a mismatched event pin", async () => {
+    const f = await handoffFixture();
+    const other = await addApprovedFellow(f, { suffix: "handoff-foreign", scopes: ["promote"] });
+    const opened = await other.call("/v1/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "foreign-open" },
+      body: JSON.stringify({ problem_id: "P-4DSP", intent: "explore" }),
+    });
+    const session = SessionOpenResponseSchema.parse(await opened.json());
+    const rejected = await other.call(`/v1/sessions/${session.session_id}/close`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "foreign-share" },
+      body: JSON.stringify({ handback: "Still private.", shared_handoff: f.shared_handoff }),
+    });
+    expect(rejected.status, await rejected.clone().text()).toBe(422);
+    expect(await rejected.json()).toMatchObject({ code: "SESSION_CLOSE_BODY_INVALID" });
+    const mismatched = await f.post(`${f.path}/close`, {
+      handback: "Still open.",
+      shared_handoff: { ...f.shared_handoff, event_id: "E-MISMATCH" },
+    });
+    expect(mismatched.status, await mismatched.clone().text()).toBe(422);
+    const states = await f.db
+      .prepare("SELECT closed_at, shared_handoff_json FROM sessions WHERE problem_id = 'P-4DSP'")
+      .all();
+    expect(states.results).toEqual([
+      { closed_at: null, shared_handoff_json: null },
+      { closed_at: null, shared_handoff_json: null },
+    ]);
+  });
+
+  test.each([false, true])(
+    "source erasure at commit rolls back handoff, workshop, leases and promotions=%s",
+    async (withPromotion) => {
+      let interleave: (() => Promise<void>) | undefined;
+      const f = await handoffFixture({
+        beforeBatch: async () => {
+          const operation = interleave;
+          interleave = undefined;
+          await operation?.();
+        },
+      });
+      const publication = withPromotion ? await savedPublication(f) : undefined;
+      const retainedResponse = await f.post(`${f.path}/workshop`, {
+        type: "scratch",
+        title: "Private draft retained on failure",
+        body_md: "The shared-source race must not discard this note.",
+      });
+      const retained = WorkshopPushResponseSchema.parse(await retainedResponse.json());
+      const leased = await f.post(`${f.path}/leases`, {
+        object: f.claim.claim_id,
+        objective: "Check the odd-integer boundary case.",
+        deliverable: "An argument or a counterexample.",
+        parallel_safe: false,
+      });
+      expect(leased.status, await leased.clone().text()).toBe(201);
+      const before = await f.db
+        .prepare(`SELECT public_seq, (SELECT MAX(workshop_seq) FROM workshop_objects
+          WHERE problem_id = 'P-4DSP') AS workshop_seq FROM problems WHERE id = 'P-4DSP'`)
+        .first();
+      interleave = () =>
+        redactEventContent(f.db, f.synthesis.event_id, "privacy", new Date().toISOString());
+      const rejected = await f.post(`${f.path}/close`, {
+        handback: "This handback must not be saved.",
+        shared_handoff: f.shared_handoff,
+        discard: [retained.workshop_id],
+        promote: publication ? [publication.workshop_id] : [],
+      });
+      expect(rejected.status, await rejected.clone().text()).toBe(409);
+      expect(await rejected.json()).toMatchObject({ code: "OBJECT_VERSION_CONFLICT" });
+      expect(
+        await f.db
+          .prepare(`SELECT public_seq, (SELECT MAX(workshop_seq) FROM workshop_objects
+          WHERE problem_id = 'P-4DSP') AS workshop_seq FROM problems WHERE id = 'P-4DSP'`)
+          .first<Record<string, unknown>>(),
+      ).toEqual(before);
+      expect(
+        await f.db
+          .prepare(
+            "SELECT closed_at, handback, shared_handoff_json FROM sessions WHERE session_id = ?",
+          )
+          .bind(f.session.session_id)
+          .first<{
+            closed_at: string | null;
+            handback: string | null;
+            shared_handoff_json: string | null;
+          }>(),
+      ).toEqual({ closed_at: null, handback: null, shared_handoff_json: null });
+      expect(
+        await f.db
+          .prepare("SELECT state FROM workshop_objects WHERE workshop_id = ?")
+          .bind(retained.workshop_id)
+          .first<{ state: string }>(),
+      ).toEqual({ state: "open" });
+      expect(
+        await f.db
+          .prepare("SELECT status FROM leases WHERE session_id = ?")
+          .bind(f.session.session_id)
+          .first<{ status: string }>(),
+      ).toEqual({ status: "active" });
+      expect(
+        await f.db
+          .prepare("SELECT COUNT(*) AS n FROM claims WHERE problem_id = 'P-4DSP'")
+          .first<{ n: number }>(),
+      ).toEqual({ n: 1 });
+    },
+  );
 });
 
 export async function addApprovedFellow(
@@ -3122,6 +4083,149 @@ describe("session protocol routes", () => {
     const redacted = (await get("profile=review&target=C-1@1&max_tokens=8000")).pack;
     expect(redacted.omitted).toContainEqual({ reason: "content_unavailable", detail: "C-1@1" });
     expect(redacted.items.some((item) => item.kind.startsWith("claim-"))).toBe(false);
+  });
+
+  test("targeted packs recover evidence and reviews beyond twenty admissions at their captured cursor", async () => {
+    const f = await fixture();
+    let key = 0;
+    const post = async (path: string, body: unknown, caller = f.call) => {
+      const response = await caller(path, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": `research-recovery-${++key}`,
+        },
+        body: JSON.stringify(body),
+      });
+      expect(response.status, await response.clone().text()).toBe(201);
+      return response.json();
+    };
+    const session = SessionOpenResponseSchema.parse(
+      await post("/v1/sessions", { problem_id: "P-4DSP", intent: "prove" }),
+    );
+    const path = `/v1/sessions/${session.session_id}`;
+    const draft = WorkshopPushResponseSchema.parse(
+      await post(`${path}/workshop`, {
+        type: "claim-draft",
+        title: "Research recovery",
+        body_md: "PRIVATE-RESEARCH-RECOVERY",
+      }),
+    );
+    await post(`${path}/promote`, {
+      workshop_id: draft.workshop_id,
+      kind: "conjecture",
+      statement: "Two is even.",
+      falsifier: "A nonzero remainder after dividing two by two.",
+    });
+    const reviewer = await addApprovedFellow(f, {
+      suffix: "recovery-reviewer",
+      scopes: ["review"],
+    });
+    const reviewSession = SessionOpenResponseSchema.parse(
+      await post("/v1/sessions", { problem_id: "P-4DSP", intent: "review" }, reviewer.call),
+    );
+    // Several contributors reach the pack bound without bypassing each
+    // Fellow's ordinary publication quota.
+    const supplemental = await addApprovedFellow(f, {
+      suffix: "recovery-supplement",
+      scopes: ["promote", "review"],
+    });
+    const supplementalSession = SessionOpenResponseSchema.parse(
+      await post("/v1/sessions", { problem_id: "P-4DSP", intent: "explore" }, supplemental.call),
+    );
+    const supplementalPath = `/v1/sessions/${supplementalSession.session_id}`;
+    const evidence = async (number: number, version = 1) =>
+      EvidenceResponseSchema.parse(
+        await post(
+          `${number <= 18 ? path : supplementalPath}/evidence`,
+          {
+            bears_on_kind: "claim",
+            bears_on_id: "C-1",
+            bears_on_version: version,
+            direction: "informs",
+            kind: "argument",
+            source: { kind: "model_memory" },
+            mode: "exploratory",
+            body_md: `Recorded evidence ${number} for version ${version}.`,
+          },
+          number <= 18 ? f.call : supplemental.call,
+        ),
+      );
+    const review = async (number: number, version = 1) =>
+      ReviewResponseSchema.parse(
+        await post(
+          `${number <= 18 ? `/v1/sessions/${reviewSession.session_id}` : supplementalPath}/review`,
+          {
+            target_claim_id: "C-1",
+            target_version: version,
+            verdict: "inform",
+            basis: `Check ${number} of the exact version ${version}.`,
+            capable_of_failure: "A nonzero remainder would fail this check.",
+            rubric: [],
+            body_md: `Recorded review ${number} for version ${version}.`,
+          },
+          number <= 18 ? reviewer.call : supplemental.call,
+        ),
+      );
+    const expected = { evidence: [] as string[], reviews: [] as string[] };
+    for (let number = 1; number <= 21; number++) {
+      expected.evidence.push((await evidence(number)).evidence_id);
+      expected.reviews.push((await review(number)).review_id);
+    }
+    const response = await f.call(`${path}/pack?profile=claim&target=C-1@1&max_tokens=8000`);
+    expect(response.status, await response.clone().text()).toBe(200);
+    const pack = PackResponseSchema.parse(await response.json());
+    for (const kind of ["claim-evidence", "claim-review"])
+      expect(pack.omitted).toContainEqual({ reason: "candidate_limit", detail: `C-1@1:${kind}` });
+    expect(pack.items.some((item) => item.id === expected.evidence.at(-1))).toBe(false);
+    expect(pack.items.some((item) => item.id === expected.reviews.at(-1))).toBe(false);
+    await evidence(22);
+    await review(22);
+    await post(`${path}/revise`, {
+      claim_id: "C-1",
+      base_version: 1,
+      kind: "conjecture",
+      statement: "Four is even.",
+      falsifier: "A nonzero remainder after dividing four by two.",
+    });
+    await evidence(23, 2);
+    await review(23, 2);
+    const publicRoutes = createEvidenceListRoutes();
+    publicRoutes.route("/", createReviewListRoutes());
+    for (const kind of ["evidence", "reviews"] as const) {
+      const action = pack.next_actions.find((item) =>
+        item.url.startsWith(`/p/P-4DSP/${kind}.json?`),
+      );
+      expect(action?.method).toBe("GET");
+      if (action === undefined) throw new Error(`Missing ${kind} recovery action.`);
+      const ids: string[] = [];
+      let next: string | undefined = action.url;
+      let pages = 0;
+      while (next !== undefined) {
+        const url = new URL(next, "https://a-staging.asimposium.org");
+        expect(url.searchParams.get("target")).toBe("C-1@1");
+        expect(url.searchParams.get("through")).toBe(String(pack.cursor));
+        const pageResponse = await publicRoutes.fetch(new Request(url.href), f.env);
+        expect(pageResponse.status, await pageResponse.clone().text()).toBe(200);
+        const bytes = await pageResponse.text();
+        expect(bytes).not.toContain("PRIVATE-RESEARCH-RECOVERY");
+        const page =
+          kind === "evidence"
+            ? EvidenceListResponseSchema.parse(JSON.parse(bytes))
+            : ReviewListResponseSchema.parse(JSON.parse(bytes));
+        expect(page.target).toBe("C-1@1");
+        expect(page.cursor).toBe(pack.cursor);
+        ids.push(
+          ...("evidence" in page
+            ? page.evidence.map((item) => item.evidence_id)
+            : page.reviews.map((item) => item.review_id)),
+        );
+        next = pageResponse.headers.get("link")?.match(/<([^>]+)>; rel="next"/)?.[1];
+        expect(next === undefined).toBe(page.next_after === null);
+        expect(++pages).toBeLessThanOrEqual(3);
+      }
+      expect(ids).toEqual(expected[kind]);
+    }
   });
 
   test("review packs serve canonical rubrics with exact budget omissions and a larger read", async () => {
@@ -5410,7 +6514,13 @@ describe("session protocol routes", () => {
     ] as const;
 
     for (const policyCase of cases) {
-      const { call, db } = await fixture({ screenPromotion: policyCase.screenPromotion });
+      const screened: WorkersAIPromotionInput[] = [];
+      const { call, db, binding } = await fixture({
+        screenPromotion: async (input) => {
+          screened.push(input);
+          return policyCase.screenPromotion();
+        },
+      });
       const opened = await call("/v1/sessions", {
         method: "POST",
         headers: {
@@ -5452,8 +6562,44 @@ describe("session protocol routes", () => {
       expect(response.status, policyCase.label).toBe(policyCase.status);
       expect(response.headers.get("cache-control"), policyCase.label).toBe("private, no-store");
       const responseText = await response.text();
-      expect(JSON.parse(responseText), policyCase.label).toEqual(policyCase.body);
+      const policyResponse = JSON.parse(responseText) as { case_id: string };
+      expect(policyResponse, policyCase.label).toEqual(policyCase.body);
       expect(responseText, policyCase.label).not.toContain("PRIVATE_SCREENING_EXCEPTION_CANARY");
+      expect(screened, policyCase.label).toHaveLength(1);
+      const screenedInput = screened[0];
+      assert.ok(screenedInput);
+      assert.ok(screenedInput.falsifier);
+      const screeningBinding = await promotionScreeningBinding(screenedInput);
+      const retained = await getScreeningCase(db, policyResponse.case_id);
+      assert.ok(retained);
+      expect(retained, policyCase.label).toMatchObject({
+        problem_id: "P-4DSP",
+        fellow_id: binding.fellowId,
+        sponsor_id: binding.sponsorId,
+        route: "promote",
+        input_digest: screeningBinding.bodyDigest.slice(7),
+        context_digest: screeningBinding.contextDigest.slice(7),
+        coarse_category: policyCase.body.coarse_category,
+        outcome: policyCase.label === "hard-reject" ? "quarantine" : "provider-unavailable",
+        state: "pending",
+        decided_by: null,
+        decided_at: null,
+      });
+      expect(JSON.parse(retained.contextual_input_json ?? "null"), policyCase.label).toEqual(
+        screeningBinding.contextualInput,
+      );
+      const moderationLog = await db.prepare("SELECT * FROM moderation_log ORDER BY seq").all();
+      expect(moderationLog.results, policyCase.label).toHaveLength(1);
+      expect(moderationLog.results[0], policyCase.label).toMatchObject({
+        action: "quarantined",
+        category: policyCase.body.coarse_category,
+        subject: "candidate",
+        problem_id: null,
+      });
+      for (const publicText of [responseText, JSON.stringify(moderationLog.results)]) {
+        expect(publicText, policyCase.label).not.toContain(screenedInput.statement);
+        expect(publicText, policyCase.label).not.toContain(screenedInput.falsifier);
+      }
       expect(
         await db.prepare("SELECT COUNT(*) AS count FROM claims").first<{ count: number }>(),
         policyCase.label,
@@ -8834,6 +9980,369 @@ describe("session protocol routes", () => {
     ).toEqual({ n: 0 });
   });
 
+  describe("saved review publications", () => {
+    const privateReviewNotes = "PRIVATE-SAVED-REVIEW-NOTES: unfinished calculation";
+    const pass = {
+      decision: "pass",
+      coarse_category: "benign-context",
+      provider_status: "ok",
+    } as const;
+
+    async function setup(options: LocalD1Options = {}) {
+      const f = await fixture(options);
+      let key = 0;
+      const send = (
+        client: Pick<typeof f, "call">,
+        path: string,
+        body: unknown,
+        idempotencyKey = `saved-review-${++key}`,
+      ) =>
+        client.call(path, {
+          method: "POST",
+          headers: { "content-type": "application/json", "idempotency-key": idempotencyKey },
+          body: JSON.stringify(body),
+        });
+      const authorPost = (path: string, body: unknown, idempotencyKey?: string) =>
+        send(f, path, body, idempotencyKey);
+      const authorSession = SessionOpenResponseSchema.parse(
+        await (await authorPost("/v1/sessions", { problem_id: "P-4DSP", intent: "prove" })).json(),
+      ).session_id;
+      const source = WorkshopPushResponseSchema.parse(
+        await (
+          await authorPost(`/v1/sessions/${authorSession}/workshop`, {
+            type: "claim-draft",
+            title: "Exact review target",
+            body_md: "Private author work.",
+          })
+        ).json(),
+      );
+      const claim = PromoteResponseSchema.parse(
+        await (
+          await authorPost(`/v1/sessions/${authorSession}/promote`, {
+            workshop_id: source.workshop_id,
+            kind: "conjecture",
+            statement: "The square of every odd integer has residue one modulo eight.",
+            falsifier: "An odd integer with a square of a different residue modulo eight.",
+          })
+        ).json(),
+      );
+      const reviewer = await addApprovedFellow(f, { suffix: "saved-reviewer", scopes: ["review"] });
+      const post = (path: string, body: unknown, idempotencyKey?: string) =>
+        send(reviewer, path, body, idempotencyKey);
+      const open = async () =>
+        SessionOpenResponseSchema.parse(
+          await (await post("/v1/sessions", { problem_id: "P-4DSP", intent: "review" })).json(),
+        ).session_id;
+      const session = await open();
+      await f.db
+        .prepare("UPDATE problem_memberships SET role='observer' WHERE fellow_id=?")
+        .bind(reviewer.binding.fellowId)
+        .run();
+      const review = {
+        target_claim_id: claim.claim_id,
+        target_version: 1,
+        verdict: "inform" as const,
+        basis: "Checked the four odd residue classes modulo eight.",
+        capable_of_failure: "An odd residue whose square is not congruent to one.",
+        rubric: ["quantifier scope", "finite domain completeness"],
+        body_md: "All four odd residues square to one modulo eight.",
+      };
+      const push = async (sessionId = session, client: Pick<typeof f, "call"> = reviewer) => {
+        const response = await send(client, `/v1/sessions/${sessionId}/workshop`, {
+          type: "note",
+          title: "Independent residue review",
+          body_md: privateReviewNotes,
+          ledger_intent: { kind: "create", target_kind: "review" },
+          publication: { object_kind: "review", payload: review },
+        });
+        expect(response.status, await response.clone().text()).toBe(201);
+        return WorkshopPushResponseSchema.parse(await response.json());
+      };
+      const sponsorRouter = createSessionRouter({
+        service: f.service,
+        replayProtector: f.replayProtector,
+        screenPromotion: (input) => syntheticScreeningObservation(input, pass),
+        verifiedSponsor: async (request) => ({
+          principal: f.sponsor,
+          rawBody: new Uint8Array(await request.arrayBuffer()),
+        }),
+      });
+      const sponsorPublish = (
+        fellowId: string,
+        workshopId: string,
+        version = 1,
+        idempotencyKey = `sponsor-review-${++key}`,
+      ) =>
+        sponsorRouter.fetch(
+          new Request("https://a-staging.asimposium.org/v1/sponsors/workshop/action", {
+            method: "POST",
+            headers: { "content-type": "application/json", "idempotency-key": idempotencyKey },
+            body: JSON.stringify({
+              problem_id: "P-4DSP",
+              fellow_id: fellowId,
+              workshop_id: workshopId,
+              expected_workshop_version: version,
+              action: "promote",
+            }),
+          }),
+          f.env,
+        );
+      const publicState = async () => ({
+        events: (await f.db.prepare("SELECT * FROM events ORDER BY seq").all()).results,
+        reviews: (await f.db.prepare("SELECT * FROM reviews ORDER BY review_id").all()).results,
+        head: await f.db
+          .prepare("SELECT public_seq,chain_digest FROM problems WHERE id='P-4DSP'")
+          .first(),
+        cursor: await f.db.prepare("SELECT cursor FROM public_cursor WHERE singleton=1").first(),
+      });
+      const head = (workshopId: string) =>
+        f.db
+          .prepare("SELECT state,current_version FROM workshop_objects WHERE workshop_id=?")
+          .bind(workshopId)
+          .first();
+      return {
+        ...f,
+        reviewer,
+        authorSession,
+        authorPost,
+        session,
+        post,
+        open,
+        push,
+        review,
+        sponsorPublish,
+        publicState,
+        head,
+      };
+    }
+
+    test("review-only observers recover and publish the exact saved revision with durable replay", async () => {
+      const f = await setup();
+      const draft = await f.push();
+      expect(
+        (
+          await f.post(`/v1/sessions/${f.session}/close`, {
+            handback: "Resume this independent review.",
+            keep: [draft.workshop_id],
+          })
+        ).status,
+      ).toBe(201);
+      const recovered = await f.open();
+      const path = `/v1/sessions/${recovered}/review`;
+      const selected = { workshop_id: draft.workshop_id, expected_workshop_version: 2 };
+      const before = await f.publicState();
+      expect((await f.post(path, { ...selected, verdict: "confirm" })).status).toBe(422);
+      expect((await f.post(path, { ...selected, expected_workshop_version: 1 })).status).toBe(409);
+      expect((await f.authorPost(`/v1/sessions/${f.authorSession}/review`, selected)).status).toBe(
+        404,
+      );
+      expect(await f.publicState()).toEqual(before);
+      const published = await f.post(path, selected, "saved-review-publish");
+      expect(published.status, await published.clone().text()).toBe(201);
+      const bytes = await published.text();
+      const receipt = ReviewResponseSchema.parse(JSON.parse(bytes));
+      expect(receipt).toMatchObject({
+        target_claim_id: f.review.target_claim_id,
+        target_version: 1,
+        tier: "T0",
+        carries_weight: true,
+      });
+      expect(await f.head(draft.workshop_id)).toEqual({ state: "archived", current_version: 3 });
+      const event = await f.db
+        .prepare(
+          "SELECT e.*,c.payload_json FROM events e JOIN event_content c ON c.event_id=e.id WHERE e.object_id=?",
+        )
+        .bind(receipt.review_id)
+        .first<{
+          actor_fellow_id: string;
+          actor_sponsor_id: string;
+          actor_session_id: string;
+          payload_json: string;
+        }>();
+      expect(event).toMatchObject({
+        actor_fellow_id: f.reviewer.binding.fellowId,
+        actor_sponsor_id: f.binding.sponsorId,
+        actor_session_id: recovered,
+      });
+      expect(JSON.parse(event!.payload_json)).toMatchObject({
+        target_claim_id: f.review.target_claim_id,
+        target_version: 1,
+        basis: f.review.basis,
+        body_md: f.review.body_md,
+      });
+      expect(event!.payload_json).not.toContain(privateReviewNotes);
+      expect(
+        (await f.post(`/v1/sessions/${recovered}/close`, { handback: "Review published." })).status,
+      ).toBe(201);
+      const after = await f.publicState();
+      const replay = await f.post(path, selected, "saved-review-publish");
+      expect(replay.status).toBe(200);
+      expect(await replay.text()).toBe(bytes);
+      expect(await f.publicState()).toEqual(after);
+    });
+
+    test("sponsor publication uses the review-only Fellow's source session and never overrides P1", async () => {
+      const f = await setup();
+      const draft = await f.push();
+      expect(
+        (
+          await f.post(`/v1/sessions/${f.session}/close`, {
+            handback: "Sponsor may publish the checked payload.",
+          })
+        ).status,
+      ).toBe(201);
+      const response = await f.sponsorPublish(
+        f.reviewer.binding.fellowId,
+        draft.workshop_id,
+        1,
+        "sponsor-saved-review",
+      );
+      expect(response.status, await response.clone().text()).toBe(201);
+      const bytes = await response.text();
+      const receipt = JSON.parse(bytes);
+      expect(receipt.promotion).toMatchObject({
+        object_kind: "review",
+        problem_id: "P-4DSP",
+        version: 1,
+        result: { target_claim_id: f.review.target_claim_id, tier: "T0", carries_weight: true },
+      });
+      const event = await f.db
+        .prepare(
+          "SELECT e.*,c.payload_json FROM events e JOIN event_content c ON c.event_id=e.id WHERE e.object_id=?",
+        )
+        .bind(receipt.promotion.result.review_id)
+        .first<{
+          actor_fellow_id: string;
+          actor_session_id: string;
+          writer_credential_id: string | null;
+          payload_json: string;
+        }>();
+      expect(event).toMatchObject({
+        actor_fellow_id: f.reviewer.binding.fellowId,
+        actor_session_id: f.session,
+        writer_credential_id: null,
+      });
+      expect(event!.payload_json).not.toContain(privateReviewNotes);
+      const replay = await f.sponsorPublish(
+        f.reviewer.binding.fellowId,
+        draft.workshop_id,
+        1,
+        "sponsor-saved-review",
+      );
+      expect(replay.status).toBe(200);
+      expect(await replay.text()).toBe(bytes);
+
+      const self = await f.push(f.authorSession, f);
+      const before = await f.publicState();
+      for (const response of [
+        await f.authorPost(`/v1/sessions/${f.authorSession}/review`, {
+          workshop_id: self.workshop_id,
+        }),
+        await f.sponsorPublish(f.binding.fellowId, self.workshop_id),
+        await f.authorPost(`/v1/sessions/${f.authorSession}/close`, {
+          handback: "Must refuse self review.",
+          promote: [self.workshop_id],
+        }),
+      ]) {
+        expect(response.status, await response.clone().text()).toBe(422);
+        expect(await response.json()).toMatchObject({ code: "REVIEWER_IS_AUTHOR", rule: "P1" });
+      }
+      expect(await f.publicState()).toEqual(before);
+      expect(await f.head(self.workshop_id)).toEqual({ state: "open", current_version: 1 });
+    });
+
+    test("review authority cannot promote a companion claim and the close remains atomic", async () => {
+      const f = await setup();
+      const draft = await f.push();
+      const claim = WorkshopPushResponseSchema.parse(
+        await (
+          await f.post(`/v1/sessions/${f.session}/workshop`, {
+            type: "claim-draft",
+            title: "Unauthorized companion",
+            body_md: privateReviewNotes,
+            publication: {
+              kind: "definition",
+              statement: "An odd residue is represented by an odd integer modulo eight.",
+            },
+          })
+        ).json(),
+      );
+      const before = await f.publicState();
+      const mixed = await f.post(`/v1/sessions/${f.session}/close`, {
+        handback: "A review scope cannot mint a claim.",
+        promote: [draft.workshop_id, claim.workshop_id],
+      });
+      expect(mixed.status, await mixed.clone().text()).toBe(403);
+      expect((await f.sponsorPublish(f.reviewer.binding.fellowId, claim.workshop_id)).status).toBe(
+        403,
+      );
+      expect(await f.publicState()).toEqual(before);
+      expect(await f.head(draft.workshop_id)).toEqual({ state: "open", current_version: 1 });
+      expect(await f.head(claim.workshop_id)).toEqual({ state: "open", current_version: 1 });
+      const body = {
+        handback: "Publish only the independent review.",
+        promote: [draft.workshop_id],
+        keep: [claim.workshop_id],
+      };
+      const closed = await f.post(`/v1/sessions/${f.session}/close`, body, "review-only-close");
+      expect(closed.status, await closed.clone().text()).toBe(201);
+      const bytes = await closed.text();
+      const receipt = SessionCloseResponseSchema.parse(JSON.parse(bytes));
+      expect(receipt.promoted).toEqual([]);
+      expect(receipt.publications).toHaveLength(1);
+      expect(receipt.publications?.[0]).toMatchObject({
+        workshop_id: draft.workshop_id,
+        workshop_version: 1,
+        publication: {
+          object_kind: "review",
+          result: { target_claim_id: f.review.target_claim_id, carries_weight: true },
+        },
+      });
+      expect(
+        await (await f.post(`/v1/sessions/${f.session}/close`, body, "review-only-close")).text(),
+      ).toBe(bytes);
+    });
+
+    test("a saved review edited during screening publishes no stale bytes", async () => {
+      let interleave: (() => Promise<void>) | undefined;
+      const f = await setup({
+        screenPromotion: async () => {
+          const next = interleave;
+          interleave = undefined;
+          await next?.();
+          return pass;
+        },
+      });
+      const draft = await f.push();
+      const before = await f.publicState();
+      interleave = async () => {
+        const edited = await f.post(`/v1/sessions/${f.session}/workshop`, {
+          workshop_id: draft.workshop_id,
+          base_version: 1,
+          publication: {
+            object_kind: "review",
+            payload: { ...f.review, body_md: "Updated exact review write-up." },
+          },
+        });
+        expect(edited.status, await edited.clone().text()).toBe(201);
+      };
+      const path = `/v1/sessions/${f.session}/review`;
+      const refused = await f.post(path, {
+        workshop_id: draft.workshop_id,
+        expected_workshop_version: 1,
+      });
+      expect(refused.status, await refused.clone().text()).toBe(409);
+      expect(interleave).toBeUndefined();
+      expect(await f.publicState()).toEqual(before);
+      expect(await f.head(draft.workshop_id)).toEqual({ state: "open", current_version: 2 });
+      const published = await f.post(path, {
+        workshop_id: draft.workshop_id,
+        expected_workshop_version: 2,
+      });
+      expect(published.status, await published.clone().text()).toBe(201);
+    });
+  });
+
   describe("session close publications", () => {
     const pass = {
       decision: "pass",
@@ -11258,6 +12767,26 @@ describe("session protocol routes", () => {
     }
   });
 
+  function assertWorkshopRecoveryContract(
+    refusal: { readonly schema: string; readonly example: unknown },
+    kind: "create" | "revise",
+  ) {
+    expect(refusal.schema).toBe(
+      `https://a.asimposium.org/schemas/sessions.v1/workshop_${kind}_request.json`,
+    );
+    const slice = getPublicSchemaSlice(new URL(refusal.schema).pathname);
+    if (slice === undefined) throw new Error("Missing workshop recovery schema");
+    expect(new TextEncoder().encode(slice.body).byteLength).toBeLessThan(32_768);
+    const document = JSON.parse(slice.body);
+    expect(document.$id).toBe(refusal.schema);
+    const ajv = new Ajv2020({ strict: false, validateFormats: false });
+    const validate = ajv.compile(document);
+    expect(validate(refusal.example), JSON.stringify(validate.errors)).toBe(true);
+    expect(
+      validate({ ...(refusal.example as Record<string, unknown>), grant_authority: true }),
+    ).toBe(false);
+  }
+
   test("claim-shaped note recovery saves a complete private draft and keeps the force_note escape", async () => {
     const { call, db } = await fixture();
     const opened = await call("/v1/sessions", {
@@ -11296,10 +12825,7 @@ describe("session protocol routes", () => {
     expect(recovery).toEqual({ ...note, type: "claim-draft" });
     expect(refusal.fix_hint).toContain("new Idempotency-Key");
     expect(refusal.fix_hint).toContain("force_note: true");
-    const recoverySchema = getPublicSchemaSlice(new URL(refusal.schema).pathname);
-    expect(recoverySchema).toBeDefined();
-    expect(recoverySchema?.body.length).toBeLessThan(32_768);
-    expect(JSON.parse(recoverySchema!.body).$id).toBe(refusal.schema);
+    assertWorkshopRecoveryContract(refusal, "create");
     expect(
       await db.prepare("SELECT COUNT(*) AS n FROM workshop_objects").first<{ n: number }>(),
     ).toEqual({ n: 0 });
@@ -11340,9 +12866,10 @@ describe("session protocol routes", () => {
     });
   });
 
-  test.each([false, true])(
-    "claim-shaped revision recovery preserves its base and inherited context (typed hypothesis: %s)",
-    async (typedHypothesis) => {
+  test.each(["none", "hypothesis", "review"] as const)(
+    "claim-shaped revision recovery preserves its base and inherited context (publication: %s)",
+    async (publicationKind) => {
+      const typedPublication = publicationKind !== "none";
       const { call, db } = await fixture();
       let key = 0;
       const post = (path: string, body: unknown) =>
@@ -11357,25 +12884,37 @@ describe("session protocol routes", () => {
       const opened = await post("/v1/sessions", { problem_id: "P-4DSP", intent: "explore" });
       const session = SessionOpenResponseSchema.parse(await opened.json());
       const path = `/v1/sessions/${session.session_id}/workshop`;
-      const publication = {
-        object_kind: "hypothesis",
-        payload: {
-          route: "Bound the residue count",
-          mechanism: "Enumerate the finite residues",
-          falsifier: "A missing residue",
-          origin: "proposed",
-          body_md: "Investigate whether the residue enumeration is complete.",
-        },
-      };
+      const publication =
+        publicationKind === "review"
+          ? {
+              object_kind: "review",
+              payload: {
+                target_claim_id: "C-1",
+                target_version: 1,
+                verdict: "inform",
+                basis: "Inspect the finite residue domain.",
+                body_md: "The residue check remains incomplete.",
+              },
+            }
+          : {
+              object_kind: "hypothesis",
+              payload: {
+                route: "Bound the residue count",
+                mechanism: "Enumerate the finite residues",
+                falsifier: "A missing residue",
+                origin: "proposed",
+                body_md: "Investigate whether the residue enumeration is complete.",
+              },
+            };
       const note = WorkshopPushRequestSchema.parse({
         type: "note",
         title: "An interrupted line of work",
         body_md: "The residue cases are still incomplete.",
         relates_to: ["C-context"],
-        ledger_intent: typedHypothesis
-          ? { kind: "create", target_kind: "hypothesis" }
+        ledger_intent: typedPublication
+          ? { kind: "create", target_kind: publicationKind }
           : { kind: "revise", target_id: "C-context", base_version: 7 },
-        ...(typedHypothesis ? { publication } : {}),
+        ...(typedPublication ? { publication } : {}),
       });
       const created = await post(path, note);
       expect(created.status).toBe(201);
@@ -11398,8 +12937,9 @@ describe("session protocol routes", () => {
       const recovery = WorkshopPushRequestSchema.parse(refusal.example);
       expect(recovery).toEqual({
         ...revision,
-        ...(typedHypothesis ? { force_note: true } : { type: "claim-draft" }),
+        ...(typedPublication ? { force_note: true } : { type: "claim-draft" }),
       });
+      assertWorkshopRecoveryContract(refusal, "revise");
       const before = await call(`${path}/${draft.workshop_id}`);
       expect(WorkshopObjectResponseSchema.parse(await before.json()).object).toMatchObject({
         ...note,
@@ -11414,11 +12954,11 @@ describe("session protocol routes", () => {
       const read = await call(`${path}/${draft.workshop_id}`);
       expect(WorkshopObjectResponseSchema.parse(await read.json()).object).toMatchObject({
         ...note,
-        type: typedHypothesis ? "note" : "claim-draft",
+        type: typedPublication ? "note" : "claim-draft",
         body_md: revision.body_md,
         version: 2,
       });
-      expect(await forceNoteMarker()).toEqual({ force_note: typedHypothesis ? 1 : 0 });
+      expect(await forceNoteMarker()).toEqual({ force_note: typedPublication ? 1 : 0 });
       // The override remains auditable when a later edit omits force_note.
       const continued = await post(path, {
         workshop_id: draft.workshop_id,
@@ -11427,19 +12967,23 @@ describe("session protocol routes", () => {
       });
       expect(continued.status).toBe(201);
       expect(WorkshopPushResponseSchema.parse(await continued.json()).version).toBe(3);
-      expect(await forceNoteMarker()).toEqual({ force_note: typedHypothesis ? 1 : 0 });
+      expect(await forceNoteMarker()).toEqual({ force_note: typedPublication ? 1 : 0 });
       const stale = await post(path, recovery);
       expect(stale.status).toBe(409);
       const staleProblem = ProblemDocumentSchema.parse(await stale.json());
       if (staleProblem.code !== "WORKSHOP_VERSION_CONFLICT") throw new Error("Expected stale base");
       expect(staleProblem.refetch_url).toBe(`${path}/${draft.workshop_id}`);
       expect(staleProblem.schema).toBe(refusal.schema);
+      assertWorkshopRecoveryContract(staleProblem, "revise");
       expect(await db.prepare("SELECT COUNT(*) AS n FROM claims").first<{ n: number }>()).toEqual({
         n: 0,
       });
       expect(
         await db.prepare("SELECT COUNT(*) AS n FROM hypotheses").first<{ n: number }>(),
       ).toEqual({ n: 0 });
+      expect(await db.prepare("SELECT COUNT(*) AS n FROM reviews").first<{ n: number }>()).toEqual({
+        n: 0,
+      });
     },
   );
 
@@ -12435,7 +13979,9 @@ describe("session protocol routes", () => {
       expect.objectContaining({
         kind: "all",
         sql: expect.stringContaining("JOIN selected_claims s"),
-        bindings: [130, "P-4DSP", 130, 128, "P-4DSP", 130],
+        // The scientific source census has its own problem/version scope;
+        // null selects all claim versions at the same captured ledger cut.
+        bindings: [130, "P-4DSP", null, "P-4DSP", 130, 128, "P-4DSP", 130],
       }),
     ]);
     // One standalone joined read covers the bounded claim-standing section;
@@ -15300,6 +16846,95 @@ describe("committed promotion outbox nudge", () => {
     expect(await failed.text()).not.toContain("SQL_DIAGNOSTIC_CANARY");
   });
 
+  test.each(["working", "graveyard"] as const)(
+    "%s pack links recover the captured workshop revision after a later session edits it",
+    async (profile) => {
+      const f = await fixture();
+      let key = 0;
+      const post = async (path: string, body: unknown) => {
+        const response = await f.call(path, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "idempotency-key": `pack-revision-${++key}`,
+          },
+          body: JSON.stringify(body),
+        });
+        expect(response.status, await response.clone().text()).toBe(201);
+        return response.json();
+      };
+      const open = async () =>
+        SessionOpenResponseSchema.parse(
+          await post("/v1/sessions", { problem_id: "P-4DSP", intent: "explore" }),
+        ).session_id;
+      const origin = await open();
+      const path = workshopDirectoryPath(origin);
+      const draft = WorkshopPushResponseSchema.parse(
+        await post(path, {
+          type: profile === "working" ? "scratch" : "dead-end-draft",
+          title: "Captured boundary calculation",
+          body_md: "CAPTURED_PRIVATE_BODY: the first finite witness loops.",
+        }),
+      );
+      const response = await f.call(
+        `/v1/sessions/${origin}/pack?profile=${profile}&max_tokens=8000`,
+      );
+      expect(response.status, await response.clone().text()).toBe(200);
+      const pack = PackResponseSchema.parse(await response.json());
+      const item = pack.items.find((entry) => entry.id === draft.workshop_id);
+      expect(item?.kind).toBe(profile === "working" ? "workshop-head" : "dead-end");
+      const label = "Private work product: ";
+      const readUrl = item?.body
+        .split("\n")
+        .find((line) => line.startsWith(label))
+        ?.slice(label.length);
+      expect(readUrl).toBe(`${path}/${draft.workshop_id}?version=1`);
+      if (readUrl === undefined) throw new Error("Expected a captured workshop recovery link.");
+
+      await post(`/v1/sessions/${origin}/close`, { handback: "Resume the retained calculation." });
+      const resumed = await open();
+      await post(workshopDirectoryPath(resumed), {
+        workshop_id: draft.workshop_id,
+        base_version: 1,
+        title: "A different boundary calculation",
+        body_md: "LATER_PRIVATE_BODY: a new witness changes the next check.",
+      });
+      // Follow the actual old pack link, through its now-closed session. The
+      // immutable body and the current edit version have distinct purposes.
+      const recovered = await f.call(readUrl);
+      expect(recovered.status, await recovered.clone().text()).toBe(200);
+      expect(recovered.headers.get("cache-control")).toBe("private, no-store");
+      expect(WorkshopObjectResponseSchema.parse(await recovered.json()).object).toMatchObject({
+        version: 1,
+        current_version: 2,
+        title: "Captured boundary calculation",
+        body_md: "CAPTURED_PRIVATE_BODY: the first finite witness loops.",
+      });
+      const current = await f.call(`${path}/${draft.workshop_id}`);
+      expect(WorkshopObjectResponseSchema.parse(await current.json()).object).toMatchObject({
+        version: 2,
+        current_version: 2,
+        body_md: "LATER_PRIVATE_BODY: a new witness changes the next check.",
+      });
+
+      const peer = await addApprovedFellow(f, { suffix: `pack-${profile}`, scopes: ["review"] });
+      expect((await peer.call(readUrl)).status).toBe(404);
+      await f.service.revokeCredential(
+        f.sponsor,
+        {
+          fellow_id: f.binding.fellowId,
+          credential_id: f.binding.credentialId,
+          confirm: "revoke-credential",
+          step_up_authenticated_at: Math.floor(Date.now() / 1000),
+        },
+        { idempotencyKey: "pack-revision-revoke" },
+      );
+      const revoked = await f.call(readUrl);
+      expect(revoked.status).toBe(401);
+      expect(await revoked.text()).not.toContain("CAPTURED_PRIVATE_BODY");
+    },
+  );
+
   test("PLANTED: working packs disclose workshop-head truncation at six rows (j9hw)", async () => {
     // The working-profile workshop query reads one row past the emitted five
     // purely to decide disclosure: five heads compose with no truncation
@@ -15400,7 +17035,7 @@ describe("committed promotion outbox nudge", () => {
     expect(headBodies).toEqual(
       [6, 5, 4, 3, 2].map(
         (number, index) =>
-          `[claim-draft] J9HW Title ${number}\nPrivate work product: /v1/sessions/${sixSession}/workshop/${headItems[index]?.id}`,
+          `[claim-draft] J9HW Title ${number}\nPrivate work product: /v1/sessions/${sixSession}/workshop/${headItems[index]?.id}?version=1`,
       ),
     );
     expect(packSixText).not.toContain("J9HW Title 1");

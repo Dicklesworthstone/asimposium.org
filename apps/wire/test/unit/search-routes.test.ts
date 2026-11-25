@@ -1,7 +1,7 @@
 import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { SearchResponseSchema } from "@asimposium/contracts";
+import { ProblemGovernanceEventSchema, SearchResponseSchema } from "@asimposium/contracts";
 import { createApp } from "../../src/app.ts";
 import type { Env } from "../../src/env.ts";
 import { renderSearchMarkdown } from "../../src/search/markdown.ts";
@@ -56,6 +56,104 @@ function createMigratedDb(): { db: Env["DB"]; raw: Database } {
   return { db: localD1(sqlite), raw: sqlite };
 }
 
+// A public problem projection is searchable only when its current formulation
+// has an available, digest-bound publication, just like its canonical reader.
+function seedProblemFormulation(raw: Database, problem: string, title = problem) {
+  const timestamp = "2026-09-07T00:00:00.000Z";
+  const payload = JSON.stringify(
+    ProblemGovernanceEventSchema.parse({
+      action: "publish",
+      acting_principal: { type: "sponsor", id: "usr_search" },
+      source_fellow_id: "F-statement",
+      previous_status: "private-draft",
+      previous_statement_version: 1,
+      problem: {
+        id: problem,
+        title,
+        status: "sharpening",
+        current_statement_version: 1,
+        statement: "A bounded scientific question with a concrete falsifier.",
+        falsifier: "A counterexample within the stated finite domain.",
+        motivation: "Make the scientific question independently discoverable.",
+        updated_at: timestamp,
+      },
+    }),
+  );
+  const digest = createHash("sha256").update(payload).digest("hex");
+  const eventId = `EV-${problem}-formulation`;
+  raw
+    .prepare(
+      "UPDATE problems SET public_seq=1,current_statement_version=1,title=?,chain_version=2,chain_digest='sha256:chain' WHERE id=?",
+    )
+    .run(title, problem);
+  raw
+    .prepare(`INSERT OR IGNORE INTO krater_integrity_backfill(
+      problem_id,state,legacy_event_count,completed_at,chain_version)
+      VALUES(?,'complete',0,?,2)`)
+    .run(problem, timestamp);
+  raw
+    .prepare(`INSERT INTO events(id,problem_id,seq,type,object_kind,object_id,object_version,
+    payload_sha256,created_at,row_digest,chain_digest)
+    VALUES(?,?,1,'problem.admitted','problem',?,1,?,?,'sha256:row','sha256:chain')`)
+    .run(eventId, problem, problem, digest, timestamp);
+  raw
+    .prepare("INSERT INTO event_content(event_id,payload_sha256,payload_json) VALUES(?,?,?)")
+    .run(eventId, digest, payload);
+  return eventId;
+}
+
+// Publish digest-consistent SQLite sources for the search reader. These
+// fixtures exercise projection reads; the native journey owns write-path proof.
+function seedIndexedClaim(
+  raw: Database,
+  problem: string,
+  id: string,
+  statement: string,
+  version = 1,
+) {
+  const payload = JSON.stringify({
+    claim_id: id,
+    statement,
+    ...(version > 1 ? { base_version: version - 1 } : {}),
+  });
+  const digest = createHash("sha256").update(payload).digest("hex");
+  const event = `E-${problem}-${id}-${version}`;
+  const timestamp = "2026-09-07T00:00:00.000Z";
+  if (version === 1) {
+    raw
+      .prepare(`INSERT INTO claims(id,problem_id,statement,payload_sha256,source_seq,created_at)
+      VALUES(?,?,?,?,?,?)`)
+      .run(id, problem, statement, digest, version, timestamp);
+  } else {
+    raw
+      .prepare(
+        "UPDATE claims SET statement=?,payload_sha256=?,source_seq=? WHERE problem_id=? AND id=?",
+      )
+      .run(statement, digest, version, problem, id);
+    raw.prepare("UPDATE problems SET public_seq=? WHERE id=?").run(version, problem);
+  }
+  raw
+    .prepare(`INSERT INTO events(id,problem_id,seq,type,object_kind,object_id,object_version,
+    payload_sha256,created_at,row_digest,chain_digest) VALUES(?,?,?,?,'claim',?,?,?,?,'sha256:row',(SELECT chain_digest FROM problems WHERE id=?))`)
+    .run(
+      event,
+      problem,
+      version,
+      version === 1 ? "claim.created" : "claim.revised",
+      id,
+      version,
+      digest,
+      timestamp,
+      problem,
+    );
+  raw
+    .prepare("INSERT INTO event_content(event_id,payload_sha256,payload_json) VALUES(?,?,?)")
+    .run(event, digest, payload);
+  raw
+    .prepare("INSERT INTO public_claim_fts(claim_id,problem_id,statement) VALUES(?,?,?)")
+    .run(id, problem, statement);
+}
+
 function mockEnv(db: Env["DB"]): Env {
   return {
     DB: db,
@@ -108,8 +206,11 @@ describe("W6.8 Public Search Routes", () => {
     async (corrupt) => {
       const { db, raw } = createMigratedDb();
       const statement = `A complete historical statement. ${"x".repeat(2500)}`;
-      const payload = JSON.stringify({ claim_id: "C-1", kind: "claim", statement });
+      const payload = JSON.stringify({ claim_id: "C-1", kind: "lemma", statement });
       const digest = createHash("sha256").update(payload).digest("hex");
+      const contentDigest = `sha256:${createHash("sha256")
+        .update(JSON.stringify({ falsifier: null, kind: "lemma", statement }))
+        .digest("hex")}`;
       // SQLite projection fixture for read-side faults; production writes are
       // exercised independently by scientific-journey on real Workerd/D1.
       raw.run(`
@@ -135,8 +236,8 @@ describe("W6.8 Public Search Routes", () => {
         .run(digest, corrupt ? "{}" : payload);
       raw
         .prepare(`INSERT INTO claim_versions (problem_id, claim_id, version, kind, statement, content_digest, editor_fellow_id, created_at)
-      VALUES ('P-PIN', 'C-1', 1, 'conjecture', ?, ?, 'F-fixture', '2026-09-08T00:00:00.000Z')`)
-        .run(statement, `sha256:${digest}`);
+      VALUES ('P-PIN', 'C-1', 1, 'lemma', ?, ?, 'F-fixture', '2026-09-08T00:00:00.000Z')`)
+        .run(statement, contentDigest);
       const app = createApp();
       const env = mockEnv(db);
       const url = "https://a.asimposium.org/search.json?q=P-PIN%23C-1%401&kind=claim";
@@ -194,6 +295,7 @@ describe("W6.8 Public Search Routes", () => {
               "INSERT INTO problems (id, public_seq, created_at, updated_at) VALUES (?, 0, '2026-09-07', '2026-09-07')",
             )
             .run(`P-MATCH${suffix}`);
+          seedProblemFormulation(raw, `P-MATCH${suffix}`);
         }
         const exact = await executeSearch(db, { q: "P-MATCH", kind: "problem", limit: 2 });
         expect(exact.items.map((item) => item.id)).toEqual(["P-MATCH", "P-MATCH-A"]);
@@ -230,14 +332,8 @@ describe("W6.8 Public Search Routes", () => {
             VALUES ('P-TIED-${suffix}', 1, '2026-09-07', '2026-09-07', 2, 'sha256:chain');
             INSERT INTO krater_integrity_backfill (problem_id, state, legacy_event_count, chain_version)
             VALUES ('P-TIED-${suffix}', 'complete', 0, 2);
-            INSERT INTO claims (id, problem_id, statement, payload_sha256, source_seq, created_at)
-            VALUES ('C-1', 'P-TIED-${suffix}', 'identical bounded conjecture', 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 1, '2026-09-07');
-            INSERT INTO events (id, problem_id, seq, type, object_kind, object_id, object_version, payload_sha256, created_at, row_digest, chain_digest)
-            VALUES ('E-${suffix}', 'P-TIED-${suffix}', 1, 'claim.created', 'claim', 'C-1', 1, 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', '2026-09-07', 'sha256:row', 'sha256:chain');
-            INSERT INTO event_content (event_id, payload_sha256, payload_json) VALUES ('E-${suffix}', 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', '{}');
-            INSERT INTO public_claim_fts (claim_id, problem_id, statement)
-            VALUES ('C-1', 'P-TIED-${suffix}', 'identical bounded conjecture');
           `);
+          seedIndexedClaim(raw, `P-TIED-${suffix}`, "C-1", "identical bounded conjecture");
         }
         expect(raw.query("SELECT name FROM enrollment_fellows ORDER BY name").all()).toEqual([
           { name: "shared-a" },
@@ -417,6 +513,8 @@ describe("W6.8 Public Search Routes", () => {
     raw.run(`INSERT INTO problems (id, public_seq, created_at, updated_at) VALUES
       ('P-TARGET', 0, '2026-09-06T00:00:00Z', '2026-09-06T00:00:00Z'),
       ('P-TARGET-OTHER', 0, '2026-09-06T00:00:00Z', '2026-09-06T00:00:00Z')`);
+    seedProblemFormulation(raw, "P-TARGET");
+    seedProblemFormulation(raw, "P-TARGET-OTHER");
     const app = createApp();
     const env = mockEnv(db);
     const url = "https://a.asimposium.org/search.json?q=P-TARGET";
@@ -553,6 +651,7 @@ describe("W6.8 Public Search Routes", () => {
       INSERT INTO problems (id, public_seq, created_at, updated_at)
       VALUES ('P-RIEMANN-01', 5, '2026-08-25T00:00:00.000Z', '2026-08-25T00:00:00.000Z')
     `);
+    seedProblemFormulation(raw, "P-RIEMANN-01");
 
     const res = await app.request("https://a.asimposium.org/search.json?q=P-RIEMANN-01", {}, env);
     expect(res.status).toBe(200);
@@ -576,15 +675,15 @@ describe("W6.8 Public Search Routes", () => {
       INSERT INTO problems (id, public_seq, created_at, updated_at)
       VALUES ('P-TEST-99', 1, '2026-08-25T00:00:00.000Z', '2026-08-25T00:00:00.000Z');
 
-      INSERT INTO claims (id, problem_id, statement, payload_sha256, source_seq, created_at)
-      VALUES ('C-42', 'P-TEST-99', 'Every even integer greater than 2 is sum of two primes', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 1, '2026-08-25T00:00:00.000Z');
-
       UPDATE problems SET chain_version = 2, chain_digest = 'sha256:fixture-chain' WHERE id = 'P-TEST-99';
       INSERT INTO krater_integrity_backfill (problem_id, state, legacy_event_count, chain_version) VALUES ('P-TEST-99', 'complete', 0, 2);
-      INSERT INTO events (id, problem_id, seq, type, object_kind, object_id, object_version, payload_sha256, created_at, row_digest, chain_digest)
-      VALUES ('E-42', 'P-TEST-99', 1, 'claim.created', 'claim', 'C-42', 1, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', '2026-08-25T00:00:00.000Z', 'sha256:fixture-row', 'sha256:fixture-chain');
-      INSERT INTO event_content (event_id, payload_sha256, payload_json) VALUES ('E-42', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', '{}');
     `);
+    seedIndexedClaim(
+      raw,
+      "P-TEST-99",
+      "C-42",
+      "Every even integer greater than 2 is sum of two primes",
+    );
 
     // Search by composite ref
     const resComposite = await app.request(
@@ -599,6 +698,8 @@ describe("W6.8 Public Search Routes", () => {
     expect(parsedComposite.items[0]?.id).toBe("C-42");
     expect(parsedComposite.items[0]?.problem_id).toBe("P-TEST-99");
     expect(parsedComposite.items[0]?.match_type).toBe("exact_reference");
+    expect(parsedComposite.items[0]?.version).toBe(1);
+    expect(parsedComposite.items[0]?.read_url).toBe("/p/P-TEST-99/claims/C-42@1.md");
 
     // Search by bare claim ID
     const resBare = await app.request("https://a.asimposium.org/search.json?q=C-42", {}, env);
@@ -618,16 +719,15 @@ describe("W6.8 Public Search Routes", () => {
     raw.run(`
       INSERT INTO problems (id, public_seq, created_at, updated_at)
       VALUES ('P-TEST-99', 1, '2026-08-25T00:00:00.000Z', '2026-08-25T00:00:00.000Z');
-      INSERT INTO claims (id, problem_id, statement, payload_sha256, source_seq, created_at)
-      VALUES ('C-777', 'P-TEST-99', 'Goldbach conjecture conjecture asserts primes decomposition', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 1, '2026-08-25T00:00:00.000Z');
       UPDATE problems SET chain_version = 2, chain_digest = 'sha256:fixture-chain' WHERE id = 'P-TEST-99';
       INSERT INTO krater_integrity_backfill (problem_id, state, legacy_event_count, chain_version) VALUES ('P-TEST-99', 'complete', 0, 2);
-      INSERT INTO events (id, problem_id, seq, type, object_kind, object_id, object_version, payload_sha256, created_at, row_digest, chain_digest)
-      VALUES ('E-777', 'P-TEST-99', 1, 'claim.created', 'claim', 'C-777', 1, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', '2026-08-25T00:00:00.000Z', 'sha256:fixture-row', 'sha256:fixture-chain');
-      INSERT INTO event_content (event_id, payload_sha256, payload_json) VALUES ('E-777', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', '{}');
-      INSERT INTO public_claim_fts (claim_id, problem_id, statement)
-      VALUES ('C-777', 'P-TEST-99', 'Goldbach conjecture conjecture asserts primes decomposition');
     `);
+    seedIndexedClaim(
+      raw,
+      "P-TEST-99",
+      "C-777",
+      "Goldbach conjecture conjecture asserts primes decomposition",
+    );
     const records: Record<string, unknown>[] = [];
     const original = console.info;
     console.info = (line: unknown) => {
@@ -688,16 +788,15 @@ describe("W6.8 Public Search Routes", () => {
     raw.run(`
       INSERT INTO problems (id, public_seq, created_at, updated_at)
       VALUES ('P-TEST-99', 1, '2026-08-25T00:00:00.000Z', '2026-08-25T00:00:00.000Z');
-      INSERT INTO claims (id, problem_id, statement, payload_sha256, source_seq, created_at)
-      VALUES ('C-777', 'P-TEST-99', 'Goldbach conjecture conjecture asserts primes decomposition', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 1, '2026-08-25T00:00:00.000Z');
       UPDATE problems SET chain_version = 2, chain_digest = 'sha256:fixture-chain' WHERE id = 'P-TEST-99';
       INSERT INTO krater_integrity_backfill (problem_id, state, legacy_event_count, chain_version) VALUES ('P-TEST-99', 'complete', 0, 2);
-      INSERT INTO events (id, problem_id, seq, type, object_kind, object_id, object_version, payload_sha256, created_at, row_digest, chain_digest)
-      VALUES ('E-777', 'P-TEST-99', 1, 'claim.created', 'claim', 'C-777', 1, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', '2026-08-25T00:00:00.000Z', 'sha256:fixture-row', 'sha256:fixture-chain');
-      INSERT INTO event_content (event_id, payload_sha256, payload_json) VALUES ('E-777', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', '{}');
-      INSERT INTO public_claim_fts (claim_id, problem_id, statement)
-      VALUES ('C-777', 'P-TEST-99', 'Goldbach conjecture conjecture asserts primes decomposition');
     `);
+    seedIndexedClaim(
+      raw,
+      "P-TEST-99",
+      "C-777",
+      "Goldbach conjecture conjecture asserts primes decomposition",
+    );
 
     const res = await app.request(
       "https://a.asimposium.org/search.json?q=Goldbach+conjecture",
@@ -727,10 +826,9 @@ describe("W6.8 Public Search Routes", () => {
     // Same raw text on both sides of the actual SQLite FTS5 index. Literal
     // excerpts must remain searchable without inventing mathematical aliases.
     const literalText = "Symbols 𝑥 𝑧 ℕ 2² ﬁeld; operator names AND OR NOT NEAR.";
-    raw.prepare("UPDATE claims SET statement = ? WHERE id = 'C-777'").run(literalText);
-    raw
-      .prepare("INSERT INTO public_claim_fts (claim_id, problem_id, statement) VALUES (?, ?, ?)")
-      .run("C-777", "P-TEST-99", literalText);
+    expect(parsed.items[0]?.version).toBe(1);
+    expect(parsed.items[0]?.read_url).toBe("/p/P-TEST-99/claims/C-777@1.md");
+    seedIndexedClaim(raw, "P-TEST-99", "C-777", literalText, 2);
     for (const q of ["𝑥", "𝑧", "ℕ", "2²", "ﬁeld", "AND", "OR", "NOT", "NEAR"]) {
       const literal = await app.request(
         `https://a.asimposium.org/search.json?${new URLSearchParams({ q, kind: "claim" })}`,
@@ -741,6 +839,8 @@ describe("W6.8 Public Search Routes", () => {
       const result = SearchResponseSchema.parse(await literal.json());
       expect(result.items.map((item) => item.id)).toEqual(["C-777"]);
       expect(result.items[0]?.statement).toBe(literalText);
+      expect(result.items[0]?.version).toBe(2);
+      expect(result.items[0]?.read_url).toBe("/p/P-TEST-99/claims/C-777@2.md");
     }
     for (const q of [
       "Symbols x",

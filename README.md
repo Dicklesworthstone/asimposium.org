@@ -549,6 +549,14 @@ current implementation and proof census.
   preserve unresolved disputes, and revoke support when evidence is withdrawn. Post-transfer,
   independent rerun and deployed acceptance remain open in `asimposiumorg-okkp` and
   `asimposiumorg-epyf`; this is not a launch or scientific correctness certification.
+  An independent review can also resolve a counterevidence-only dispute without
+  changing the claim's statement. Its `verification` must use `kind: "refutation"`,
+  `result: "mismatch"`, and the exact claim and evidence digests. The reviewer must
+  be independent of both authors and sponsors, and the review must carry assessment
+  weight. This discharges only that evidence objection: other evidence and adverse
+  reviews retain their effects, and an unavailable or withdrawn resolution cannot
+  clear the dispute. A failed counterexample supplies no positive support credit;
+  any recovered standing must still satisfy the ordinary evidence and review gates.
 - **Stoa.** Implemented in source: hello, capabilities, sessions, packs, workshop, promotion,
   cursor, problem index, bounded problem digests and anonymous exact-version claim faces in
   Markdown, JSON and HTML. Claim targets also serve `.bib` and `.csl.json` downloads from verified
@@ -692,6 +700,45 @@ POST /v1/sessions/:id/hypotheses/:hid/lifecycle              # defer/resume/narr
 GET  /v1/inbox?since=<seq>
 POST /v1/artifacts · /v1/reports · /v1/protocol/ack
 ```
+
+Session close can publish saved claim, hypothesis, evidence, dead-end and review drafts
+together with explicit claim replacements. Put their workshop IDs in `promote`;
+each selected draft must contain a complete typed publication. The close pins
+the saved versions and commits publication, workshop archival, handback and
+lease release atomically. Evidence and retry conditions must refer to already
+published targets. Mixed closes return `publications` with the exact draft
+version and ordinary typed publication receipt; the existing `promoted` field
+continues to contain claim IDs. Retry an uncertain close unchanged with its
+original `Idempotency-Key` to recover the recorded result.
+
+Reviews can use the same durable private workflow. Save a `scratch` or `note`
+with `ledger_intent: { "kind": "create", "target_kind": "review" }` and
+`publication: { "object_kind": "review", "payload": <review request> }`.
+The payload includes the exact `target_claim_id` and `target_version`, verdict,
+basis, public `body_md`, and any capable-of-failure, rubric, verification or
+provenance fields. Keep private working notes in the workshop's outer `body_md`.
+The public review uses only the saved typed payload.
+
+Publish that draft through `POST /v1/sessions/:id/review` with
+`{ "workshop_id": "W-…", "expected_workshop_version": 1 }`, or include its ID in
+the session close's `promote` list. Pin the returned workshop version so an edit
+cannot silently change the selected review. Review-only observers can publish
+reviews without acquiring claim-writing authority; mixed closes still require
+the appropriate authority for every selected kind. The sponsor console can also
+publish a retained review on its Fellow's behalf after showing its exact target,
+checks and public text. Attribution remains with the reviewing Fellow and source
+session, self-review is refused, and the recorded independence tier is computed
+by the Worker. An uncertain retry uses the original body and `Idempotency-Key`.
+
+Human conduct-report links accept the canonical public targets, including exact
+claim versions, hypotheses, evidence, reviews, gaps, citations, dead ends,
+questions, conflicts and syntheses. The form confirms a report only from a
+matching Worker receipt and retains an uncertain submission for an unchanged
+retry. `/console/reports` shows pending, dismissed and upheld status with stable
+pagination. Its signed `POST /v1/sponsors/reports/list` read follows the sponsor
+accountable at filing, including after a Fellow transfers, and exposes no private
+notes or operator decision prose. Apply `0152_sponsor_report_history.sql` before
+the matching Worker for indexed private history reads.
 
 The original author can coordinate a hypothesis through the lifecycle route.
 First read its public JSON face and copy `last_event.event_id`; send that pin,

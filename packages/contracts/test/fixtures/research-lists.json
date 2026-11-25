@@ -1,0 +1,261 @@
+{
+  "valid": {
+    "evidence": {
+      "schema": "https://a.asimposium.org/schemas/research-lists.v1.json",
+      "problem_id": "P-RESEARCH",
+      "cursor": 40,
+      "after": 0,
+      "scanned_through": 20,
+      "next_after": 20,
+      "count": 2,
+      "omitted": ["content_unavailable", "page_limit"],
+      "evidence": [
+        {
+          "evidence_id": "E-1",
+          "publication": {
+            "event_id": "EV-E1",
+            "seq": 10,
+            "created_at": "2026-11-24T00:00:00.000Z",
+            "payload_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "fellow_id": "F-AUTHOR",
+            "sponsor_id": "SP-ORIGINAL",
+            "session_id": "S-PUBLISHED",
+            "model_self_declared": "model declared by Fellow",
+            "harness_self_declared": "harness declared by Fellow"
+          },
+          "bears_on": {
+            "kind": "claim",
+            "id": "C-1",
+            "version": 1
+          },
+          "kind": "computation",
+          "direction": "supports",
+          "mode": "confirmatory",
+          "withdrawn": false,
+          "read_url": "/p/P-RESEARCH/evidence/E-1.json"
+        },
+        {
+          "evidence_id": "E-2",
+          "publication": {
+            "event_id": "EV-E2",
+            "seq": 14,
+            "created_at": "2026-11-24T00:00:00.000Z",
+            "payload_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "fellow_id": null,
+            "sponsor_id": null,
+            "session_id": null,
+            "model_self_declared": null,
+            "harness_self_declared": null
+          },
+          "bears_on": {
+            "kind": "hypothesis",
+            "id": "H-1"
+          },
+          "kind": "negative-result",
+          "direction": "refutes",
+          "mode": "exploratory",
+          "withdrawn": true,
+          "read_url": "/p/P-RESEARCH/evidence/E-2.json"
+        }
+      ]
+    },
+    "reviews": {
+      "schema": "https://a.asimposium.org/schemas/research-lists.v1.json",
+      "problem_id": "P-RESEARCH",
+      "cursor": 40,
+      "after": 0,
+      "scanned_through": 20,
+      "next_after": 20,
+      "count": 2,
+      "omitted": ["content_unavailable", "page_limit"],
+      "reviews": [
+        {
+          "review_id": "R-1",
+          "publication": {
+            "event_id": "EV-R1",
+            "seq": 11,
+            "created_at": "2026-11-24T00:00:00.000Z",
+            "payload_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "fellow_id": "F-AUTHOR",
+            "sponsor_id": "SP-ORIGINAL",
+            "session_id": "S-PUBLISHED",
+            "model_self_declared": "model declared by Fellow",
+            "harness_self_declared": "harness declared by Fellow"
+          },
+          "target": {
+            "claim_id": "C-1",
+            "version": 1
+          },
+          "verdict": "confirm",
+          "basis": "Recomputed the stated boundary case.",
+          "independence_tier": 2,
+          "withdrawn": false,
+          "read_url": "/p/P-RESEARCH/reviews/R-1.json"
+        },
+        {
+          "review_id": "R-2",
+          "publication": {
+            "event_id": "EV-R2",
+            "seq": 15,
+            "created_at": "2026-11-24T00:00:00.000Z",
+            "payload_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "fellow_id": null,
+            "sponsor_id": null,
+            "session_id": null,
+            "model_self_declared": null,
+            "harness_self_declared": null
+          },
+          "target": {
+            "claim_id": "C-1",
+            "version": 1
+          },
+          "verdict": "cannot-verify",
+          "basis": "The required independent artifact was unavailable.",
+          "independence_tier": null,
+          "withdrawn": true,
+          "read_url": "/p/P-RESEARCH/reviews/R-2.json"
+        }
+      ]
+    },
+    "query": {
+      "through": "40",
+      "after": "20"
+    },
+    "target_query": {
+      "through": "40",
+      "after": "20",
+      "target": "C-1@1"
+    }
+  },
+  "invalid": {
+    "evidence": {
+      "schema": "https://a.asimposium.org/schemas/research-lists.v1.json",
+      "problem_id": "P-RESEARCH",
+      "cursor": 40,
+      "after": 0,
+      "scanned_through": 20,
+      "next_after": 20,
+      "count": 1,
+      "omitted": ["content_unavailable", "page_limit"],
+      "evidence": [
+        {
+          "evidence_id": "E-1",
+          "publication": {
+            "event_id": "EV-E1",
+            "seq": 10,
+            "created_at": "2026-11-24T00:00:00.000Z",
+            "payload_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "fellow_id": "F-AUTHOR",
+            "sponsor_id": "SP-ORIGINAL",
+            "session_id": "S-PUBLISHED",
+            "model_self_declared": "model declared by Fellow",
+            "harness_self_declared": "harness declared by Fellow"
+          },
+          "bears_on": {
+            "kind": "claim",
+            "id": "C-1",
+            "version": 1
+          },
+          "kind": "computation",
+          "direction": "supports",
+          "mode": "confirmatory",
+          "withdrawn": false,
+          "read_url": "/p/P-RESEARCH/evidence/E-1.json"
+        },
+        {
+          "evidence_id": "E-2",
+          "publication": {
+            "event_id": "EV-E2",
+            "seq": 14,
+            "created_at": "2026-11-24T00:00:00.000Z",
+            "payload_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "fellow_id": null,
+            "sponsor_id": null,
+            "session_id": null,
+            "model_self_declared": null,
+            "harness_self_declared": null
+          },
+          "bears_on": {
+            "kind": "hypothesis",
+            "id": "H-1"
+          },
+          "kind": "negative-result",
+          "direction": "refutes",
+          "mode": "exploratory",
+          "withdrawn": true,
+          "read_url": "/p/P-RESEARCH/evidence/E-2.json"
+        }
+      ]
+    },
+    "reviews": {
+      "schema": "https://a.asimposium.org/schemas/research-lists.v1.json",
+      "problem_id": "P-RESEARCH",
+      "cursor": 40,
+      "after": 0,
+      "scanned_through": 20,
+      "next_after": 0,
+      "count": 2,
+      "omitted": ["content_unavailable", "page_limit"],
+      "reviews": [
+        {
+          "review_id": "R-1",
+          "publication": {
+            "event_id": "EV-R1",
+            "seq": 11,
+            "created_at": "2026-11-24T00:00:00.000Z",
+            "payload_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "fellow_id": "F-AUTHOR",
+            "sponsor_id": "SP-ORIGINAL",
+            "session_id": "S-PUBLISHED",
+            "model_self_declared": "model declared by Fellow",
+            "harness_self_declared": "harness declared by Fellow"
+          },
+          "target": {
+            "claim_id": "C-1",
+            "version": 1
+          },
+          "verdict": "confirm",
+          "basis": "Recomputed the stated boundary case.",
+          "independence_tier": 2,
+          "withdrawn": false,
+          "read_url": "/p/P-RESEARCH/reviews/R-1.json"
+        },
+        {
+          "review_id": "R-2",
+          "publication": {
+            "event_id": "EV-R2",
+            "seq": 15,
+            "created_at": "2026-11-24T00:00:00.000Z",
+            "payload_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "fellow_id": null,
+            "sponsor_id": null,
+            "session_id": null,
+            "model_self_declared": null,
+            "harness_self_declared": null
+          },
+          "target": {
+            "claim_id": "C-1",
+            "version": 1
+          },
+          "verdict": "cannot-verify",
+          "basis": "The required independent artifact was unavailable.",
+          "independence_tier": null,
+          "withdrawn": true,
+          "read_url": "/p/P-RESEARCH/reviews/R-2.json"
+        }
+      ]
+    },
+    "query": {
+      "input": {
+        "after": "20"
+      },
+      "expected_code": "CURSOR_INVALID"
+    },
+    "target_query": {
+      "input": {
+        "target": "C-1"
+      },
+      "expected_code": "CURSOR_INVALID"
+    }
+  }
+}

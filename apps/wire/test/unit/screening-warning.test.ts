@@ -295,8 +295,9 @@ describe("published screening warnings", () => {
       expect(f.state().events).toEqual([]);
     }));
 
-  test("hypothesis creation warnings are route-bound, while lifecycle and kill warnings remain held", () =>
+  test("hypothesis creation and decision warnings require their exact server-owned writers", () =>
     withFixture(async (f) => {
+      const kinds = ["hypotheses", "hypothesis-lifecycle", "hypothesis-kill"] as const;
       for (const notice of [
         {
           category: "dual-use-boundary",
@@ -305,34 +306,30 @@ describe("published screening warnings", () => {
         },
         { category: "off-topic", action: "published-with-warning", notice: "off-scope" },
       ] as const) {
-        const receipt = published(
-          await screen(
-            f,
-            candidate(f, "hypotheses"),
-            { coarse_category: notice.category },
-            "hypotheses",
-          ),
-        );
-        expect(receipt.provenance.public_action).toEqual(notice);
+        for (const kind of kinds) {
+          const receipt = published(
+            await screen(f, candidate(f, kind), { coarse_category: notice.category }, kind),
+          );
+          expect(receipt.provenance.public_action).toEqual(notice);
+        }
       }
       expect(count(f, "screening_cases")).toBe(0);
       expect(count(f, "screening_refusals")).toBe(0);
-      for (const route of ["promote", "evidence", "review", "sponsor-workshop"]) {
-        const held = await screen(f, candidate(f, "hypotheses"), {}, route);
-        expect(held instanceof Response && held.status).toBe(202);
-      }
-      for (const kind of ["hypothesis-lifecycle", "hypothesis-kill"]) {
-        const held = await screen(f, candidate(f, kind), {}, kind);
-        expect(held instanceof Response && held.status).toBe(202);
-      }
-      for (const patch of [
-        { evaluated_body_digest: `sha256:${"f".repeat(64)}` },
-        { evaluated_context_digest: `sha256:${"f".repeat(64)}` },
-        { provider_status: "timeout" },
-        { coarse_category: "provider-unavailable" },
-      ] as const) {
-        const held = await screen(f, candidate(f, "hypotheses"), patch, "hypotheses");
-        expect(held instanceof Response && held.status).toBe(202);
+      for (const kind of kinds) {
+        for (const route of ["promote", "evidence", "review", "sponsor-workshop", ...kinds]) {
+          if (route === kind) continue;
+          const held = await screen(f, candidate(f, kind), {}, route);
+          expect(held instanceof Response && held.status).toBe(202);
+        }
+        for (const patch of [
+          { evaluated_body_digest: `sha256:${"f".repeat(64)}` },
+          { evaluated_context_digest: `sha256:${"f".repeat(64)}` },
+          { provider_status: "timeout" },
+          { coarse_category: "provider-unavailable" },
+        ] as const) {
+          const held = await screen(f, candidate(f, kind), patch, kind);
+          expect(held instanceof Response && held.status).toBe(202);
+        }
       }
       expect(f.state().events).toEqual([]);
     }));
@@ -459,7 +456,7 @@ describe("published screening warnings", () => {
         ["retraction", "questions", {}],
         ["question", "retract", {}],
         ["question-withdraw", "questions/withdraw", {}],
-        ["gap-close", "gaps/close", {}],
+        ["gap-close", "gaps", {}],
         ["retraction", "retract", { provider_status: "timeout" }],
         ["retraction", "retract", { evaluated_body_digest: `sha256:${"f".repeat(64)}` }],
         ["retraction", "retract", { evaluated_context_digest: `sha256:${"f".repeat(64)}` }],
@@ -471,6 +468,154 @@ describe("published screening warnings", () => {
       expect(f.state().events).toEqual([]);
       expect(count(f, "screening_refusals")).toBe(0);
     }));
+
+  test("gap settlement warnings require the owned writer and preserve candidate/context and refusal gates", () =>
+    withFixture(async (f) => {
+      for (const outcome of ["closed-by", "withdrawn"] as const) {
+        const input = {
+          ...candidate(f, "gap-close"),
+          statement: JSON.stringify({
+            gap_id: "G-2",
+            outcome,
+            ...(outcome === "closed-by" ? { closed_by: "C-3@1" } : {}),
+          }),
+          falsifier: null,
+        };
+        for (const category of ["dual-use-boundary", "off-topic"] as const) {
+          const receipt = published(
+            await screen(f, input, { coarse_category: category }, "gaps/close"),
+          );
+          expect(receipt.provenance.public_action).toEqual(
+            category === "off-topic"
+              ? { category, action: "published-with-warning", notice: "off-scope" }
+              : { category, action: "published-with-warning", notice: "screening-warning" },
+          );
+        }
+        expect(count(f, "screening_cases")).toBe(0);
+      }
+      for (const route of ["gaps", "promote", "review", "unknown-gap-writer"]) {
+        const held = await screen(f, candidate(f, "gap-close"), {}, route);
+        expect(held instanceof Response && held.status).toBe(202);
+      }
+      for (const patch of [
+        { evaluated_body_digest: `sha256:${"f".repeat(64)}` },
+        { evaluated_context_digest: `sha256:${"f".repeat(64)}` },
+        { provider_status: "timeout" },
+        { coarse_category: "provider-unavailable" },
+        { decision: "quarantine" },
+      ] as const) {
+        const held = await screen(f, candidate(f, "gap-close"), patch, "gaps/close");
+        expect(held instanceof Response && held.status).toBe(202);
+      }
+      const rejected = await screen(
+        f,
+        candidate(f, "gap-close"),
+        { decision: "reject" },
+        "gaps/close",
+      );
+      expect(rejected instanceof Response && rejected.status).toBe(403);
+      expect(f.state().events).toEqual([]);
+    }));
+
+  test("question warnings require the exact filing writer and cannot relax screening authority", () =>
+    withFixture(async (f) => {
+      const input = { ...candidate(f, "question"), falsifier: null };
+      for (const category of ["dual-use-boundary", "off-topic"] as const) {
+        const receipt = published(
+          await screen(f, input, { coarse_category: category }, "questions"),
+        );
+        expect(receipt.provenance.public_action).toEqual(
+          category === "off-topic"
+            ? { category, action: "published-with-warning", notice: "off-scope" }
+            : { category, action: "published-with-warning", notice: "screening-warning" },
+        );
+      }
+      expect(count(f, "screening_cases")).toBe(0);
+      for (const [kind, route, patch] of [
+        ["question", "promote", {}],
+        ["question", "questions/withdraw", {}],
+        ["question-withdraw", "questions", {}],
+        ["question-lease", "questions/lease", {}],
+        ["question", "questions", { provider_status: "timeout" }],
+        ["question", "questions", { coarse_category: "benign-context" }],
+        ["question", "questions", { evaluated_body_digest: `sha256:${"f".repeat(64)}` }],
+        ["question", "questions", { evaluated_context_digest: `sha256:${"f".repeat(64)}` }],
+      ] as const) {
+        const result = await screen(f, { ...input, kind }, patch, route);
+        expect(result instanceof Response && result.status).toBe(202);
+      }
+      expect(f.state().events).toEqual([]);
+      expect(count(f, "screening_refusals")).toBe(0);
+    }));
+
+  test("conflict notices require the exact account writer and preserve screening authority", () =>
+    withFixture(async (f) => {
+      const input = { ...candidate(f, "conflict"), falsifier: null };
+      for (const category of ["dual-use-boundary", "off-topic"] as const) {
+        const receipt = published(
+          await screen(f, input, { coarse_category: category }, "conflicts"),
+        );
+        expect(receipt.provenance.public_action).toEqual(
+          category === "off-topic"
+            ? { category, action: "published-with-warning", notice: "off-scope" }
+            : { category, action: "published-with-warning", notice: "screening-warning" },
+        );
+      }
+      expect(count(f, "screening_cases")).toBe(0);
+      for (const [kind, route, patch] of [
+        ["conflict", "promote", {}],
+        ["conflict", "questions", {}],
+        ["question", "conflicts", {}],
+        ["conflict", "conflicts", { provider_status: "timeout" }],
+        ["conflict", "conflicts", { coarse_category: "benign-context" }],
+        ["conflict", "conflicts", { evaluated_body_digest: `sha256:${"f".repeat(64)}` }],
+        ["conflict", "conflicts", { evaluated_context_digest: `sha256:${"f".repeat(64)}` }],
+      ] as const) {
+        const result = await screen(f, { ...input, kind }, patch, route);
+        expect(result instanceof Response && result.status).toBe(202);
+      }
+      expect(f.state().events).toEqual([]);
+      expect(count(f, "screening_refusals")).toBe(0);
+    }));
+
+  test.each([
+    ["relation", "relations"],
+    ["relation-dispute", "relations/dispute"],
+  ] as const)("%s warning publication belongs only to its guarded writer", (kind, route) =>
+    withFixture(async (f) => {
+      const input = { ...candidate(f, kind), falsifier: null };
+      for (const category of ["dual-use-boundary", "off-topic"] as const) {
+        const receipt = published(await screen(f, input, { coarse_category: category }, route));
+        expect(receipt.provenance.public_action).toEqual(
+          category === "off-topic"
+            ? { category, action: "published-with-warning", notice: "off-scope" }
+            : { category, action: "published-with-warning", notice: "screening-warning" },
+        );
+      }
+      expect(count(f, "screening_cases")).toBe(0);
+      for (const [candidateKind, writer, patch] of [
+        [kind, "promote", {}],
+        [kind, route === "relations" ? "relations/dispute" : "relations", {}],
+        ["relation-other", route, {}],
+        [kind, route, { provider_status: "timeout" }],
+        [kind, route, { coarse_category: "benign-context" }],
+        [kind, route, { evaluated_body_digest: `sha256:${"f".repeat(64)}` }],
+        [kind, route, { evaluated_context_digest: `sha256:${"f".repeat(64)}` }],
+      ] as const) {
+        const result = await screen(f, { ...input, kind: candidateKind }, patch, writer);
+        expect(result instanceof Response && result.status).toBe(202);
+      }
+      expect(count(f, "screening_refusals")).toBe(0);
+      for (const [decision, status] of [
+        ["quarantine", 202],
+        ["reject", 403],
+      ] as const) {
+        const result = await screen(f, input, { decision }, route);
+        expect(result instanceof Response && result.status).toBe(status);
+      }
+      expect(f.state().events).toEqual([]);
+    }),
+  );
 
   test("unsupported kinds still hold, and a warning cannot relax provider failure, incoherence or digest binding", () =>
     withFixture(async (f) => {

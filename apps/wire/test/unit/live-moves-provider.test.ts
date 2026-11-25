@@ -1,7 +1,12 @@
 import { Database } from "bun:sqlite";
 import { spyOn, test } from "bun:test";
 import assert from "node:assert/strict";
-import { getMoveTemplate, type HelloAssignment, type MoveTemplate } from "@asimposium/contracts";
+import {
+  getMoveTemplate,
+  type HelloAssignment,
+  type MoveTemplate,
+  type NextMoveCandidate,
+} from "@asimposium/contracts";
 import type { ReviewQueueItem, ReviewQueueResponse } from "@asimposium/contracts/review-queue";
 import type { D1Database } from "@cloudflare/workers-types";
 import {
@@ -9,9 +14,11 @@ import {
   type FellowCredentialBinding,
 } from "../../src/enrollment/service.ts";
 import { selectRecordDeadEndMove } from "../../src/mega-commands/dead-end-moves.ts";
+import { selectFormalizeMove } from "../../src/mega-commands/formalize-moves.ts";
 import {
   LedgerMovesProvider,
   type LiveMovesDependencies,
+  MOVE_SELECTOR_CONCURRENCY,
   TRIAGE_CONCURRENCY,
   TRIAGE_MAX_PROBLEMS,
 } from "../../src/mega-commands/live-provider.ts";
@@ -434,6 +441,213 @@ test("queue failures return a coarse unavailable result without private exceptio
     f.sqlite.close();
   }
 });
+
+test("independent selectors overlap in bounded waves while source order decides ties and duplicates", async () => {
+  const f = fixture();
+  try {
+    f.sqlite.exec("UPDATE problems SET public_seq=0");
+    const run = async (reverse: boolean, fail: boolean) => {
+      let active = 0,
+        peak = 0,
+        waves = 0,
+        complete = false;
+      const waiting: (() => void)[] = [];
+      // Deliberately equal-tier source fixtures exercise orchestration order,
+      // independently of each scientific loader's own ranking rules.
+      const read =
+        (id: number, why: string, shouldFail = false) =>
+        async () => {
+          active++;
+          peak = Math.max(peak, active);
+          await new Promise<void>((resolve) => waiting.push(resolve));
+          active--;
+          if (shouldFail) throw new Error("PRIVATE-SELECTOR-FAILURE");
+          return {
+            move: {
+              move: "review",
+              refs: ["P-DEMO", `C-${id}@1`],
+              why,
+              contract: getMoveTemplate("review"),
+            } as NextMoveCandidate,
+            degraded: false,
+          };
+        };
+      const provider = new LedgerMovesProvider({
+        ...f.dependencies,
+        backToObject: { load: read(1, "first source") },
+        idleClose: { load: read(2, "second source", fail) },
+        sharpen: { load: read(3, "third source") },
+        synthesize: { load: read(1, "later duplicate") },
+      });
+      const pending = provider.nextMoves(next(f.db)).finally(() => {
+        complete = true;
+      });
+      while (!complete) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        const wave = waiting.splice(0);
+        if (wave.length === 0) continue;
+        waves++;
+        for (const release of reverse ? wave.reverse() : wave) release();
+      }
+      assert.equal(active, 0);
+      assert.equal(peak, MOVE_SELECTOR_CONCURRENCY);
+      assert.equal(waves, 2, "four independent source reads need two bounded waves");
+      return pending;
+    };
+    for (const fail of [false, true]) {
+      const result = await run(false, fail);
+      assert.deepEqual(await run(true, fail), result, "completion order cannot alter the response");
+      assert.equal(result.primaryMove?.why, "first source", "the later duplicate never wins");
+      assert.deepEqual(
+        [result.primaryMove, ...result.alternatives].map((move) => move?.refs),
+        fail
+          ? [["P-DEMO", "C-1@1"], ["P-DEMO", "C-3@1"], ["P-DEMO"]]
+          : [
+              ["P-DEMO", "C-1@1"],
+              ["P-DEMO", "C-2@1"],
+              ["P-DEMO", "C-3@1"],
+            ],
+      );
+      assert.equal(result.degraded, fail);
+      assert.equal(result.degradedReason, fail ? "MOVES_PARTIAL" : undefined);
+      assert.ok(!JSON.stringify(result).includes("PRIVATE-SELECTOR-FAILURE"));
+    }
+  } finally {
+    f.sqlite.close();
+  }
+});
+
+for (const unlisted of [false, true])
+  test(`ledger and formalize share in-flight queue pages at one ${unlisted ? "unlisted" : "listed"} cut`, async () => {
+    const f = fixture();
+    let release = () => {};
+    try {
+      if (unlisted) f.sqlite.exec("UPDATE problems SET unlisted=1");
+      const calls: { after?: string; through?: number; includeUnlisted?: boolean }[] = [];
+      const after = "2026-09-01T00:00:00.000Z|EV-1";
+      let pause = false;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      f.dependencies.loadQueue = async (_db, query, snapshot) => {
+        assert.ok(snapshot);
+        calls.push({
+          after: query.after,
+          through: snapshot?.through,
+          includeUnlisted: snapshot?.includeUnlisted,
+        });
+        if (pause && query.after === undefined) await gate;
+        const result = page(query.problem, [
+          item(query.problem, {
+            claim_id: query.after === undefined ? "C-1" : "C-2",
+            cursor: snapshot.through,
+          }),
+        ]);
+        return query.after === undefined
+          ? { ...result, next_after: after, omitted: [{ reason: "page_limit", count: 1 }] }
+          : result;
+      };
+      // The same canonical selectors without shared pages make four source
+      // reads. This baseline also captures the complete response for parity.
+      const serial = await new LedgerMovesProvider(f.dependencies).nextMoves(next(f.db));
+      const formalized = await selectFormalizeMove(f.db, "P-DEMO", 10, {
+        load: (db, problem, through, after) =>
+          f.dependencies.loadQueue(
+            db,
+            { problem, ...(after === undefined ? {} : { after }) },
+            { problemId: problem, through, ...(unlisted ? { includeUnlisted: true } : {}) },
+          ),
+        template: () => getMoveTemplate("formalize"),
+      });
+      assert.deepEqual(formalized, { move: null, degraded: false });
+      assert.equal(calls.length, 4, "two bounded pages were previously read by each selector");
+      calls.length = 0;
+      pause = true;
+      let formalizeStarted = false;
+      const provider = new LedgerMovesProvider({
+        ...f.dependencies,
+        formalize: {
+          load: (...args) => {
+            formalizeStarted = true;
+            return selectFormalizeMove(...args);
+          },
+        },
+      });
+      const pending = provider.nextMoves(next(f.db));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      assert.equal(
+        formalizeStarted,
+        true,
+        "formalize can start while ledger awaits its first page",
+      );
+      assert.equal(calls.length, 1, "an in-flight page is shared, not just a completed result");
+      release();
+      const result = await pending;
+      assert.deepEqual(result, serial);
+      assert.deepEqual(
+        calls,
+        [undefined, after].map((after) => ({
+          after,
+          through: 10,
+          includeUnlisted: unlisted ? true : undefined,
+        })),
+      );
+      f.sqlite.exec("UPDATE problems SET public_seq=20");
+      const refreshed = await provider.nextMoves(next(f.db));
+      assert.equal(refreshed.capturedCursor, 20);
+      assert.equal(refreshed.degraded, false);
+      assert.equal(calls.length, 4, "a new request obtains a fresh snapshot");
+      assert.ok(calls.slice(2).every((call) => call.through === 20));
+    } finally {
+      release();
+      f.sqlite.close();
+    }
+  });
+
+for (const partial of [false, true])
+  test(`a shared queue failure preserves ${partial ? "independent partial work" : "required-source refusal"}`, async () => {
+    const f = fixture();
+    try {
+      let reads = 0,
+        formalizeFinished = false;
+      const result = await new LedgerMovesProvider({
+        ...f.dependencies,
+        loadQueue: async () => {
+          reads++;
+          throw new Error("PRIVATE-QUEUE-FAILURE");
+        },
+        formalize: {
+          load: async (...args) => {
+            const result = await selectFormalizeMove(...args);
+            formalizeFinished = true;
+            return result;
+          },
+        },
+        ...(partial
+          ? {
+              gaps: {
+                load: async () => ({
+                  move: {
+                    move: "close-gap",
+                    refs: ["P-DEMO", "G-1", "C-1@1"],
+                    why: "Independent gap",
+                    contract: getMoveTemplate("close-gap"),
+                  } as NextMoveCandidate,
+                  degraded: false,
+                }),
+              },
+            }
+          : {}),
+      }).nextMoves(next(f.db));
+      assert.equal(reads, 1, "failed pages are not retried by a competing selector");
+      assert.equal(formalizeFinished, true, "all started reads settle before the response");
+      assert.equal(result.primaryMove?.move ?? null, partial ? "close-gap" : null);
+      assert.equal(result.degradedReason, partial ? "MOVES_PARTIAL" : "MOVES_UNAVAILABLE");
+      assert.ok(!JSON.stringify(result).includes("PRIVATE-QUEUE-FAILURE"));
+    } finally {
+      f.sqlite.close();
+    }
+  });
 for (const mode of ["open", "approval-required", "invite-only", "archived-read-only"] as const)
   for (const authority of ["outsider", "owner", "steward"] as const)
     test(`nonmember ${authority} receives truthful session admission on ${mode}`, async () => {

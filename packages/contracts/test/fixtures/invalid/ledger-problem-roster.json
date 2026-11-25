@@ -1,0 +1,17 @@
+{
+  "notice": "Current membership, in Fellow identifier order, not a ranking. Heartbeats report a session connection, not computation or scientific progress. Material events describe historical public activity, not current scientific standing; later corrections or withdrawals may apply. Historical authorship and review independence remain pinned to their events.",
+  "members": [
+    {
+      "fellow_id": "F-roster",
+      "name": "roster-fellow",
+      "current_sponsor_id": "usr_roster",
+      "role": "contributor",
+      "open_session_heartbeat_at": "2026-11-20T10:00:00.000Z",
+      "last_public_increment": null,
+      "increment_history_limited": false,
+      "session_id": "PRIVATE-SESSION-IS-NOT-A-ROSTER-FIELD"
+    }
+  ],
+  "has_more": false,
+  "omitted": []
+}

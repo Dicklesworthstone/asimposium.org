@@ -1785,8 +1785,48 @@ export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
   }
 
   /** One cron tick of the production inbox delivery consumer (index.ts scheduled). */
-  deliverInboxTick() {
-    return deliverInboxEvents(this.env.DB);
+  async deliverInboxTick() {
+    // Delegate to the real binding. A production retry hides its underlying
+    // database exception; retain only fixed local diagnostic categories so a
+    // native failure can be distinguished from a bad source or lost race.
+    const failures: { phase: "batch"; statements: number; categories: string[] }[] = [];
+    const db = this.env.DB;
+    const observed = {
+      prepare: db.prepare.bind(db),
+      async batch(statements: D1PreparedStatement[]) {
+        try {
+          return await db.batch(statements);
+        } catch (error) {
+          const details = [error, error instanceof Error ? error.cause : undefined]
+            .filter((value): value is Error => value instanceof Error)
+            .map((value) => value.message)
+            .join(" ");
+          const categories = [
+            ["parser-stack", /parser stack|stack overflow/i],
+            ["statement-too-large", /statement too|SQL.*too (?:large|long)|SQLITE_TOOBIG/i],
+            ["expression-depth", /expression tree|too many levels|too complex/i],
+            ["bind-limit", /too many SQL variables|too many bound|parameter count|bind.*count/i],
+            ["missing-column", /no such column/i],
+            ["missing-table", /no such table/i],
+            ["constraint", /constraint failed|SQLITE_CONSTRAINT/i],
+            ["syntax", /syntax error/i],
+            ["memory", /out of memory|SQLITE_NOMEM/i],
+            ["database", /D1_ERROR|SQLITE_ERROR/i],
+          ] as const;
+          const matched = categories
+            .filter(([, pattern]) => pattern.test(details))
+            .map(([name]) => name);
+          failures.push({
+            phase: "batch",
+            statements: statements.length,
+            categories: matched.length ? matched : ["unclassified"],
+          });
+          throw error;
+        }
+      },
+    } as D1Database;
+    const result = await deliverInboxEvents(observed);
+    return { ...result, ...(result.failed === 0 ? {} : { failures }) };
   }
 
   revokeOnNextScreen(): void {

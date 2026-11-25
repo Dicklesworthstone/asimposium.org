@@ -1,13 +1,13 @@
 import { expect, test } from "bun:test";
 import {
-  SponsorWorkshopPromotionReceiptSchema,
   SponsorWorkshopCursorResponseSchema,
+  SponsorWorkshopPromotionReceiptSchema,
   SponsorWorkshopViewSchema,
 } from "@asimposium/contracts";
 
 import {
-  loadWorkshopPage,
   loadWorkshopCursorResponse,
+  loadWorkshopPage,
   workshopPageHref,
   workshopPromotionDestination,
 } from "../../lib/workshop-page";
@@ -27,7 +27,7 @@ test("typed promotion receipts link to the exact canonical object and disclose c
   });
   expect(workshopPromotionDestination(hypothesis, origin)).toEqual({
     label: "H-7",
-    href: `${origin}/p/${problem}/hypotheses/H-7.html`,
+    href: `/p/${problem}/hypotheses/H-7?through=7`,
   });
   const evidence = SponsorWorkshopPromotionReceiptSchema.parse({
     object_kind: "evidence",
@@ -55,13 +55,13 @@ test("typed promotion receipts link to the exact canonical object and disclose c
     queue_position: 0,
   });
   expect(workshopPromotionDestination(claim, origin)).toEqual({
-    label: "C-1",
-    href: `/p/${problem}/claims/C-1`,
+    label: "C-1@1",
+    href: `/p/${problem}/claims/C-1%401?through=1`,
   });
   const revised = SponsorWorkshopPromotionReceiptSchema.parse({ ...claim, seq: 9, version: 2 });
   expect(workshopPromotionDestination(revised, origin)).toEqual({
     label: "C-1@2",
-    href: `/p/${problem}/claims/C-1%402`,
+    href: `/p/${problem}/claims/C-1%402?through=9`,
   });
   const deadEnd = SponsorWorkshopPromotionReceiptSchema.parse({
     object_kind: "dead-end",
@@ -72,8 +72,36 @@ test("typed promotion receipts link to the exact canonical object and disclose c
   });
   expect(workshopPromotionDestination(deadEnd, origin)).toEqual({
     label: "DE-10",
-    href: `/p/${problem}/dead-ends?include_superseded=true#DE-10`,
+    href: `/p/${problem}/dead-ends?target=DE-10`,
   });
+  const review = SponsorWorkshopPromotionReceiptSchema.parse({
+    object_kind: "review",
+    problem_id: problem,
+    seq: 11,
+    version: 1,
+    result: {
+      review_id: "R-11",
+      target_claim_id: "C-1",
+      target_version: 2,
+      tier: "T0",
+      carries_weight: true,
+    },
+  });
+  const reviewDestination = workshopPromotionDestination(review, origin);
+  expect(reviewDestination.label).toBe("R-11");
+  expect(reviewDestination.href).toBe(`/r/p/${problem}/reviews/R-11`);
+  expect(reviewDestination.assessment).toContain("Recorded independence tier: T0");
+  expect(reviewDestination.assessment).toContain("Targets C-1@2");
+  expect(reviewDestination.assessment).toContain("computed from its complete evidence");
+  if (!("object_kind" in review) || review.object_kind !== "review")
+    throw new Error("Expected saved review receipt");
+  const assertionOnly = SponsorWorkshopPromotionReceiptSchema.parse({
+    ...review,
+    result: { ...review.result, tier: "T1", carries_weight: false },
+  });
+  expect(workshopPromotionDestination(assertionOnly, origin).assessment).toContain(
+    "Assertion-only review; it carries no assessment weight.",
+  );
 });
 
 function page(seqs: number[], more = false) {
@@ -223,7 +251,9 @@ test("workshop cursor facade authenticates before reading and returns private me
   expect(response.headers.get("vary")).toBe("Cookie");
   expect(response.headers.get("x-robots-tag")).toBe("noindex, nofollow");
   expect(await response.json()).toEqual(data);
-  expect(calls).toEqual([{ principal: sponsor, request: { fellow_id: fellow, problem_id: problem } }]);
+  expect(calls).toEqual([
+    { principal: sponsor, request: { fellow_id: fellow, problem_id: problem } },
+  ]);
 });
 
 test("cursor facade refuses crossed identities, malformed bodies and private upstream diagnostics", async () => {

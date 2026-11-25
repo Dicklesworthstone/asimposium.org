@@ -18,6 +18,7 @@ import type { Env } from "../../src/env";
 import { loadProofGaps } from "../../src/ledger/proof-gaps-service";
 import { loadProofGapMove } from "../../src/mega-commands/gap-moves-service";
 import { screenPublicCandidate } from "../../src/screening/public-candidate";
+import type { PublicationScreeningObservation } from "../../src/screening/workers-ai";
 import { readFormalGapSection } from "../../src/sessions/formal-pack";
 import { PROBLEM, publicationContextFixture, SPONSOR } from "../support/publication-context";
 import { syntheticScreeningObservation } from "../support/screening";
@@ -154,35 +155,64 @@ const formalAt = (f: Fixture, through: number) =>
   });
 
 describe("proof-gap warning publications", () => {
-  test("only the exact filing route admits bound warnings; settlements and mismatched receipts stay held", () =>
+  test("only exact filing and settlement routes admit bound warnings; mismatched receipts stay held", () =>
     withFixture(async (f) => {
-      for (const [kind, route, mismatch, admitted] of [
-        ["gaps", "gaps", false, true],
-        ["gaps", "promote", false, false],
-        ["gap-close", "gaps/close", false, false],
-        ["gap-close", "gaps", false, false],
-        ["gaps", "gaps", true, false],
-      ] as const) {
-        const result = await screenPublicCandidate(
+      const screen = (
+        kind: string,
+        route: string,
+        statement: string,
+        patch: Partial<PublicationScreeningObservation> = {},
+      ) =>
+        screenPublicCandidate(
           async (input) => ({
             ...(await syntheticScreeningObservation(input, {
               decision: "allow-with-warning",
               coarse_category: "dual-use-boundary",
-              provider_status: "ok",
+              provider_status: patch.provider_status ?? "ok",
             })),
-            ...(mismatch ? { evaluated_body_digest: `sha256:${"f".repeat(64)}` } : {}),
+            ...patch,
           }),
           { DB: f.db } as Env,
-          { ...f.input(OBLIGATION), kind },
+          { ...f.input(statement), kind },
           { sponsorId: SPONSOR, route },
         );
-        if (admitted) {
+      for (const [kind, route, statement] of [
+        ["gaps", "gaps", OBLIGATION],
+        [
+          "gap-close",
+          "gaps/close",
+          JSON.stringify({ gap_id: "G-1", outcome: "closed-by", closed_by: "C-2@1" }),
+        ],
+        ["gap-close", "gaps/close", JSON.stringify({ gap_id: "G-1", outcome: "withdrawn" })],
+      ] as const) {
+        for (const notice of [WARNING, OFF_SCOPE]) {
+          const result = await screen(kind, route, statement, { coarse_category: notice.category });
           expect(result instanceof Response).toBe(false);
           if (result instanceof Response) throw new Error("Expected exact publication provenance");
-          expect(result.provenance.public_action).toEqual(WARNING);
-        } else expect(result instanceof Response && result.status).toBe(202);
+          expect(result.provenance.public_action).toEqual(notice);
+        }
+        for (const patch of [
+          { evaluated_body_digest: `sha256:${"f".repeat(64)}` },
+          { evaluated_context_digest: `sha256:${"e".repeat(64)}` },
+          { provider_status: "timeout" },
+          { provider_status: "error" },
+          { coarse_category: "benign-context" },
+        ] satisfies Partial<PublicationScreeningObservation>[]) {
+          const result = await screen(kind, route, statement, patch);
+          expect(result instanceof Response && result.status).toBe(202);
+        }
+      }
+      for (const [kind, route] of [
+        ["gaps", "promote"],
+        ["gaps", "gaps/close"],
+        ["gap-close", "gaps"],
+        ["gap-close", "promote"],
+      ] as const) {
+        const result = await screen(kind, route, OBLIGATION);
+        expect(result instanceof Response && result.status).toBe(202);
       }
       expect(f.state().events).toEqual([]);
+      expect(f.state().receipts).toEqual([]);
     }));
 
   test("filing and replay retain one receipt on faces, claim obligations and formal packs", () =>

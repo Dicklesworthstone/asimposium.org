@@ -6,6 +6,7 @@ import {
   ProblemStatementRevisionPreviewSchema,
   type ProposeProblemRequest,
   SessionOpenResponseSchema,
+  WorkshopObjectResponseSchema,
   WorkshopPushResponseSchema,
 } from "@asimposium/contracts";
 import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types";
@@ -234,6 +235,34 @@ test("an adopted private problem provides exact orientation and executable works
   expect(resumed.items.find((item) => item.id === pushed.workshop_id)).toMatchObject({
     kind: "workshop-head",
     scope: "workshop",
+  });
+  const label = "Private work product: ";
+  const readUrl = resumed.items
+    .find((item) => item.id === pushed.workshop_id)
+    ?.body.split("\n")
+    .find((line) => line.startsWith(label))
+    ?.slice(label.length);
+  expect(readUrl).toBe(`${contract.url}/${pushed.workshop_id}?version=1`);
+  if (readUrl === undefined) throw new Error("Expected a captured private-workshop link.");
+  const edited = await f.call(contract.url, {
+    workshop_id: pushed.workshop_id,
+    base_version: 1,
+    title: "Inspect the two-vertex boundary",
+    body_md: "LATER_PRIVATE_PACK_WORK: the two-vertex tree has one edge.",
+  });
+  expect(edited.status, await edited.clone().text()).toBe(201);
+  const recovered = await f.call(readUrl);
+  expect(recovered.status, await recovered.clone().text()).toBe(200);
+  expect(WorkshopObjectResponseSchema.parse(await recovered.json()).object).toMatchObject({
+    version: 1,
+    current_version: 2,
+    title: "Inspect the single-vertex boundary",
+    body_md: "PRIVATE_PACK_WORK: the single-vertex tree has no edges.",
+  });
+  const current = await f.call(`${contract.url}/${pushed.workshop_id}`);
+  expect(WorkshopObjectResponseSchema.parse(await current.json()).object).toMatchObject({
+    version: 2,
+    body_md: "LATER_PRIVATE_PACK_WORK: the two-vertex tree has one edge.",
   });
   expect(f.sql.query("SELECT * FROM events WHERE problem_id=?").all(f.problemId)).toEqual([]);
   expect((await f.call(`/v1/problems/${f.problemId}`, undefined, null)).status).toBe(404);

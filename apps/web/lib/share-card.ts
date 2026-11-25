@@ -534,7 +534,15 @@ export function buildClaimShareCardData(
     { label: "Refutation attempts", value: face.claim_state.recorded_refutation_attempts },
     { label: "Evidence in digest", value: evidenceCount },
     { label: "Reviews in digest", value: reviews.length },
-    { label: "Machine-checked", value: face.claim_state.certified_artifact ? "Yes" : "No" },
+    {
+      label: "Machine-checked",
+      value:
+        face.claim_state.disposition === "strongly-supported" &&
+        face.claim_state.certified_artifact &&
+        !face.claim_state.stale
+          ? "Yes"
+          : "No",
+    },
   ];
 
   const famous = options.isFamousProblemOverride ?? isFamousProblem(problemId);

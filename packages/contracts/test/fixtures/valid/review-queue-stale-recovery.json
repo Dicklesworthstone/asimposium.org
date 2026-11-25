@@ -1,0 +1,19 @@
+{
+  "problem_id": "P-MATH",
+  "claim_id": "C-1",
+  "version": 2,
+  "cursor": 5,
+  "kind": "conjecture",
+  "statement": "Every integer in the declared finite domain satisfies the bound.",
+  "falsifier": "An integer in the domain exceeds the bound.",
+  "disposition": "strongly-supported",
+  "stale": true,
+  "need": "recheck-stale-inputs",
+  "best_recorded_tier": "none",
+  "direct_dependents": 1,
+  "dependents_capped": false,
+  "author_fellow_id": "F-AUTHOR",
+  "author_sponsor_id": "SP-ONE",
+  "created_at": "2026-09-01T00:00:00.000Z",
+  "read_url": "/p/P-MATH/claims/C-1@2.md?through=5"
+}

@@ -111,12 +111,16 @@ export async function loadClaimBoard(
 
 /** One view watch covers the digest and every enriched claim, including each
  * claim's original through pin. Failed enrichment disables partial liveness;
- * deliberately unloaded rows are already covered by the digest itself. */
+ * deliberately unloaded rows are already covered by the digest itself. Any
+ * additional rendered read must provide its own receipt or disable the watch. */
 export function claimBoardWatchTargets(
   digest: PublicWatchTarget | undefined,
   rows: readonly ClaimBoardRow[],
+  ...additionalReads: readonly (PublicWatchTarget | undefined)[]
 ): readonly PublicWatchTarget[] {
-  return publicViewWatchTargets(digest, ...rows
-    .filter((row) => row.standing.state !== "not_loaded")
-    .map((row) => row.watch));
+  return publicViewWatchTargets(
+    digest,
+    ...rows.filter((row) => row.standing.state !== "not_loaded").map((row) => row.watch),
+    ...additionalReads,
+  );
 }

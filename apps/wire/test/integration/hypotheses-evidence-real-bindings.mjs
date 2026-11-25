@@ -376,9 +376,9 @@ await runLocalWorkerJourney(async (context) => {
   await context.fixtures.setScreenMode("pass");
   await context.clearScreeningPosture(sponsorA);
 
-  // Lifecycle statements require their own notices; this change only admits
-  // warned creation publications and leaves lifecycle warnings in review.
-  await context.fixtures.setScreenMode("allow-with-warning");
+  // Quarantined lifecycle statements remain held even when a narrower
+  // allow-with-warning decision can publish with its own event-bound notice.
+  await context.fixtures.setScreenMode("quarantine");
   const heldLifecycle = await call(
     `/v1/sessions/${sessionIdA}/hypotheses/${hypId1}/lifecycle`,
     {
@@ -818,7 +818,7 @@ await runLocalWorkerJourney(async (context) => {
   const evKillH1 = EvidenceResponseSchema.parse(evKillH1Res);
 
   const beforeHeldKill = await warningState();
-  await context.fixtures.setScreenMode("allow-with-warning");
+  await context.fixtures.setScreenMode("quarantine");
   const heldKill = await call(
     `/v1/sessions/${policySessionId}/hypotheses/${hypId1}/kill`,
     {

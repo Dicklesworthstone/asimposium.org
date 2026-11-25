@@ -1,25 +1,53 @@
 import { expect, test } from "bun:test";
+import { claimContentDigest } from "../../src/krater/claim-version.ts";
 import { sha256Hex } from "../../src/krater/krater.ts";
 import { reviewStateFromRecordedReviews } from "../../src/ledger/dispositions.ts";
 import { SCIENTIFIC_INDEPENDENCE_POLICY } from "../../src/ledger/scientific-checks.ts";
 import { foldScientificRows } from "../../src/ledger/scientific-disposition.ts";
 
 type Row = Parameters<typeof foldScientificRows>[0][number];
-const targetDigest = `sha256:${"a".repeat(64)}`;
 const statement = "Two equals two.";
+const targetDigest = await claimContentDigest(
+  { kind: "lemma", statement, falsifier: null },
+  sha256Hex,
+);
 async function row(
   sequence: number,
   type: string,
   payload: unknown,
   overrides: Partial<Row> = {},
 ): Promise<Row> {
-  const text = JSON.stringify(payload);
+  const isClaim = type === "claim.created" || type === "claim.revised";
+  const fields = payload as Record<string, unknown>;
+  // Model the actual publication shape and semantic digest. Corruption tests
+  // alter the returned row or its source explicitly after this valid baseline.
+  const content: Record<string, unknown> = isClaim
+    ? {
+        claim_id: overrides.claim_id ?? "C-1",
+        kind: "lemma",
+        statement: overrides.statement ?? statement,
+        falsifier: null,
+        ...(type === "claim.revised" ? { base_version: (overrides.object_version ?? 2) - 1 } : {}),
+        ...fields,
+      }
+    : type === "review.created"
+      ? { target_claim_id: "C-1", target_version: overrides.target_version ?? 1, ...fields }
+      : type === "evidence.created"
+        ? {
+            bears_on_kind: "claim",
+            bears_on_id: "C-1",
+            bears_on_version: overrides.target_version ?? 1,
+            direction: overrides.direction ?? "supports",
+            ...fields,
+          }
+        : fields;
+  const text = JSON.stringify(content);
   return {
     claim_id: "C-1",
     event_id: `EVENT-${sequence}`,
     seq: sequence,
     type,
-    object_id: `OBJECT-${sequence}`,
+    object_id: isClaim ? "C-1" : `OBJECT-${sequence}`,
     object_version: 1,
     target_version: 1,
     payload_json: text,
@@ -27,12 +55,47 @@ async function row(
     created_at: new Date(Date.UTC(2026, 8, 1, 0, sequence)).toISOString(),
     fellow_id: "F-author",
     sponsor_id: "S-author",
-    content_digest: null,
-    statement: null,
-    direction: null,
+    content_digest: isClaim
+      ? await claimContentDigest(
+          {
+            kind: String(content.kind),
+            statement: String(content.statement),
+            falsifier: typeof content.falsifier === "string" ? content.falsifier : null,
+          },
+          sha256Hex,
+        )
+      : null,
+    statement: isClaim ? String(content.statement) : null,
+    direction: type === "evidence.created" ? String(content.direction) : null,
     ...overrides,
   };
 }
+
+test("scientific standing rejects a projected semantic digest that disagrees with the immutable claim", async () => {
+  const publication = {
+    claim_id: "C-1",
+    kind: "lemma",
+    statement,
+    falsifier: null,
+  };
+  const contentDigest = await claimContentDigest(publication, sha256Hex);
+  const source = await row(1, "claim.created", publication, {
+    object_id: "C-1",
+    content_digest: contentDigest,
+    statement,
+  });
+  expect(await foldScientificRows([source])).toMatchObject({
+    currentVersion: 1,
+    disposition: "open",
+    stale: false,
+  });
+  await expect(
+    foldScientificRows([{ ...source, content_digest: `sha256:${"0".repeat(64)}` }]),
+  ).rejects.toThrow("claim");
+  await expect(
+    foldScientificRows([{ ...source, statement: "An unrelated stronger statement." }]),
+  ).rejects.toThrow("claim");
+});
 
 async function refutationCorpus(hours = 72): Promise<[Row, Row, Row]> {
   const creation = await row(
@@ -100,9 +163,198 @@ async function refutationCorpus(hours = 72): Promise<[Row, Row, Row]> {
 
 async function changedPayload(source: Row, change: Record<string, unknown>): Promise<Row> {
   if (source.payload_json === null) throw new Error("Expected a fixture payload");
-  const payload = JSON.stringify({ ...JSON.parse(source.payload_json), ...change });
-  return { ...source, payload_json: payload, payload_sha256: await sha256Hex(payload) };
+  const content = { ...JSON.parse(source.payload_json), ...change };
+  const payload = JSON.stringify(content);
+  return {
+    ...source,
+    payload_json: payload,
+    payload_sha256: await sha256Hex(payload),
+    ...(source.type === "claim.created" || source.type === "claim.revised"
+      ? {
+          content_digest: await claimContentDigest(content, sha256Hex),
+          statement: content.statement,
+        }
+      : {}),
+  };
 }
+
+async function refutationMismatch(
+  source: Row,
+  sequence: number,
+  claimDigest = targetDigest,
+): Promise<Row> {
+  return row(
+    sequence,
+    "review.created",
+    {
+      target_claim_id: source.claim_id,
+      target_version: source.target_version,
+      verdict: "inform",
+      basis: "Recomputed the cited witness and checked its admissible domain.",
+      body_md:
+        "The cited witness is outside the exact statement's domain; it is not a counterexample.",
+      capable_of_failure:
+        "An in-domain witness violating the conclusion would confirm the objection.",
+      tier: "T2",
+      independence_policy: SCIENTIFIC_INDEPENDENCE_POLICY,
+      verification: {
+        kind: "refutation",
+        target_digest: claimDigest,
+        evidence: { evidence_id: source.object_id, digest: `sha256:${source.payload_sha256}` },
+        coverage: ["Witness domain", "Exact statement hypotheses"],
+        result: "mismatch",
+      },
+    },
+    {
+      object_id: `R-${sequence}`,
+      fellow_id: `F-mismatch-${sequence}`,
+      sponsor_id: `S-mismatch-${sequence}`,
+      target_version: source.target_version,
+    },
+  );
+}
+
+test("independent exact counterevidence mismatch returns a disputed claim to open without certifying it", async () => {
+  const [claim, evidence] = await refutationCorpus();
+  const mismatch = await refutationMismatch(evidence, 3);
+  expect(await foldScientificRows([claim, evidence])).toMatchObject({ disposition: "disputed" });
+  const resolved = await foldScientificRows([claim, evidence, mismatch]);
+  expect(resolved).toMatchObject({
+    disposition: "open",
+    stale: false,
+    context: {
+      recorded_refutation_attempts: 0,
+      verified_reviews: [],
+      has_certified_artifact: false,
+    },
+    lastTransition: {
+      sequence: 3,
+      from: "disputed",
+      to: "open",
+      cause: "review-created",
+      eventId: mismatch.event_id,
+    },
+  });
+  expect(reviewStateFromRecordedReviews(resolved.reviewFacets)).toBe("unreviewed");
+});
+
+test("each counterevidence item needs its own resolution and repeated mismatch reviews earn no support", async () => {
+  const [claim, first] = await refutationCorpus();
+  const second = { ...first, event_id: "EVENT-3", seq: 3, object_id: "E-3" };
+  const resolveFirst = await refutationMismatch(first, 4);
+  const resolveSecond = await refutationMismatch(second, 5);
+  const inputs = [claim, first, second, resolveFirst];
+  expect(await foldScientificRows(inputs)).toMatchObject({
+    disposition: "disputed",
+    context: { recorded_refutation_attempts: 1 },
+  });
+  for (const verdict of ["inform", "confirm", "reproduces", "cannot-verify"])
+    expect(
+      await foldScientificRows([
+        ...inputs,
+        await changedPayload(resolveSecond, { verdict }),
+        await refutationMismatch(second, 6),
+      ]),
+    ).toMatchObject({
+      disposition: "open",
+      context: { recorded_refutation_attempts: 0, verified_reviews: [] },
+      lastTransition: { sequence: 5 },
+    });
+});
+
+test("separate adverse reviews remain disputed and contested before or after an evidence mismatch", async () => {
+  const [claim, evidence, confirming] = await refutationCorpus(1);
+  const mismatch = await refutationMismatch(evidence, 4);
+  for (const rows of [
+    [claim, evidence, confirming, mismatch],
+    [claim, evidence, { ...mismatch, seq: 3 }, { ...confirming, seq: 4 }],
+  ]) {
+    const result = await foldScientificRows(rows);
+    expect(result.disposition).toBe("disputed");
+    expect(reviewStateFromRecordedReviews(result.reviewFacets)).toBe("contested");
+  }
+});
+
+test("unweighted, dependent, wrong-digest and inconclusive findings cannot discharge counterevidence", async () => {
+  const [claim, evidence] = await refutationCorpus();
+  const mismatch = await refutationMismatch(evidence, 3);
+  if (mismatch.payload_json === null) throw new Error("Expected the mismatch fixture payload");
+  const verification = JSON.parse(mismatch.payload_json).verification;
+  const candidates = [
+    { ...mismatch, fellow_id: claim.fellow_id },
+    { ...mismatch, sponsor_id: claim.sponsor_id },
+    { ...mismatch, fellow_id: evidence.fellow_id },
+    { ...mismatch, sponsor_id: evidence.sponsor_id },
+    await changedPayload(mismatch, { tier: "T0" }),
+    await changedPayload(mismatch, { capable_of_failure: null }),
+    await changedPayload(mismatch, { target_claim_id: "C-2" }),
+    await changedPayload(mismatch, { target_version: 2 }),
+    await changedPayload(mismatch, { verdict: "refute" }),
+    await changedPayload(mismatch, { verification: { ...verification, result: "cannot-verify" } }),
+    await changedPayload(mismatch, {
+      verification: { ...verification, target_digest: `sha256:${"b".repeat(64)}` },
+    }),
+    await changedPayload(mismatch, {
+      verification: {
+        ...verification,
+        evidence: { ...verification.evidence, digest: targetDigest },
+      },
+    }),
+  ];
+  for (const candidate of candidates)
+    expect(await foldScientificRows([claim, evidence, candidate])).toMatchObject({
+      disposition: "disputed",
+    });
+});
+
+test("withheld or withdrawn resolution and unavailable source grounding restore the dispute", async () => {
+  const [claim, evidence] = await refutationCorpus();
+  const mismatch = await refutationMismatch(evidence, 3);
+  expect(await foldScientificRows([claim, evidence, mismatch])).toMatchObject({
+    disposition: "open",
+  });
+  const withdrawn = await withdrawNoveltyReview(mismatch, 4);
+  for (const inputs of [
+    [claim, evidence, { ...mismatch, payload_json: null }],
+    [claim, evidence, { ...mismatch, payload_json: `${mismatch.payload_json} ` }],
+    [claim, evidence, mismatch, withdrawn],
+    [claim, evidence, mismatch, { ...withdrawn, payload_json: null }],
+    [claim, { ...evidence, payload_json: null }, mismatch],
+  ])
+    expect(await foldScientificRows(inputs)).toMatchObject({
+      disposition: "disputed",
+      stale: true,
+    });
+});
+
+test("mismatch findings never reopen a settled refutation, withdrawn claim or malformed statement", async () => {
+  const [claim, evidence, confirmed] = await refutationCorpus(72);
+  const mismatch = await refutationMismatch(evidence, 4);
+  expect(await foldScientificRows([claim, evidence, confirmed, mismatch])).toMatchObject({
+    disposition: "refuted",
+  });
+  const malformed = await changedPayload(confirmed, { rubric: ["statement-defect"] });
+  expect(await foldScientificRows([claim, evidence, malformed, mismatch])).toMatchObject({
+    disposition: "malformed",
+  });
+  const withdrawal = await row(3, "object.retracted", { target_object: "C-1" });
+  expect(await foldScientificRows([claim, evidence, withdrawal, mismatch])).toMatchObject({
+    disposition: "withdrawn",
+  });
+});
+
+test("resolving evidence leaves weightless review objections contested and preserves a mismatch review's statement defect", async () => {
+  const [claim, evidence, confirming] = await refutationCorpus(1);
+  const mismatch = await refutationMismatch(evidence, 4);
+  const weightless = await changedPayload(confirming, { capable_of_failure: null });
+  const resolved = await foldScientificRows([claim, evidence, weightless, mismatch]);
+  expect(resolved.disposition).toBe("open");
+  expect(reviewStateFromRecordedReviews(resolved.reviewFacets)).toBe("contested");
+  const statementDefect = await changedPayload(mismatch, { rubric: ["statement-defect"] });
+  expect(await foldScientificRows([claim, evidence, statementDefect])).toMatchObject({
+    disposition: "malformed",
+  });
+});
 
 test("status step identity comes from its verified envelope, never payload-supplied explanation", async () => {
   const rows = await refutationCorpus(72);
@@ -132,7 +384,6 @@ async function noveltyClaim(version = 1, sequence = 1): Promise<Row> {
       object_id: "C-1",
       object_version: version,
       target_version: version,
-      content_digest: targetDigest,
       statement,
     },
   );
@@ -194,6 +445,32 @@ async function withdrawNoveltyReview(source: Row, sequence: number): Promise<Row
     },
   );
 }
+
+test("retaining withdrawn adverse novelty cannot retain its counterevidence resolution authority", async () => {
+  const [original, evidence] = await refutationCorpus();
+  const claim = await changedPayload(original, { kind: "novelty-claim" });
+  const adverseNovelty = await noveltyReview(3, "rediscovery");
+  if (adverseNovelty.payload_json === null) throw new Error("Expected a novelty fixture payload");
+  const mismatch = await changedPayload(
+    await refutationMismatch(evidence, 3, claim.content_digest!),
+    {
+      novelty: JSON.parse(adverseNovelty.payload_json).novelty,
+    },
+  );
+  expect(await foldScientificRows([claim, evidence, mismatch])).toMatchObject({
+    disposition: "open",
+    novelty: "not-new",
+  });
+  const withdrawal = await withdrawNoveltyReview(mismatch, 4);
+  for (const payload_json of [withdrawal.payload_json, null])
+    expect(
+      await foldScientificRows([claim, evidence, mismatch, { ...withdrawal, payload_json }]),
+    ).toMatchObject({
+      disposition: "disputed",
+      novelty: "not-new",
+      stale: true,
+    });
+});
 
 test("novelty standing includes the adverse twenty-first review outside the display page", async () => {
   const claim = await noveltyClaim();
@@ -324,7 +601,7 @@ test("reduction standing comes from the exact publication's immutable dependency
         },
       ],
     },
-    { object_id: "C-1", statement, content_digest: targetDigest },
+    { object_id: "C-1", statement },
   );
   expect(await foldScientificRows([publication])).toMatchObject({
     disposition: "reduced-to",
@@ -349,7 +626,7 @@ test("malformed or unavailable reduction pins cannot fall back to unrelated proj
       1,
       "claim.created",
       { kind: "reduction", statement, dependency_pins: pins, relates_to: ["C-2"] },
-      { object_id: "C-1", statement, content_digest: targetDigest },
+      { object_id: "C-1", statement },
     );
     const misleadingProjection = { ...publication, reduced_to_claim_id: "C-3" };
     expect(await foldScientificRows([misleadingProjection])).toMatchObject({
@@ -361,7 +638,7 @@ test("malformed or unavailable reduction pins cannot fall back to unrelated proj
     1,
     "claim.created",
     { kind: "reduction", statement, relates_to: ["C-2"] },
-    { object_id: "C-1", statement, content_digest: targetDigest },
+    { object_id: "C-1", statement },
   );
   for (const payload_json of [null, `${publication.payload_json} `]) {
     const unavailable = {
@@ -382,7 +659,7 @@ test("legacy reductions use their own recorded claim relation only when pins are
     1,
     "claim.created",
     { kind: "reduction", statement, relates_to: ["C-2"] },
-    { object_id: "C-1", statement, content_digest: targetDigest },
+    { object_id: "C-1", statement },
   );
   expect((await foldScientificRows([publication])).disposition).toBe("reduced-to");
   const versioned = await changedPayload(publication, { relates_to: ["C-2@3"] });
@@ -568,7 +845,6 @@ test("settlement cannot revive withdrawn or malformed statements or cross a vers
       object_id: "C-1",
       object_version: 2,
       target_version: 2,
-      content_digest: `sha256:${"d".repeat(64)}`,
       statement: "A corrected second version.",
       created_at: "2026-09-01T02:00:00.000Z",
     },
@@ -954,6 +1230,35 @@ test("grounded current-policy reviews earn support and redacted proof revokes it
   expect(fold.context.has_certified_artifact).toBe(false);
 });
 
+test("misbound reviews and evidence projections cannot confer positive standing", async () => {
+  const rows = await corpus();
+  expect((await foldScientificRows(rows)).disposition).toBe("strongly-supported");
+  for (const change of [{ target_claim_id: "C-OTHER" }, { target_version: 2 }]) {
+    const misbound = await Promise.all(
+      rows.map((source) =>
+        source.type === "review.created" ? changedPayload(source, change) : source,
+      ),
+    );
+    const fold = await foldScientificRows(misbound);
+    expect(fold.disposition).toBe("open");
+    expect(fold.stale).toBe(true);
+    expect(fold.context.verified_reviews).toHaveLength(0);
+    expect(fold.context.has_certified_artifact).toBe(false);
+  }
+
+  // Keep the proof, event hash and every referring digest intact. A derived
+  // direction that disagrees with the source still cannot lend it authority.
+  const fold = await foldScientificRows(
+    rows.map((source) =>
+      source.object_id === "E-1" ? { ...source, direction: "informs" } : source,
+    ),
+  );
+  expect(fold.disposition).toBe("open");
+  expect(fold.stale).toBe(true);
+  expect(fold.context.verified_reviews).toHaveLength(0);
+  expect(fold.context.has_certified_artifact).toBe(false);
+});
+
 test("unavailable evidence ancestors remove derived checks and positive verification weight", async () => {
   const original = await corpus();
   const ancestor = await row(
@@ -1163,7 +1468,6 @@ test("unavailable refutation stays disputed and old-version staleness does not i
       object_id: "C-1",
       object_version: 2,
       target_version: 2,
-      content_digest: `sha256:${"b".repeat(64)}`,
       statement: "The natural number two equals itself.",
     },
   );

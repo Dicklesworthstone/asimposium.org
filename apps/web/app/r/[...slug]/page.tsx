@@ -1,4 +1,4 @@
-import { PublicLedgerProblemIdSchema } from "@asimposium/contracts";
+import { DeadEndsListQuerySchema, PublicLedgerProblemIdSchema } from "@asimposium/contracts";
 import { HypothesisItemQuerySchema } from "@asimposium/contracts/hypotheses";
 import { ConflictsListQuerySchema, conflictsListPath } from "@asimposium/contracts/conflicts";
 import { QuestionsListQuerySchema, questionsListPath } from "@asimposium/contracts/questions";
@@ -11,10 +11,12 @@ import { cache } from "react";
 import { EventHistoryEntry, EventHistoryOmissions } from "@/components/event-history";
 import { PublicLedgerLive } from "@/components/public-ledger-live";
 import { PublicReadUnavailable } from "@/components/public-read-unavailable";
+import { ReportLink } from "@/components/report-panel";
 import { stoaFetchPublicRecord } from "@/lib/public-ledger";
 import { type PublicRecordTarget, resolvePublicRecord } from "@/lib/public-record";
 import { parseProofGapQuery, proofGapPagePath } from "@/lib/proof-gap-view";
 import { eventHistoryPath } from "@/lib/event-history";
+import { deadEndsPagePath } from "@/lib/dead-end-view";
 import { publicViewWatchTargets } from "@/lib/public-watch-view";
 import { SITE } from "@/lib/site";
 
@@ -63,6 +65,7 @@ async function pageInput({ params, searchParams }: GenericDiptychPageProps) {
   const gapQuery = target?.kind === "proof-gap" ? parseProofGapQuery(query) : null;
   const conflictQuery = target?.kind === "conflict" ? ConflictsListQuerySchema.safeParse(query) : null;
   const questionQuery = target?.kind === "question" ? QuestionsListQuerySchema.safeParse(query) : null;
+  const deadEndQuery = target?.kind === "dead-end" ? DeadEndsListQuerySchema.safeParse(query) : null;
   const validQuery = target?.kind === "hypothesis"
     ? hypothesisQuery.success
     : target?.kind === "proof-gap"
@@ -73,6 +76,8 @@ async function pageInput({ params, searchParams }: GenericDiptychPageProps) {
         : target?.kind === "question"
           ? questionQuery?.success === true && questionQuery.data.after === undefined &&
             questionQuery.data.target === undefined && questionQuery.data.status === undefined
+        : target?.kind === "dead-end"
+          ? deadEndQuery?.success === true && deadEndQuery.data.target === undefined
       : Object.keys(query).length === 0;
   const redirectPath = target?.kind === "hypothesis" && hypothesisQuery.success
     ? `/p/${encodeURIComponent(target.problemId)}/hypotheses/${encodeURIComponent(target.recordId as string)}${hypothesisQuery.data.through === undefined ? "" : `?through=${hypothesisQuery.data.through}`}`
@@ -82,6 +87,8 @@ async function pageInput({ params, searchParams }: GenericDiptychPageProps) {
         ? conflictsListPath(target.problemId, "human", { ...conflictQuery.data, target: target.recordId })
         : target?.kind === "question" && questionQuery?.success && validQuery
           ? questionsListPath(target.problemId, "human", { ...questionQuery.data, target: target.recordId })
+        : target?.kind === "dead-end" && deadEndQuery?.success && validQuery
+          ? deadEndsPagePath(target.problemId, { ...deadEndQuery.data, target: target.recordId })
       : null;
   return { target, path: slug.join("/"), validQuery, redirectPath };
 }
@@ -116,13 +123,14 @@ export default async function GenericDiptychFallbackPage(props: GenericDiptychPa
   if (!validQuery) {
     return (
       <main className="landing col problem-page" id="content">
-        <h1>{target.kind === "hypothesis" ? "Invalid hypothesis cursor" : target.kind === "proof-gap" ? "Invalid proof-gap view" : target.kind === "conflict" ? "Invalid conflict view" : target.kind === "question" ? "Invalid question view" : target.kind === "problem-statement" ? "Invalid statement cursor" : "Read the current public record"}</h1>
+        <h1>{target.kind === "hypothesis" ? "Invalid hypothesis cursor" : target.kind === "proof-gap" ? "Invalid proof-gap view" : target.kind === "conflict" ? "Invalid conflict view" : target.kind === "question" ? "Invalid question view" : target.kind === "dead-end" ? "Invalid dead-end view" : target.kind === "problem-statement" ? "Invalid statement cursor" : "Read the current public record"}</h1>
         <p>
           {target.kind === "hypothesis"
             ? "An exact hypothesis accepts one non-negative through cursor."
             : target.kind === "proof-gap" ? "An exact proof gap accepts one non-negative through cursor."
             : target.kind === "conflict" ? "An exact conflict accepts a non-negative through cursor and an optional page limit. Continuations, status filters and a second target are not accepted on this exact link."
             : target.kind === "question" ? "An exact question accepts a non-negative through cursor and an optional page limit. Continuations, status filters and a second target are not accepted on this exact link."
+            : target.kind === "dead-end" ? "An exact dead end accepts an optional history filter. A second target, historical cursors and other filters are not accepted on this exact link."
             : target.kind === "problem-statement" ? "An exact statement version accepts one non-negative through cursor."
             : "This record has a current public face. Historical cursors and additional filters are not supported on this item page."}
         </p>
@@ -181,6 +189,7 @@ export default async function GenericDiptychFallbackPage(props: GenericDiptychPa
             <div dangerouslySetInnerHTML={{ __html: html ?? "" }} />
           </section>
         )}
+        {target.recordId !== undefined && <ReportLink problemId={target.problemId} target={target.recordId} />}
         <section aria-labelledby="record-agent-faces">
           <h2 id="record-agent-faces">Canonical agent faces</h2>
           <p>

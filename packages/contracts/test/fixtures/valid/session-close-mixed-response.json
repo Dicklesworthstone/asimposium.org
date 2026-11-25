@@ -1,0 +1,61 @@
+{
+  "session_id": "S-01ARZ3NDEKTSV4RRFFQ69G5FAV",
+  "closed_at": "2026-11-22T19:30:00.000Z",
+  "promoted": ["C-14"],
+  "publications": [
+    {
+      "workshop_id": "W-abcdefghijklmnopqrstuvwxyz",
+      "workshop_version": 2,
+      "publication": {
+        "object_kind": "hypothesis",
+        "problem_id": "P-4DSP",
+        "seq": 11,
+        "version": 1,
+        "result": { "hypothesis_id": "H-01ARZ3NDEKTSV4RRFFQ69G5FAV", "status": "open" }
+      }
+    },
+    {
+      "workshop_id": "W-bcdefghijklmnopqrstuvwxyza",
+      "workshop_version": 1,
+      "publication": {
+        "object_kind": "evidence",
+        "problem_id": "P-4DSP",
+        "seq": 12,
+        "version": 1,
+        "result": {
+          "evidence_id": "E-01ARZ3NDEKTSV4RRFFQ69G5FAW",
+          "computed_class": "assertion",
+          "coercion_flags": [],
+          "drives_promotion": false
+        }
+      }
+    },
+    {
+      "workshop_id": "W-cdefghijklmnopqrstuvwxyzab",
+      "workshop_version": 1,
+      "publication": {
+        "object_kind": "dead-end",
+        "problem_id": "P-4DSP",
+        "seq": 13,
+        "version": 1,
+        "result": {
+          "recorded": true,
+          "dead_end_id": "DE-01ARZ3NDEKTSV4RRFFQ69G5FAX",
+          "problem_id": "P-4DSP",
+          "seq": 13
+        }
+      }
+    },
+    {
+      "workshop_id": "W-defghijklmnopqrstuvwxyzabc",
+      "workshop_version": 1,
+      "publication": {
+        "claim_id": "C-14",
+        "problem_id": "P-4DSP",
+        "seq": 14,
+        "version": 1,
+        "queue_position": 1
+      }
+    }
+  ]
+}

@@ -2,6 +2,7 @@ import type {
   EvidenceRequest,
   HypothesisRequest,
   RecordDeadEndRequest,
+  ReviewRequest,
   SponsorWorkshopObject,
 } from "@asimposium/contracts";
 
@@ -182,11 +183,79 @@ function DeadEndPreview({ data }: { readonly data: RecordDeadEndRequest }) {
   );
 }
 
+function ReviewPreview({ data }: { readonly data: ReviewRequest }) {
+  return (
+    <section
+      className="workshop-publication border-t pt-3 mt-3"
+      aria-label="Stored review for publication"
+    >
+      <h4 className="font-semibold">Stored review for publication</h4>
+      <p className="quiet text-sm">
+        The validator checks the Fellow’s review authority and computes independence when this exact
+        review is published. Publication does not by itself establish the claim’s status.
+      </p>
+      <dl className="text-sm">
+        <dt className="font-semibold mt-2">Reviewed claim version</dt>
+        <dd>
+          {data.target_claim_id}@{data.target_version}
+        </dd>
+        <dt className="font-semibold mt-2">Verdict</dt>
+        <dd>{data.verdict}</dd>
+        <dt className="font-semibold mt-2">What the Fellow checked</dt>
+        <dd className="whitespace-pre-wrap">{data.basis}</dd>
+        <dt className="font-semibold mt-2">Outcome that would have failed the check</dt>
+        <dd className="whitespace-pre-wrap">
+          {data.capable_of_failure ??
+            "No capable-of-failure outcome is stored. An accepted review is assertion-only and carries no assessment weight."}
+        </dd>
+        <dt className="font-semibold mt-2">Rubric lines exercised</dt>
+        <dd className="whitespace-pre-wrap">
+          {data.rubric.length === 0 ? "No rubric lines recorded." : data.rubric.join("\n")}
+        </dd>
+        {data.client_context_cursor === undefined ? null : (
+          <>
+            <dt className="font-semibold mt-2">Based on ledger sequence</dt>
+            <dd>{data.client_context_cursor}</dd>
+          </>
+        )}
+        <dt className="font-semibold mt-2">Public write-up</dt>
+        <dd className="whitespace-pre-wrap">{data.body_md}</dd>
+      </dl>
+      {data.verification === undefined &&
+      data.scientific_provenance === undefined &&
+      data.novelty === undefined ? null : (
+        <details className="mt-3">
+          <summary>Recorded checks and declared provenance</summary>
+          <p className="quiet text-sm">
+            These are the Fellow’s stored declarations. The Worker validates their exact references
+            and computes their effect at publication.
+          </p>
+          <pre className="whitespace-pre-wrap text-sm">
+            {JSON.stringify(
+              {
+                ...(data.verification === undefined ? {} : { verification: data.verification }),
+                ...(data.scientific_provenance === undefined
+                  ? {}
+                  : { scientific_provenance: data.scientific_provenance }),
+                ...(data.novelty === undefined ? {} : { novelty: data.novelty }),
+              },
+              null,
+              2,
+            )}
+          </pre>
+        </details>
+      )}
+    </section>
+  );
+}
+
 /** Server-rendered scientific content, separate from the private working notes. */
 export function WorkshopPublicationPreview({ object }: { readonly object: SponsorWorkshopObject }) {
   if (object.publication && "object_kind" in object.publication) {
     if (object.publication.object_kind === "dead-end")
       return <DeadEndPreview data={object.publication.payload} />;
+    if (object.publication.object_kind === "review")
+      return <ReviewPreview data={object.publication.payload} />;
     return object.publication.object_kind === "hypothesis" ? (
       <HypothesisPreview data={object.publication.payload} />
     ) : (
@@ -197,8 +266,8 @@ export function WorkshopPublicationPreview({ object }: { readonly object: Sponso
   if (!claim) {
     return (
       <p className="quiet text-sm mt-3">
-        No typed publication is stored. Ask the Fellow to save the claim, hypothesis, evidence or dead end it
-        wants to publish; Promote will explain any remaining requirements.
+        No typed publication is stored. Ask the Fellow to save the claim, hypothesis, evidence,
+        review or dead end it wants to publish; Promote will explain any remaining requirements.
       </p>
     );
   }

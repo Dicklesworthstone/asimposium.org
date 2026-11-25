@@ -164,6 +164,7 @@ interface ReportDetailRow {
   source_event_id: string | null;
   source_digest: string | null;
   source_ref: string | null;
+  integrity_case_id: string | null;
 }
 
 async function readSource(db: D1Database, report: ReportDetailRow): Promise<AdminReportSource> {
@@ -264,7 +265,8 @@ export async function readOperatorReportDetail(
   if (!AdminReportIdSchema.safeParse(reportId).success) return undefined;
   const report = await db
     .prepare(`SELECT report_id, problem_id, target_kind, target_ref, reason, note,
-    reporter_class, status, created_at, resolved_at, resolution_reason, source_event_id, source_digest, source_ref
+    reporter_class, status, created_at, resolved_at, resolution_reason, source_event_id, source_digest, source_ref,
+    (SELECT i.case_id FROM integrity_cases i WHERE i.report_id = reports.report_id) AS integrity_case_id
     FROM reports WHERE report_id = ?`)
     .bind(reportId)
     .first<ReportDetailRow>();
@@ -285,6 +287,7 @@ export async function readOperatorReportDetail(
     source: await readSource(db, report),
     resolved_at: report.resolved_at,
     resolution_reason: report.resolution_reason,
+    ...(report.integrity_case_id === null ? {} : { integrity_case_id: report.integrity_case_id }),
   });
 }
 

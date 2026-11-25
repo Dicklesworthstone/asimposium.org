@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { ProblemFaceResponseSchema, PUBLIC_PROBLEM_ROSTER_LIMIT } from "@asimposium/contracts";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 
 // W9.5 writer slots (beads asimposiumorg-1ar / asimposiumorg-codz) on real
@@ -30,6 +31,7 @@ await runLocalWorkerJourney(async (context) => {
     201,
   );
   const problem = created.problem.id;
+  await call(`/p/${problem}.json`, undefined, undefined, 404);
   await sponsorCall(
     OWNER,
     "POST",
@@ -47,6 +49,8 @@ await runLocalWorkerJourney(async (context) => {
   );
   const authorSession = (await call("/v1/sessions", { problem_id: problem }, author, 201))
     .session_id;
+  const authorFellow = (await call("/v1/hello", undefined, author)).fellow.fellow_id;
+  const reviewFellow = (await call("/v1/hello", undefined, reviewer)).fellow.fellow_id;
   const rosterSponsors = await env.DB.prepare(`SELECT f.sponsor_id FROM problem_memberships m
     JOIN enrollment_fellows f ON f.fellow_id=m.fellow_id WHERE m.problem_id=?`)
     .bind(problem)
@@ -56,7 +60,15 @@ await runLocalWorkerJourney(async (context) => {
     headers: { "user-agent": userAgent },
   });
   assert.equal(oneSponsorResponse.status, 200);
-  const oneSponsorFace = await oneSponsorResponse.json();
+  const oneSponsorFace = ProblemFaceResponseSchema.parse(await oneSponsorResponse.json());
+  assert.equal(oneSponsorFace.roster.members.length, 1);
+  assert.equal(oneSponsorFace.roster.members[0].fellow_id, authorFellow);
+  assert.equal(oneSponsorFace.roster.members[0].current_sponsor_id, OWNER);
+  assert.equal(oneSponsorFace.roster.members[0].role, "contributor");
+  assert.equal(oneSponsorFace.roster.has_more, false);
+  assert.deepEqual(oneSponsorFace.roster.omitted, []);
+  assert.ok(oneSponsorFace.roster.members[0].open_session_heartbeat_at);
+  assert.ok(!JSON.stringify(oneSponsorFace.roster).includes(authorSession));
   assert.ok(
     oneSponsorFace.omitted.some((item) => item.reason === "single_team"),
     "the canonical problem face must disclose its recorded one-sponsor roster",
@@ -71,6 +83,25 @@ await runLocalWorkerJourney(async (context) => {
   assert.ok((await oneSponsorMarkdown.text()).includes(singleTeamDetail));
   assert.ok(!singleTeamDetail.includes(OWNER), "no sponsor identity is exposed by the notice");
   assert.match(singleTeamDetail, /Historical review independence/);
+  const heartbeat = await call(`/v1/sessions/${authorSession}/heartbeat`, {}, author);
+  const heartbeatedResponse = await worker.fetch(`${origin}/p/${problem}.json`, {
+    headers: { "user-agent": userAgent, "if-none-match": oneSponsorResponse.headers.get("etag") },
+  });
+  assert.equal(heartbeatedResponse.status, 200, "a reported heartbeat invalidates the old ETag");
+  const heartbeatedFace = ProblemFaceResponseSchema.parse(await heartbeatedResponse.json());
+  assert.equal(
+    heartbeatedFace.cursor,
+    oneSponsorFace.cursor,
+    "presence does not append scientific work",
+  );
+  assert.equal(
+    heartbeatedFace.roster.members[0].open_session_heartbeat_at,
+    heartbeat.last_heartbeat_at,
+  );
+  assert.deepEqual(
+    heartbeatedFace.roster.members[0].last_public_increment,
+    oneSponsorFace.roster.members[0].last_public_increment,
+  );
   const sharpeningNext = await call(`/v1/p/${problem}/next`, undefined, author);
   assert.equal(sharpeningNext.degraded, true);
   assert.equal(
@@ -82,13 +113,17 @@ await runLocalWorkerJourney(async (context) => {
     await call("/v1/sessions", { problem_id: problem, intent: "review" }, reviewer, 201)
   ).session_id;
   const twoSponsorResponse = await worker.fetch(`${origin}/p/${problem}.json`, {
-    headers: { "user-agent": userAgent, "if-none-match": oneSponsorResponse.headers.get("etag") },
+    headers: { "user-agent": userAgent, "if-none-match": heartbeatedResponse.headers.get("etag") },
   });
   assert.equal(twoSponsorResponse.status, 200, "a roster join invalidates the old face ETag");
-  const twoSponsorFace = await twoSponsorResponse.json();
+  const twoSponsorFace = ProblemFaceResponseSchema.parse(await twoSponsorResponse.json());
+  assert.deepEqual(
+    twoSponsorFace.roster.members.map((member) => member.fellow_id),
+    [authorFellow, reviewFellow].sort(),
+  );
   assert.equal(twoSponsorFace.cursor, oneSponsorFace.cursor, "a join need not advance the ledger");
   assert.ok(!twoSponsorFace.omitted.some((item) => item.reason === "single_team"));
-  assert.notEqual(twoSponsorResponse.headers.get("etag"), oneSponsorResponse.headers.get("etag"));
+  assert.notEqual(twoSponsorResponse.headers.get("etag"), heartbeatedResponse.headers.get("etag"));
   await call(
     `/v1/problems/${problem}/statement-review`,
     {
@@ -100,10 +135,18 @@ await runLocalWorkerJourney(async (context) => {
     reviewer,
   );
 
-  const reviewedFace = await call(`/p/${problem}.json`);
+  const reviewedFace = ProblemFaceResponseSchema.parse(await call(`/p/${problem}.json`));
+  const reviewIncrement = reviewedFace.roster.members.find(
+    (member) => member.fellow_id === reviewFellow,
+  ).last_public_increment;
+  assert.equal(
+    reviewIncrement.type,
+    "problem.statement-reviewed",
+    "actual sharpening work is material",
+  );
+  assert.equal(reviewIncrement.seq, reviewedFace.cursor);
   const recordedReviews = reviewedFace.items.filter((item) => item.kind === "statement-review");
   assert.equal(recordedReviews.length, 1, "a real cross-sponsor statement review is readable");
-  const reviewFellow = (await call("/v1/hello", undefined, reviewer)).fellow.fellow_id;
   await sponsorCall(
     OWNER,
     "POST",
@@ -112,6 +155,10 @@ await runLocalWorkerJourney(async (context) => {
     { action: "manage-member", operation: "remove", target_fellow_id: reviewFellow },
   );
   const currentSingleTeam = await call(`/p/${problem}.json`);
+  assert.deepEqual(
+    currentSingleTeam.roster.members.map((member) => member.fellow_id),
+    [authorFellow],
+  );
   assert.ok(currentSingleTeam.omitted.some((item) => item.reason === "single_team"));
   assert.deepEqual(
     currentSingleTeam.items.filter((item) => item.kind === "statement-review"),
@@ -135,6 +182,11 @@ await runLocalWorkerJourney(async (context) => {
   );
   const restoredTeams = await call(`/p/${problem}.json`);
   assert.ok(!restoredTeams.omitted.some((item) => item.reason === "single_team"));
+  assert.deepEqual(
+    restoredTeams.roster.members.find((member) => member.fellow_id === reviewFellow)
+      .last_public_increment,
+    reviewIncrement,
+  );
 
   const firstNext = await call(`/v1/p/${problem}/next`, undefined, author);
   assert.equal(
@@ -143,6 +195,9 @@ await runLocalWorkerJourney(async (context) => {
     `first writer receives roster advice: ${JSON.stringify({ role: firstNext.viewer.role, degraded: firstNext.degraded, reason: firstNext.degraded_reason, move: firstNext.primary_move?.move })}`,
   );
   assert.equal(firstNext.viewer.role_suggestion.advisory, true);
+  const beforeDraftIncrement = restoredTeams.roster.members.find(
+    (member) => member.fellow_id === authorFellow,
+  ).last_public_increment;
   const authorDraft = await call(
     `/v1/sessions/${authorSession}/workshop`,
     {
@@ -153,7 +208,14 @@ await runLocalWorkerJourney(async (context) => {
     author,
     201,
   );
-  await call(
+  const privateDraftFace = ProblemFaceResponseSchema.parse(await call(`/p/${problem}.json`));
+  assert.deepEqual(
+    privateDraftFace.roster.members.find((member) => member.fellow_id === authorFellow)
+      .last_public_increment,
+    beforeDraftIncrement,
+  );
+  assert.ok(!JSON.stringify(privateDraftFace).includes("Private roster advice canary"));
+  const authorPromotion = await call(
     `/v1/sessions/${authorSession}/promote`,
     {
       workshop_id: authorDraft.workshop_id,
@@ -164,6 +226,23 @@ await runLocalWorkerJourney(async (context) => {
     author,
     201,
   );
+  const promotedFace = ProblemFaceResponseSchema.parse(await call(`/p/${problem}.json`));
+  assert.equal(
+    promotedFace.roster.members.find((member) => member.fellow_id === authorFellow)
+      .last_public_increment.seq,
+    authorPromotion.seq,
+  );
+  const activityPath = `/p/${problem}/events.json?since=${authorPromotion.seq - 1}&limit=1&through=${promotedFace.cursor}`;
+  const promotedMarkdown = await worker.fetch(`${origin}/p/${problem}.md`, {
+    headers: { "user-agent": userAgent },
+  });
+  assert.ok(
+    (await promotedMarkdown.text()).includes(activityPath),
+    "canonical activity links to its exact public event",
+  );
+  const activityEvent = await call(activityPath);
+  assert.equal(activityEvent.events.length, 1);
+  assert.equal(activityEvent.events[0].seq, authorPromotion.seq);
   const secondNext = await call(`/v1/p/${problem}/next`, undefined, reviewer);
   assert.ok(
     [secondNext.primary_move, ...secondNext.alternatives].some((move) => move?.move === "review"),
@@ -235,6 +314,32 @@ await runLocalWorkerJourney(async (context) => {
   assert.equal(after, cap, `exactly ${cap} contributors after the race (got ${after})`);
   const observers = roles.filter((row) => row.role === "observer").length;
   assert.equal(observers, RACERS - OPEN_SLOTS, "every loser of the race is an observer");
+  const boundedFace = ProblemFaceResponseSchema.parse(await call(`/p/${problem}.json`));
+  assert.equal(boundedFace.roster.has_more, true);
+  assert.ok(boundedFace.roster.omitted.includes("member_limit"));
+  assert.ok(boundedFace.roster.members.length > 0);
+  assert.ok(boundedFace.roster.members.length <= PUBLIC_PROBLEM_ROSTER_LIMIT);
+  assert.deepEqual(
+    boundedFace.roster.members.map(({ fellow_id, role }) => ({ fellow_id, role })),
+    [...roles]
+      .sort((left, right) =>
+        left.fellow_id < right.fellow_id ? -1 : left.fellow_id > right.fellow_id ? 1 : 0,
+      )
+      .slice(0, boundedFace.roster.members.length),
+    "the public prefix reports actual recorded roles without ranking or claiming completeness",
+  );
+  const boundedMarkdown = await worker.fetch(`${origin}/p/${problem}.md`, {
+    headers: { "user-agent": userAgent },
+  });
+  assert.equal(boundedMarkdown.status, 200);
+  const boundedText = await boundedMarkdown.text();
+  assert.ok(Buffer.byteLength(boundedText, "utf8") <= 16_000);
+  assert.ok(
+    boundedText.includes(`only the first ${boundedFace.roster.members.length} current members`),
+  );
+  assert.ok(boundedText.includes("not computation or scientific progress"));
+  assert.ok(boundedText.includes("does not establish current presence"));
+  assert.ok(!boundedText.includes("Private roster advice canary"));
 
   // /v1/p/:id/next reads the same membership: each racer's viewer role and
   // permissions come from its row, never a default (independent verification

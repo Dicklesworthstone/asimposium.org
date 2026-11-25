@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { FellowIdSchema, SponsorIdSchema } from "./enrollment.ts";
+import { EnrollmentFirstDirectiveSchema, FellowIdSchema, SponsorIdSchema } from "./enrollment.ts";
 import { ProblemIdSchema, SessionIdSchema } from "./sessions.ts";
 
 export const DIRECTIVES_SCHEMA_ID = "https://a.asimposium.org/schemas/directives.v1.json";
@@ -11,6 +11,10 @@ const DirectiveIdSchema = z
   .string()
   .length(36)
   .regex(/^DIR-[a-f0-9]{32}$/);
+const EnrollmentInstructionIdSchema = z
+  .string()
+  .length(35)
+  .regex(/^EI-[a-f0-9]{32}$/);
 
 export const SponsorDirectiveRequestSchema = z
   .object({
@@ -81,7 +85,10 @@ const ProtocolConflictPublicFields = {
 /** The directive pin is private. All three prose fields are deliberate public
  * paraphrases supplied by the Fellow; stored directive text is never copied. */
 export const ProtocolConflictRequestSchema = z
-  .object({ directive_id: DirectiveIdSchema, ...ProtocolConflictPublicFields })
+  .object({
+    directive_id: z.union([DirectiveIdSchema, EnrollmentInstructionIdSchema]),
+    ...ProtocolConflictPublicFields,
+  })
   .strict();
 export type ProtocolConflictRequest = z.infer<typeof ProtocolConflictRequestSchema>;
 
@@ -152,14 +159,33 @@ export const ActiveDirectiveForbidSchema = SponsorDirectiveReceiptSchema.extend(
   text: z.string().min(1).max(500),
 });
 
-/** The focus state repeats on every page; limit bounds forbids. A global
- * read excludes scoped instructions. Only an unchanged set can continue. */
+/** The approved onboarding instruction retains its own identity and full text.
+ * Later focus/unfocus determines current focus; it does not turn this source
+ * into a focus receipt or erase its disclosure provenance. */
+export const InitialSponsorInstructionSchema = z
+  .object({
+    directive_id: EnrollmentInstructionIdSchema,
+    source_kind: z.literal("enrollment-instruction"),
+    verb: z.literal("initial"),
+    fellow_id: FellowIdSchema,
+    sponsor_id: SponsorIdSchema,
+    problem_id: ProblemIdSchema.nullable(),
+    text: EnrollmentFirstDirectiveSchema,
+    created_at: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+  })
+  .strict();
+export type InitialSponsorInstruction = z.infer<typeof InitialSponsorInstructionSchema>;
+
+/** Initial instruction and focus state repeat on every page; limit bounds
+ * forbids. A global read excludes scoped instructions. Only an unchanged
+ * instruction context can continue. */
 const ActiveDirectiveResponseBase = z
   .object({
     schema: z.literal(DIRECTIVES_SCHEMA_ID),
     fellow_id: FellowIdSchema,
     sponsor_id: SponsorIdSchema,
     snapshot_seq: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    initial_instruction: InitialSponsorInstructionSchema.nullable().optional(),
     focus: ActiveDirectiveFocusSchema.nullable(),
     forbids: z.array(ActiveDirectiveForbidSchema).max(100),
     restart_url: z

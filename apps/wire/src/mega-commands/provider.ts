@@ -10,6 +10,7 @@ import type { D1Database } from "@cloudflare/workers-types";
 import { loadReviewQueue } from "../discovery/review-queue-service.ts";
 import { authorizeFellowWrite, type FellowCredentialBinding } from "../enrollment/service.ts";
 import { loadLiveHypotheses } from "../ledger/hypotheses-service.ts";
+import { getRemainingBudget } from "../sessions/quota.ts";
 import { selectBackToObjectMove } from "./back-to-object-moves.ts";
 import { selectNormalizeConflictMove } from "./conflict-moves.ts";
 import { selectRecordDeadEndMove } from "./dead-end-moves.ts";
@@ -32,6 +33,7 @@ export { filterMovesByPermissions, PROMOTION_MOVE_KINDS } from "./move-permissio
 export interface ProblemMovesRequest {
   readonly problemId: string;
   readonly fellowId: string;
+  readonly sponsorPromotionRateLimit?: string | number;
   readonly role: ProblemRole | "none";
   readonly effectivePermissions: Record<string, boolean>;
   readonly db?: D1Database;
@@ -45,6 +47,7 @@ export interface ProblemMovesRequest {
 
 export interface TriageMovesRequest {
   readonly fellowId: string;
+  readonly sponsorPromotionRateLimit?: string | number;
   readonly assignments: readonly HelloAssignment[];
   readonly db?: D1Database;
   readonly credential?: FellowCredentialBinding;
@@ -126,6 +129,7 @@ export class TruthfulProductionMovesProvider extends LedgerMovesProvider {
   constructor() {
     super({
       loadQueue: loadReviewQueue,
+      readBudget: getRemainingBudget,
       templateFor: getMoveTemplate,
       authorize: authorizeFellowWrite,
       now: () => Date.now(),

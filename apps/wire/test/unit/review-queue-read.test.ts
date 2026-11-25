@@ -3,6 +3,7 @@ import { test } from "bun:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { ReviewQueueResponseSchema } from "@asimposium/contracts/review-queue";
 import { renderReviewQueueHtml, renderReviewQueueMarkdown } from "@asimposium/render";
 import type { D1Database } from "@cloudflare/workers-types";
 import {
@@ -21,7 +22,8 @@ const sha = (s: string) => createHash("sha256").update(s).digest("hex");
 const instant = (n: number) => new Date(Date.UTC(2026, 8, 1) + n * 1000).toISOString();
 function fixture() {
   const sql = new Database(":memory:");
-  sql.exec(`CREATE TABLE problems(id TEXT PRIMARY KEY, public_seq INTEGER, status TEXT, unlisted INTEGER);
+  sql.exec(`CREATE TABLE problems(id TEXT PRIMARY KEY, public_seq INTEGER, status TEXT, unlisted INTEGER,
+      admission_mode TEXT NOT NULL DEFAULT 'open');
     CREATE TABLE events(id TEXT PRIMARY KEY, problem_id TEXT, seq INTEGER, object_kind TEXT,
       type TEXT, object_id TEXT, object_version INTEGER, created_at TEXT, actor_fellow_id TEXT,
       actor_sponsor_id TEXT, payload_sha256 TEXT, UNIQUE(problem_id,seq));
@@ -61,7 +63,9 @@ function fixture() {
     },
   } as unknown as D1Database;
   function problem(id = "P-MATH", status = "active", unlisted = 0) {
-    sql.prepare("INSERT INTO problems VALUES (?, 1000, ?, ?)").run(id, status, unlisted);
+    sql
+      .prepare("INSERT INTO problems(id,public_seq,status,unlisted) VALUES (?, 1000, ?, ?)")
+      .run(id, status, unlisted);
   }
   function claim(
     id: string,
@@ -120,7 +124,9 @@ function fixture() {
   // The production service injects the real prepareScientificDispositions/foldScientificRows.
   const science: ReviewQueueScience = {
     prepare: (db, _p, _c, _n, target) =>
-      db.prepare("SELECT ? AS target_version").bind(target.version),
+      db
+        .prepare("SELECT ? AS target_version, 0 AS scientific_budget_exceeded")
+        .bind(target.version),
     fold: async (rows) => ({
       disposition: "open",
       currentVersion: rows[0]?.target_version ?? null,
@@ -148,6 +154,26 @@ function fixture() {
   return { sql, db, problem, claim, science, discover, metadata };
 }
 
+test("archiving admissions removes public review work and reopening restores it", async () => {
+  const f = fixture();
+  try {
+    f.problem();
+    f.claim("C-1", 1);
+    for (const mode of ["archived-read-only", "invite-only", "approval-required", "open"]) {
+      f.sql.query("UPDATE problems SET admission_mode=?").run(mode);
+      for (const query of [{}, { problem: "P-MATH" }]) {
+        const page = await readReviewQueue(f.db, query, f.science);
+        assert.deepEqual(
+          page.candidates.map((item) => item.claim_id),
+          mode === "archived-read-only" ? [] : ["C-1"],
+        );
+      }
+    }
+  } finally {
+    f.sql.close();
+  }
+});
+
 test("real SQLite: queue composes source-verified statements and exact links", async () => {
   const f = fixture();
   try {
@@ -163,6 +189,42 @@ test("real SQLite: queue composes source-verified statements and exact links", a
     f.sql.close();
   }
 });
+test("real SQLite: a readable stale statement is discoverable without borrowing prior support", async () => {
+  const f = fixture();
+  try {
+    f.problem();
+    f.claim("C-1", 1);
+    const stale: ReviewQueueScience = {
+      ...f.science,
+      async fold(rows, at) {
+        return {
+          ...(await f.science.fold(rows, at)),
+          disposition: "strongly-supported",
+          stale: true,
+        };
+      },
+    };
+    const response = ReviewQueueResponseSchema.parse(await readReviewQueue(f.db, {}, stale));
+    const candidate = response.candidates[0];
+    assert.ok(candidate);
+    assert.equal(candidate.need, "recheck-stale-inputs");
+    assert.equal(candidate.stale, true);
+    assert.equal(candidate.disposition, "strongly-supported");
+    assert.equal(candidate.best_recorded_tier, "none");
+    assert.equal(candidate.read_url, "/p/P-MATH/claims/C-1@1.md?through=1000");
+    for (const render of [renderReviewQueueMarkdown, renderReviewQueueHtml]) {
+      const face = render(response);
+      assert.ok(face.includes("strongly-supported · stale"));
+      assert.ok(face.includes("cannot-verify"));
+    }
+    f.sql.exec("INSERT INTO content_controls VALUES ('P-MATH', 'C-1', 'hidden', 1)");
+    const hidden = await readReviewQueue(f.db, {}, stale);
+    assert.equal(hidden.candidates.length, 0);
+    assert.equal(hidden.omitted[0]?.reason, "content_unavailable");
+  } finally {
+    f.sql.close();
+  }
+});
 for (const mode of ["private", "unlisted", "resolved", "unpublished"] as const) {
   test(`real SQLite: ${mode} work is absent from discovery`, async () => {
     const f = fixture();
@@ -174,7 +236,16 @@ for (const mode of ["private", "unlisted", "resolved", "unpublished"] as const) 
       );
       f.claim("C-1", 1, { problem: "P-HIDDEN" });
       if (mode === "unpublished") f.sql.exec("UPDATE problems SET public_seq=0");
-      const result = await readReviewQueue(f.db, {}, f.science);
+      const result = await readReviewQueue(
+        f.db,
+        {},
+        {
+          ...f.science,
+          async fold(rows, at) {
+            return { ...(await f.science.fold(rows, at)), stale: true };
+          },
+        },
+      );
       assert.equal(result.candidates.length, 0);
       assert.equal(result.scanned, 0);
       assert.equal(JSON.stringify(result).includes("P-HIDDEN"), false);
@@ -240,6 +311,10 @@ for (const change of [
   "detach-digest",
   "hide-claim",
   "hide-problem",
+  "hide-head-version",
+  "hide-head-event",
+  "hide-author-version",
+  "hide-author-event",
 ] as const) {
   test(`real SQLite: ${change} is excluded without publishing retained bytes`, async () => {
     const f = fixture();
@@ -276,7 +351,29 @@ for (const change of [
         f.sql.exec(
           "INSERT INTO content_controls SELECT problem_id, 'problem', 'hidden', 1 FROM events LIMIT 1",
         );
-      const result = await readReviewQueue(f.db, {}, f.science);
+      const hiddenSources: Partial<Record<typeof change, string>> = {
+        "hide-head-version": "C-1@2",
+        "hide-head-event": "#4",
+        "hide-author-version": "C-1@1",
+        "hide-author-event": "#1",
+      };
+      const hiddenSource = hiddenSources[change];
+      if (hiddenSource !== undefined) {
+        f.sql
+          .prepare("INSERT INTO content_controls VALUES ('P-MATH', ?, 'hidden', 1)")
+          .run(hiddenSource);
+        f.sql.exec("INSERT INTO content_controls VALUES ('P-MATH', 'C-1', 'visible', 2)");
+      }
+      const result = await readReviewQueue(
+        f.db,
+        {},
+        {
+          ...f.science,
+          async fold(rows, at) {
+            return { ...(await f.science.fold(rows, at)), stale: true };
+          },
+        },
+      );
       assert.equal(result.candidates.length, 0);
       assert.equal(result.omitted[0]?.reason, "content_unavailable");
       assert.equal(JSON.stringify(result).includes("CANARY"), false);
@@ -346,10 +443,14 @@ test("real SQLite: only exact, available, committed dependency pins affect ranki
     f.sql
       .prepare("UPDATE event_content SET redacted_at='removed' WHERE event_id=?")
       .run(hidden.event_id);
+    f.claim("C-6", 6, { pins: [premise] });
+    f.sql.exec("INSERT INTO content_controls VALUES ('P-MATH', 'C-6@1', 'hidden', 1)");
     const result = await readReviewQueue(f.db, {}, f.science);
     assert.equal(result.candidates[0]?.claim_id, "C-1");
     assert.equal(result.candidates[0]?.direct_dependents, 1);
     assert.equal(result.candidates.find((x) => x.claim_id === "C-2")?.direct_dependents, 0);
+    f.sql.exec("INSERT INTO content_controls VALUES ('P-MATH', 'C-6@1', 'visible', 2)");
+    assert.equal((await readReviewQueue(f.db, {}, f.science)).candidates[0]?.direct_dependents, 2);
   } finally {
     f.sql.close();
   }
@@ -368,21 +469,23 @@ test("real SQLite: old dependent versions and malformed pins do not invent conse
     f.sql.close();
   }
 });
-test("real SQLite: oversized histories are omitted before scientific replay starts", async () => {
+test("real SQLite: an oversized scientific timeline is never partially folded", async () => {
   const f = fixture();
   try {
     f.problem();
     f.claim("C-1", 1);
-    f.sql.prepare("UPDATE event_content SET payload_json=?").run("x".repeat(1024 * 1024 + 1));
     let replayed = 0;
     const result = await readReviewQueue(
       f.db,
       {},
       {
         ...f.science,
-        prepare(...args) {
+        prepare(db) {
+          return db.prepare("SELECT 1 AS target_version, 1 AS scientific_budget_exceeded");
+        },
+        fold(...args) {
           replayed += 1;
-          return f.science.prepare(...args);
+          return f.science.fold(...args);
         },
       },
     );

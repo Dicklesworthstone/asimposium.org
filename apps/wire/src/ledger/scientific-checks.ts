@@ -1,6 +1,7 @@
 import {
   type ClaimDependencyPin,
   ClaimDependencyPinsSchema,
+  ClaimKindSchema,
   FormalArtifactSchema,
   type GroundedFalsificationCheck,
   type ScientificEvidenceReference,
@@ -9,12 +10,14 @@ import {
   type ScientificVerification,
 } from "@asimposium/contracts";
 import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types";
+import { claimContentDigest } from "../krater/claim-version.ts";
 import { sha256Hex } from "../krater/krater.ts";
 import { eventContentHiddenSql } from "../krater/public-content.ts";
 import {
   ClaimDependencyAdmissionError,
   requireLiveClaimDependencyClosure,
 } from "./claim-dependency-preflight.ts";
+import { scanFormalArtifact } from "./evidence-class.ts";
 import {
   EvidenceGroundingError,
   type GroundingWitness,
@@ -118,6 +121,50 @@ export function readScientificProvenance(value: unknown): ScientificProvenance |
   return parsed.success ? parsed.data : null;
 }
 
+/** The event digest authenticates publication bytes, not a mutable projection's
+ * semantic identity. Check the exact target and recompute the claim digest
+ * from those bytes before it can authorize a verification or earn standing.
+ * A disagreeing projection is unavailable; do not silently repair its authority
+ * during a read or substitute a newer claim version. */
+export async function checkedScientificClaimContent(
+  payload: Record<string, unknown>,
+  expected: {
+    readonly claimId: string;
+    readonly version: number;
+    readonly statement: string;
+    readonly contentDigest: string;
+  },
+): Promise<void> {
+  if (
+    !Number.isSafeInteger(expected.version) ||
+    expected.version < 1 ||
+    payload.claim_id !== expected.claimId ||
+    !ClaimKindSchema.safeParse(payload.kind).success ||
+    typeof payload.statement !== "string" ||
+    payload.statement.length === 0 ||
+    payload.statement !== expected.statement ||
+    (payload.falsifier !== undefined &&
+      payload.falsifier !== null &&
+      typeof payload.falsifier !== "string") ||
+    (expected.version > 1 && payload.base_version !== expected.version - 1)
+  ) {
+    throw new ScientificInputError("The public claim payload does not match its exact version.");
+  }
+  const contentDigest = await claimContentDigest(
+    {
+      kind: payload.kind as string,
+      statement: payload.statement,
+      falsifier: typeof payload.falsifier === "string" ? payload.falsifier : null,
+    },
+    sha256Hex,
+  );
+  if (contentDigest !== expected.contentDigest) {
+    throw new ScientificInputError(
+      "The public claim semantic digest does not match its immutable publication.",
+    );
+  }
+}
+
 export async function readScientificClaim(
   db: D1Database,
   problemId: string,
@@ -161,13 +208,12 @@ export async function findScientificClaim(
     .first<ContentRow & { content_digest: string; statement: string }>();
   if (!row) return null;
   const payload = await checkedScientificPayload(row);
-  if (
-    payload.claim_id !== claimId ||
-    payload.statement !== row.statement ||
-    (version > 1 && payload.base_version !== version - 1)
-  ) {
-    throw new ScientificInputError("The public claim payload does not match its exact version.");
-  }
+  await checkedScientificClaimContent(payload, {
+    claimId,
+    version,
+    statement: row.statement,
+    contentDigest: row.content_digest,
+  });
   return {
     eventId: row.event_id,
     payloadDigest: row.payload_sha256,
@@ -275,18 +321,8 @@ export async function validateFalsificationCheck(
 }
 
 export async function inspectFormalArtifact(value: unknown): Promise<string | null> {
-  const parsed = FormalArtifactSchema.safeParse(value);
-  if (!parsed.success) return null;
-  const artifact = parsed.data;
-  // This is only the conservative source/axiom scan from Fable §6.5. A passed
-  // scan never says that Lean compiled or that the theorem matches the claim.
-  if (
-    /\b(?:sorry|sorryAx|admit|axiom)\b/u.test(artifact.source) ||
-    /\b(?:sorry|sorryAx|admit)\b/u.test(artifact.axiom_report) ||
-    !artifact.source.includes(artifact.declaration) ||
-    !artifact.axiom_report.includes(artifact.declaration)
-  )
-    return null;
+  const artifact = scanFormalArtifact(value);
+  if (!artifact) return null;
   return `sha256:${await sha256Hex(artifact.source)}`;
 }
 

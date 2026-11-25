@@ -240,6 +240,7 @@ export async function directiveDisclosureFixture(
     principal,
     receiver,
     binding,
+    token: issued.token,
     target,
     read,
     command,

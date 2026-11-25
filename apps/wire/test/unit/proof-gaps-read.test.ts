@@ -1,6 +1,7 @@
 import { Database } from "bun:sqlite";
 import { test } from "bun:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import type { GapFileRequest, GapTransitionRequest } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
 import {
@@ -156,6 +157,105 @@ test("historical reads keep the open gap before its recorded settlement", async 
     f.close();
   }
 });
+test("settlement notices belong to their exact event and remain separate from filing notices", async () => {
+  const f = fixture();
+  const receipt = JSON.parse(
+    readFileSync(
+      new URL(
+        "../../../../packages/contracts/test/fixtures/valid/screening-publication-warning-provenance.json",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+  const filingNotice = {
+    category: "off-topic",
+    action: "published-with-warning",
+    notice: "off-scope",
+  };
+  try {
+    const filing = await f.add(2);
+    await f.add(3);
+    const settlement = await f.add(4, "gap.closed-by", "G-2", {
+      gap_id: "G-2",
+      outcome: "closed-by",
+      closed_by: "C-8@2",
+    });
+    f.sql
+      .query("INSERT INTO screening_publications VALUES(?,?)")
+      .run(filing, JSON.stringify({ ...receipt, public_action: filingNotice }));
+    f.sql
+      .query("INSERT INTO screening_publications VALUES(?,?)")
+      .run(settlement, JSON.stringify(receipt));
+    const past = (await f.read({ through: 3 })).face;
+    const current = (await f.read()).face;
+    assert.equal(past.gaps[0]?.status, "open");
+    assert.equal(past.gaps[0]?.last_event_screening_notice, undefined);
+    assert.deepEqual(past.gaps[0]?.screening_notice, filingNotice);
+    assert.deepEqual(current.gaps[0]?.screening_notice, filingNotice);
+    assert.deepEqual(current.gaps[0]?.last_event_screening_notice, receipt.public_action);
+    assert.equal(current.gaps[0]?.last_event.event_id, settlement);
+    assert.equal(current.gaps[1]?.last_event_screening_notice, undefined);
+    assert.ok(!JSON.stringify(current).includes(receipt.input_digest));
+    assert.ok(!JSON.stringify(current).includes(receipt.model_version));
+    f.sql
+      .query("UPDATE screening_publications SET provenance_json=? WHERE event_id=?")
+      .run(JSON.stringify({ ...receipt, private_detail: "PRIVATE_CANARY" }), settlement);
+    await assert.rejects(f.read(), /PROOF_GAPS_unavailable/);
+    // The same malformed receipt is unreachable once its decision is withheld.
+    f.sql.exec("INSERT INTO content_controls VALUES('P-DEMO','#4',1,'hidden')");
+    const hidden = (await f.read()).face.gaps[0]!;
+    assert.equal(hidden.status, "unavailable");
+    assert.equal(hidden.closed_by, null);
+    assert.equal(hidden.last_event_screening_notice, undefined);
+    assert.deepEqual(hidden.screening_notice, filingNotice);
+    f.sql
+      .query("UPDATE screening_publications SET provenance_json=? WHERE event_id=?")
+      .run(JSON.stringify(receipt), settlement);
+    f.sql.exec("INSERT INTO content_controls VALUES('P-DEMO','#4',2,'visible')");
+    assert.deepEqual((await f.read()).face, current);
+  } finally {
+    f.close();
+  }
+});
+for (const outcome of ["closed-by", "withdrawn"] as const) {
+  for (const mutation of ["redacted", "corrupt", "oversized", "mismatched", "hidden-filing"]) {
+    test(`${outcome} ${mutation} cannot qualify an unavailable gap decision with a warning`, async () => {
+      const f = fixture();
+      const receipt = readFileSync(
+        new URL(
+          "../../../../packages/contracts/test/fixtures/valid/screening-publication-warning-provenance.json",
+          import.meta.url,
+        ),
+        "utf8",
+      );
+      try {
+        await f.add(2);
+        const decision = await f.add(3, `gap.${outcome}`, "G-2", {
+          gap_id: mutation === "mismatched" ? "G-99" : "G-2",
+          outcome,
+          ...(outcome === "closed-by" ? { closed_by: "C-8@2" } : {}),
+        });
+        f.sql.query("INSERT INTO screening_publications VALUES(?,?)").run(decision, receipt);
+        if (mutation === "redacted")
+          f.sql
+            .query("UPDATE event_content SET redacted_at=? WHERE event_id=?")
+            .run(date, decision);
+        else if (mutation === "hidden-filing")
+          f.sql.exec("INSERT INTO content_controls VALUES('P-DEMO','#2',1,'hidden')");
+        else if (mutation === "corrupt" || mutation === "oversized")
+          f.sql
+            .query("UPDATE event_content SET payload_json=? WHERE event_id=?")
+            .run(mutation === "corrupt" ? "{}" : "x".repeat(17000), decision);
+        const gap = (await f.read()).face.gaps[0]!;
+        assert.equal(gap.status, "unavailable");
+        assert.equal(gap.last_event_screening_notice, undefined);
+      } finally {
+        f.close();
+      }
+    });
+  }
+}
 test("withdrawn settlement content leaves unknown history, never a known closure or closing reference", async () => {
   const f = fixture();
   try {

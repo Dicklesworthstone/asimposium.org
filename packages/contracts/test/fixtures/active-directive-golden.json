@@ -14,6 +14,16 @@
     "problem_id": "P-4DSP",
     "scope": "problem",
     "snapshot_seq": 12,
+    "initial_instruction": {
+      "directive_id": "EI-00000000000000000000000000000001",
+      "source_kind": "enrollment-instruction",
+      "verb": "initial",
+      "fellow_id": "F-example",
+      "sponsor_id": "usr_example",
+      "problem_id": "P-4DSP",
+      "text": "Begin with the finite construction, retaining its assumptions explicitly.",
+      "created_at": 900
+    },
     "focus": {
       "schema": "https://a.asimposium.org/schemas/directives.v1.json",
       "directive_id": "DIR-00000000000000000000000000000001",

@@ -5,6 +5,7 @@ import {
   roomProblem,
   workshopRoomName,
 } from "../../../../packages/contracts/src/herald-room-model.ts";
+import { hiddenByContentControlSql } from "../krater/public-content.ts";
 
 export interface HeraldDatabase {
   prepare(sql: string): {
@@ -16,10 +17,12 @@ export interface HeraldNamespace {
   get(id: unknown): { fetch(request: Request): Promise<Response> };
 }
 export const HERALD_DELIVERY_LIMITS = { batch: 4, timeoutMs: 5_000, maxBackoffMs: 60_000 } as const;
-// Dormant problems retain their public ledger, but release live room sockets.
-// Material reactivation makes the same room available again automatically.
-export const HERALD_HEAD_SQL =
-  "SELECT public_seq AS seq FROM problems WHERE id = ? AND status NOT IN ('private-draft', 'dormant')";
+// Every handshake, acknowledgement and wake uses the same current visibility
+// rule as public event tails. A retained problem row is not publication authority.
+// Dormant problems retain their ledger but also release live room sockets.
+export const HERALD_HEAD_SQL = `SELECT public_seq AS seq FROM problems
+  WHERE id = ? AND status NOT IN ('private-draft', 'dormant')
+    AND NOT ${hiddenByContentControlSql("problems.id", "'problem'")}`;
 export async function publicRoomHead(
   db: HeraldDatabase,
   id: string,

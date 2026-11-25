@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { ScreeningPromotionDeniedResponseSchema } from "@asimposium/contracts";
 import {
   ScreeningAppealDecisionSchema,
   ScreeningAppealRequestSchema,
@@ -11,6 +12,7 @@ import {
   sponsorScreeningCases,
   submitScreeningAppeal,
 } from "../../src/moderation/appeals-store";
+import { operatorQuarantineCase } from "../../src/moderation/operator-http";
 import { decideScreeningCase, screeningCaseFor } from "../../src/moderation/store";
 import { screenPublicCandidate } from "../../src/screening/public-candidate";
 import {
@@ -51,6 +53,23 @@ async function rejected(f: Fixture, candidate = f.input()) {
   ).toBe(true);
   return caseId;
 }
+async function machineDenied(f: Fixture, candidate = f.input()) {
+  const response = await screenPublicCandidate(
+    (input) =>
+      syntheticScreeningObservation(input, {
+        decision: "reject",
+        coarse_category: "injection",
+        provider_status: "ok",
+      }),
+    { DB: f.db } as Env,
+    candidate,
+    { sponsorId: SPONSOR, route: "hypotheses" },
+  );
+  if (!(response instanceof Response)) throw new Error("Expected a publication refusal");
+  expect(response.status).toBe(403);
+  expect(response.headers.get("cache-control")).toBe("private, no-store");
+  return ScreeningPromotionDeniedResponseSchema.parse(await response.json());
+}
 function decision(appealId: string, outcome: "release" | "uphold" = "release") {
   return {
     appeal_id: appealId,
@@ -68,6 +87,108 @@ async function withFixture(fn: (f: Fixture) => Promise<void>) {
   }
 }
 describe("human screening appeals", () => {
+  test("a direct model denial retains one exact private review case without inventing a human decision", () =>
+    withFixture(async (f) => {
+      const candidate = f.input("DIRECT_REJECTION_PRIVATE_CANARY: a bounded mathematical claim.");
+      const before = f.state();
+      const denied = await machineDenied(f, candidate);
+      expect(denied.case_id).toMatch(/^QC-[0-9A-HJKMNP-TV-Z]{26}$/);
+      if (denied.case_id === undefined) throw new Error("The rejected candidate was not retained");
+      expect(Object.keys(denied).sort()).toEqual(["appeal", "case_id", "coarse_category", "code"]);
+      expect(await machineDenied(f, candidate)).toEqual(denied);
+      expect(f.sql.query("SELECT COUNT(*) AS n FROM screening_cases").get()).toEqual({ n: 1 });
+      expect(f.sql.query("SELECT COUNT(*) AS n FROM screening_refusals").get()).toEqual({ n: 1 });
+      expect(f.sql.query("SELECT COUNT(*) AS n FROM operator_audit").get()).toEqual({ n: 0 });
+      expect(
+        f.sql
+          .query("SELECT state,outcome,decision_path,decided_at,decided_by FROM screening_cases")
+          .get(),
+      ).toEqual({
+        state: "pending",
+        outcome: "quarantine",
+        decision_path: "provider",
+        decided_at: null,
+        decided_by: null,
+      });
+      const own = await sponsorScreeningCases(f.db, SPONSOR, denied.case_id);
+      expect(own.cases[0]).toMatchObject({
+        case_id: denied.case_id,
+        state: "pending",
+        appeal: null,
+      });
+      expect((await sponsorScreeningCases(f.db, "usr_other", denied.case_id)).cases).toEqual([]);
+      const detail = await operatorQuarantineCase(f.db, denied.case_id);
+      expect(detail.status).toBe(200);
+      expect(await detail.json()).toMatchObject({
+        state: "pending",
+        candidate: { statement: candidate.statement, falsifier: candidate.falsifier },
+        item: { decision_path: "provider" },
+      });
+      for (const value of [denied, own, f.sql.query("SELECT * FROM moderation_log").all()])
+        expect(JSON.stringify(value)).not.toContain(candidate.statement);
+      expect(f.state()).toEqual(before);
+    }));
+
+  test("a model denial reaches a real operator decision and independent sponsor appeal before explicit publication", () =>
+    withFixture(async (f) => {
+      const candidate = f.input();
+      const denied = await machineDenied(f, candidate);
+      const caseId = denied.case_id;
+      if (caseId === undefined) throw new Error("The rejected candidate was not retained");
+      const before = f.state();
+      await expect(
+        submitScreeningAppeal(f.db, SPONSOR, { case_id: caseId, statement: explanation }, "early"),
+      ).rejects.toThrow("NOT_FOUND");
+      await decideScreeningCase(f.db, original, {
+        caseId,
+        decision: "confirm_rejection",
+        reason,
+      });
+      expect(await machineDenied(f, candidate)).toEqual(denied);
+      const appeal = await submitScreeningAppeal(
+        f.db,
+        SPONSOR,
+        { case_id: caseId, statement: explanation },
+        "direct-rejection-appeal",
+      );
+      await expect(
+        decideScreeningAppeal(f.db, original, decision(appeal.appeal_id), "original"),
+      ).rejects.toThrow("REVIEWER");
+      await expect(
+        decideScreeningAppeal(f.db, SPONSOR, decision(appeal.appeal_id), "sponsor"),
+      ).rejects.toThrow("REVIEWER");
+      await decideScreeningAppeal(f.db, appellate, decision(appeal.appeal_id), "independent");
+      expect(f.state()).toEqual(before);
+      const screened = await f.screen(candidate);
+      if (screened instanceof Response) throw new Error("The exact released candidate was held");
+      expect(screened.provenance.decision_path).toBe("operator-release");
+      expect(screened.provenance.review_case_id).toBe(caseId);
+      await f.write(candidate, screened);
+      expect(f.state().events).toHaveLength(1);
+      const changed = await machineDenied(f, {
+        ...candidate,
+        statement: `${candidate.statement} A different candidate is not authorized by that appeal.`,
+      });
+      expect(changed.case_id).not.toBe(caseId);
+      expect(f.state().events).toHaveLength(1);
+    }));
+
+  test("failure to retain a directly rejected candidate never weakens the refusal or fabricates a case", () =>
+    withFixture(async (f) => {
+      f.sql.exec(`CREATE TRIGGER refuse_case_retention BEFORE INSERT ON screening_cases
+        BEGIN SELECT RAISE(ABORT, 'LOCAL_CASE_RETENTION_UNAVAILABLE'); END`);
+      const before = f.state();
+      expect(await machineDenied(f)).toEqual({
+        code: "POLICY_DENIED",
+        coarse_category: "injection",
+        appeal: "SPONSOR_APPEAL_AVAILABLE",
+      });
+      expect(f.sql.query("SELECT COUNT(*) AS n FROM screening_cases").get()).toEqual({ n: 0 });
+      expect(f.sql.query("SELECT COUNT(*) AS n FROM moderation_log").get()).toEqual({ n: 0 });
+      expect(f.sql.query("SELECT COUNT(*) AS n FROM operator_audit").get()).toEqual({ n: 0 });
+      expect(f.state()).toEqual(before);
+    }));
+
   test("strict contracts reject caller identities, scientific overrides and forged freshness", () => {
     const req = { case_id: `QC-${"0".repeat(26)}`, statement: explanation };
     expect(ScreeningAppealRequestSchema.safeParse(req).success).toBe(true);

@@ -1,6 +1,6 @@
 import { ScreeningPublicationNoticeSchema } from "@asimposium/contracts";
 import type { ProofGapEvent } from "@asimposium/contracts/proof-gaps";
-import type { PackCandidate } from "@asimposium/render";
+import { type PackCandidate, screeningNoticeText } from "@asimposium/render";
 import type { DependencyClosure } from "../ledger/claim-dependency-closure.ts";
 import type { ProofGapPage } from "../ledger/proof-gaps-read.ts";
 
@@ -136,6 +136,11 @@ export function composeClaimProofObligations(
     if (!path) continue;
     if (gap.status === "open" || gap.status === "unavailable") unresolved++;
     else settled++;
+    const decisionNotice =
+      (gap.status === "closed-by" || gap.status === "withdrawn") &&
+      gap.last_event_screening_notice !== undefined
+        ? ScreeningPublicationNoticeSchema.parse(gap.last_event_screening_notice)
+        : undefined;
     const source = `${readUrl}&target=${gap.gap_id}`;
     const reference = {
       problem,
@@ -148,6 +153,7 @@ export function composeClaimProofObligations(
       filing: sourceEvent(gap.filing),
       last_event: sourceEvent(gap.last_event),
       closed_by: gap.status === "closed-by" ? gap.closed_by : null,
+      ...(decisionNotice === undefined ? {} : { last_event_screening_notice: decisionNotice }),
       source,
       target_read: `/p/${encodeURIComponent(problem)}/claims/${pin}.md?through=${through}`,
       notice:
@@ -189,7 +195,10 @@ export function composeClaimProofObligations(
         : { screening_notice: ScreeningPublicationNoticeSchema.parse(gap.screening_notice) }),
       stable_prefix: 5 + candidates.length,
       why_included:
-        "recorded proof obligation on this exact statement or a verified pinned premise; settlement is not proof",
+        "recorded proof obligation on this exact statement or a verified pinned premise; settlement is not proof" +
+        (decisionNotice === undefined
+          ? ""
+          : `. Recorded settlement (#${gap.last_event.seq}): ${screeningNoticeText(decisionNotice)}`),
     });
   }
   if (

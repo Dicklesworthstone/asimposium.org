@@ -157,10 +157,23 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, fixtures, env })
     assert.equal(result.client_context_cursor, cursor);
     assert.equal(result.revised_at_cursor, (await head()).public_seq);
     assert.equal(result.delta_pointer, `/p/${problemId}.md`);
+    const revised = await call(result.refetch_url);
+    assert.equal(revised.cursor, result.revised_at_cursor);
+    assert.equal(revised.statement.version, result.statement_version);
+    assert.equal(revised.statement.publication.seq, result.revised_at_cursor);
+    assert.deepEqual(await call(formulation.read_url), savedStatement);
     assert.equal(await count("events"), before + 1, "only the competing statement event commits");
     return result.revised_at_cursor;
   }
 
+  const orient = await call(`${path}/pack?profile=orient&max_tokens=4000`, undefined, author);
+  const formulation = JSON.parse(
+    orient.items.find((item) => item.kind === "problem-formulation").body,
+  );
+  assert.ok(orient.next_actions.some((action) => action.url === formulation.read_url));
+  const savedStatement = await call(formulation.read_url);
+  assert.equal(savedStatement.statement.statement, created.problem.statement);
+  assert.equal(savedStatement.statement.publication.seq, formulation.publication.seq);
   const saved = await draft();
   const beforeFutureContext = await head();
   const eventsBeforeFutureContext = await count("events");

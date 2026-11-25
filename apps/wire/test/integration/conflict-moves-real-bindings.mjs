@@ -77,7 +77,6 @@ await runLocalWorkerJourney(async (context) => {
   };
   const a = await promote("Zero squared is even.");
   const b = await promote("Zero squared is odd.");
-  const c = await promote("One squared is odd.");
   const assertRelation = (source, version, target, targetVersion = 1) =>
     call(
       `${path}/relations`,
@@ -135,6 +134,12 @@ await runLocalWorkerJourney(async (context) => {
   const first = await assertRelation(a, 1, b);
   const offered = await expectMove([`${a}@1`, `${b}@1`]);
   assert.deepEqual(await workingMove(), offered);
+  const publicMoves = () => call(`/p/${problem}/moves.json`);
+  assert.deepEqual(
+    normalization(await publicMoves()),
+    offered,
+    "anonymous Fellows can discover the same pinned disagreement before opening a session",
+  );
   assert.deepEqual(
     offered.contract.prefilled_hints,
     {
@@ -194,12 +199,18 @@ await runLocalWorkerJourney(async (context) => {
   );
   assert.match(normalized.conflict_id, /^CF-/);
   await expectMove(null);
+  assert.equal(
+    normalization(await publicMoves()),
+    undefined,
+    "the public face retires the task after the exact pair is normalized",
+  );
   assert.deepEqual(
     (await historical(first.seq)).move?.refs,
     offered.refs,
     "later normalization does not rewrite the captured recommendation",
   );
 
+  const c = await promote("One squared is odd.");
   const beforeRevision = await assertRelation(a, 1, c);
   await expectMove([`${a}@1`, `${c}@1`]);
   await call(

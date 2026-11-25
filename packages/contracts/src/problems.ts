@@ -1136,7 +1136,7 @@ export const ProblemGovernanceEventSchema = z
     }),
     GovernanceRecordSchema.extend({
       action: z.literal("enter-result-review"),
-      previous_status: z.enum(["active", "dormant"]),
+      previous_status: z.enum(["active", "dormant", "under-result-review"]),
       problem: governanceFormulation({
         status: z.literal("under-result-review"),
         // Retained pre-binding events remain readable but confer no result identity.

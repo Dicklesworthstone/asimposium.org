@@ -258,6 +258,7 @@ export function HypothesesView({
                         <p data-hypothesis-lifecycle={lifecycle.action}>
                           <strong>{LIFECYCLE_ACTION[lifecycle.action]}</strong>
                         </p>
+                        <ScreeningNotice notice={item.last_event_screening_notice} />
                         <WorkProduct>{lifecycle.reason}</WorkProduct>
                         {"successor_hypothesis_id" in lifecycle && (
                           <p>
@@ -286,6 +287,7 @@ export function HypothesesView({
                       <p>The refutation content is currently unavailable or withdrawn.</p>
                     ) : (
                       <>
+                        <ScreeningNotice notice={item.last_event_screening_notice} />
                         <WorkProduct>{item.kill.reason}</WorkProduct>
                         <p>
                           <Link
@@ -322,7 +324,9 @@ export function HypothesesView({
                     Problem history from this publication at this snapshot
                   </Link>
                 </p>
-                <ReportLink problemId={face.problem_id} target={item.hypothesis_id} />
+                {item.content !== null && (
+                  <ReportLink problemId={face.problem_id} target={item.hypothesis_id} />
+                )}
               </li>
             );
           })}

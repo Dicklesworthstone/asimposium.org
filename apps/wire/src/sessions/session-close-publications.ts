@@ -1,12 +1,16 @@
 import {
-  ClaimPublicationDraftSchema,
   type ClaimRevision,
   ClaimRevisionSchema,
   type DirectClaimRequest,
   DirectClaimRequestSchema,
+  type EvidenceRequest,
+  type HypothesisRequest,
   LedgerIntentSchema,
+  type RecordDeadEndRequest,
+  type ReviewRequest,
   SessionCloseResponseSchema,
   WorkshopObjectIdSchema,
+  WorkshopPublicationDraftSchema,
 } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
 import { sha256Hex } from "../split/policy.ts";
@@ -41,6 +45,30 @@ export type SessionClosePublication =
       readonly pin: SessionClosePublicationPin;
       readonly revisionJson: string;
       readonly data: ClaimRevision;
+    }
+  | {
+      readonly kind: "hypothesis";
+      readonly pin: SessionClosePublicationPin;
+      readonly publicationJson: string;
+      readonly data: HypothesisRequest;
+    }
+  | {
+      readonly kind: "evidence";
+      readonly pin: SessionClosePublicationPin;
+      readonly publicationJson: string;
+      readonly data: EvidenceRequest;
+    }
+  | {
+      readonly kind: "dead-end";
+      readonly pin: SessionClosePublicationPin;
+      readonly publicationJson: string;
+      readonly data: RecordDeadEndRequest;
+    }
+  | {
+      readonly kind: "review";
+      readonly pin: SessionClosePublicationPin;
+      readonly publicationJson: string;
+      readonly data: ReviewRequest;
     };
 
 interface PublicationRow {
@@ -66,8 +94,7 @@ function parseJson(value: string | null): unknown {
   }
 }
 
-/** Close publishes saved new claims and explicit claim replacements. Both
- * retain claim-ID receipts; other typed work keeps its own publication route.
+/** Close publishes complete saved research and explicit claim replacements.
  * Source bytes and intent come from the exact owned immutable draft revision. */
 export async function readSessionClosePublications(
   db: D1Database,
@@ -117,7 +144,6 @@ export async function readSessionClosePublications(
           : LedgerIntentSchema.safeParse(parseJson(row.ledger_intent_json));
       if (
         row.state !== "open" ||
-        row.type !== "claim-draft" ||
         !Number.isSafeInteger(row.current_version) ||
         row.current_version < 1 ||
         row.current_version >= Number.MAX_SAFE_INTEGER ||
@@ -132,6 +158,7 @@ export async function readSessionClosePublications(
       if (row.revision_json !== null) {
         const revision = ClaimRevisionSchema.safeParse(parseJson(row.revision_json));
         if (
+          row.type !== "claim-draft" ||
           row.publication_json !== null ||
           !revision.success ||
           (intent !== null &&
@@ -153,23 +180,49 @@ export async function readSessionClosePublications(
           data: revision.data,
         };
       }
-      const publication = ClaimPublicationDraftSchema.safeParse(parseJson(row.publication_json));
+      const publication = WorkshopPublicationDraftSchema.safeParse(parseJson(row.publication_json));
+      if (row.publication_json === null || !publication.success) {
+        throw new SessionClosePublicationError("INVALID_PUBLICATION");
+      }
+      const kind = "object_kind" in publication.data ? publication.data.object_kind : "claim";
+      const matchingType =
+        kind === "claim"
+          ? row.type === "claim-draft"
+          : kind === "dead-end"
+            ? row.type === "dead-end-draft"
+            : kind === "evidence"
+              ? row.type === "evidence-draft"
+              : row.type === "scratch" || row.type === "note";
       if (
-        row.publication_json === null ||
-        !publication.success ||
+        !matchingType ||
         (intent !== null &&
-          (!intent.success || intent.data.kind !== "create" || intent.data.target_kind !== "claim"))
+          (!intent.success || intent.data.kind !== "create" || intent.data.target_kind !== kind))
       ) {
         throw new SessionClosePublicationError("INVALID_PUBLICATION");
       }
-      return {
-        kind: "create",
+      const saved = {
         pin: {
           workshopId,
           version: row.current_version,
           publicationDigest: await sha256Hex(row.publication_json),
         },
         publicationJson: row.publication_json,
+      };
+      if ("object_kind" in publication.data) {
+        switch (publication.data.object_kind) {
+          case "hypothesis":
+            return { ...saved, kind: "hypothesis", data: publication.data.payload };
+          case "evidence":
+            return { ...saved, kind: "evidence", data: publication.data.payload };
+          case "dead-end":
+            return { ...saved, kind: "dead-end", data: publication.data.payload };
+          case "review":
+            return { ...saved, kind: "review", data: publication.data.payload };
+        }
+      }
+      return {
+        ...saved,
+        kind: "create",
         data: DirectClaimRequestSchema.parse({
           ...publication.data,
           workshop_id: workshopId,

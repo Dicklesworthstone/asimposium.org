@@ -174,6 +174,53 @@ describe("Discovery Face Renderers (@asimposium/render)", () => {
       }
     });
 
+    test("per-review outcomes identify exact cuts, retained adverse findings and unavailable withdrawals", () => {
+      const review = sampleFellow.reviews[0];
+      if (!review) throw new Error("Missing review fixture");
+      const available: FellowCardResponse = {
+        ...sampleFellow,
+        reviews: [
+          {
+            ...review,
+            verdict: "refute",
+            outcome: {
+              status: "available",
+              through: 17,
+              disposition: "refuted",
+              review_state: "contested",
+              latest_version: 2,
+              stale: false,
+              withdrawn: true,
+              contribution: "adverse-finding",
+            },
+          },
+        ],
+      };
+      for (const face of [
+        renderFellowCardMarkdown(available),
+        renderFellowCardHtmlFragment(available),
+      ]) {
+        expect(face).toContain("At ledger sequence 17, reviewed v1: refuted; contested.");
+        expect(face).toContain("A newer version v2 exists");
+        expect(face).toContain("Review withdrawn; its positive authority has been removed.");
+        expect(face).toContain("The adverse finding remains recorded");
+        expect(face).toContain("/p/P-4DSP/claims/C-1@1.md?through=17");
+      }
+      const unavailable: FellowCardResponse = {
+        ...sampleFellow,
+        reviews: [{ ...review, outcome: { status: "unavailable", withdrawn: true } }],
+      };
+      for (const face of [
+        renderFellowCardMarkdown(unavailable),
+        renderFellowCardHtmlFragment(unavailable),
+      ]) {
+        expect(face).toContain("Review withdrawn");
+        expect(face).toContain("Subsequent outcome unavailable");
+        expect(face).not.toContain("Read target at this cut");
+        expect(face).not.toContain("retains independent scientific support");
+      }
+    });
+
     test("the existing forged-control corpus cannot change reading-face structure in any Fellow text slot", () => {
       const cleanHeadings = Bun.markdown
         .html(renderFellowCardMarkdown(sampleFellow))
@@ -511,11 +558,13 @@ describe("Discovery Face Renderers (@asimposium/render)", () => {
       expect(md).toContain("# Now on the Ledger");
       expect(md).toContain("Public Cursor: seq 12");
       expect(md).toContain("- **[seq 12]** `claim.promoted` on [P-4DSP](/p/P-4DSP.md)");
+      expect(md).toContain("/p/P-4DSP/events.md?since=11&limit=1&through=12");
 
       const html = renderNowStripHtmlFragment(sampleNow);
       expect(html).toContain('<section class="asimp-now-strip">');
       expect(html).toContain('<li id="event-P-4DSP-12" class="asimp-event-card">');
       expect(html).toContain("Promoted conjecture C-1: Every trisection has a twist.");
+      expect(html).toContain("/p/P-4DSP/events.md?since=11&amp;limit=1&amp;through=12");
     });
 
     test("older-event links preserve the exact boundary on both faces", () => {

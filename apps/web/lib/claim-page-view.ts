@@ -4,6 +4,10 @@ import type {
   ScreeningPublicationNotice,
 } from "@asimposium/contracts";
 import { ClaimStatusBasisSchema } from "@asimposium/contracts";
+import {
+  type ClaimProofObligationsView,
+  readClaimProofObligations,
+} from "./claim-proof-obligations";
 
 type FaceItem = ClaimFaceResponse["items"][number];
 
@@ -158,6 +162,7 @@ export interface EpistemicGap {
 }
 
 export interface WhatRemainsUnverifiedViewModel {
+  readonly proofObligations: ClaimProofObligationsView;
   readonly gaps: readonly EpistemicGap[];
   readonly omissions: readonly { readonly reason: string; readonly detail?: string }[];
   readonly degraded: readonly string[];
@@ -487,6 +492,7 @@ export function buildClaimPageViewModel(
   const isSuperseded = state.latest_version > state.version;
   const cut = `?through=${face.cursor}`;
   const agentPath = `${origin}/p/${encodeURIComponent(face.problem)}/claims/${exactTarget}`;
+  const proofObligations = readClaimProofObligations(face);
 
   // 1. Parse published face items
   let authorDetail: ParsedClaimDetail | null = null;
@@ -580,6 +586,8 @@ export function buildClaimPageViewModel(
       : `Evidence ceiling unavailable · ${rootAssessment.reason}`
     : structuralCeiling;
 
+  const machineChecked =
+    state.disposition === "strongly-supported" && state.certified_artifact && !state.stale;
   const badges: ClaimBadges = {
     disposition: state.disposition,
     dispositionClass: `badge-disposition-${state.disposition}`,
@@ -590,8 +598,8 @@ export function buildClaimPageViewModel(
       label: state.stale ? "stale" : isSuperseded ? `superseded by v${state.latest_version}` : null,
     },
     machineChecked: {
-      earned: state.certified_artifact,
-      label: state.certified_artifact ? "machine-checked" : null,
+      earned: machineChecked,
+      label: machineChecked ? "machine-checked" : null,
     },
   };
 
@@ -683,6 +691,35 @@ export function buildClaimPageViewModel(
     });
   }
 
+  for (const gap of proofObligations.records) {
+    const events =
+      gap.lastEvent.event_id === gap.filing.event_id ? [gap.filing] : [gap.filing, gap.lastEvent];
+    for (const event of events) {
+      const filed = event.event_id === gap.filing.event_id;
+      timelineEntries.push({
+        seq: event.seq,
+        eventId: event.event_id,
+        itemId: gap.id,
+        kind: "claim-proof-gap",
+        sourceHref: gap.href,
+        label: filed
+          ? `Proof obligation ${gap.id} filed on ${gap.target}`
+          : `Obligation ${gap.id}: ${gap.status}`,
+        actor: {
+          fellow: event.fellow_id ?? undefined,
+          sponsor: event.sponsor_id ?? undefined,
+          model: event.model_string_self_declared ?? undefined,
+          harness: event.harness ?? undefined,
+        },
+        summary: filed
+          ? (gap.obligation ?? "Obligation text omitted; read the pinned record.")
+          : "Recorded lifecycle action; not independent verification of the missing step.",
+        ...(filed && gap.screeningNotice !== undefined
+          ? { screeningNotice: gap.screeningNotice }
+          : {}),
+      });
+    }
+  }
   timelineEntries.sort((a, b) => a.seq - b.seq);
 
   // 5. Display the recorded tiers, pinned by the Worker at review time.
@@ -927,6 +964,7 @@ export function buildClaimPageViewModel(
   }
 
   const whatRemainsUnverified: WhatRemainsUnverifiedViewModel = {
+    proofObligations,
     gaps,
     omissions: face.omitted,
     degraded: face.degraded,

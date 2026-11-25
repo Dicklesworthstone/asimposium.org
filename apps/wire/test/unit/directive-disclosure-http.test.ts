@@ -1,11 +1,16 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import type {
+  ScreeningPromotionDeniedResponse,
+  ScreeningPromotionHoldResponse,
+} from "@asimposium/contracts";
 import { DIRECTIVE_DISCLOSURES_SCHEMA_ID } from "@asimposium/contracts/directive-disclosures";
 import { createApp } from "../../src/app.ts";
 import { createDirectiveDisclosureRouter } from "../../src/directives/disclosure-router.ts";
 import type { Env } from "../../src/env.ts";
 import { postureOf, recordRefusal } from "../../src/moderation/posture.ts";
-import { decideScreeningCase } from "../../src/moderation/store.ts";
+import { decideScreeningCase, getScreeningCase } from "../../src/moderation/store.ts";
 import { createProblemRouter } from "../../src/problems/router.ts";
+import { promotionScreeningBinding } from "../../src/screening/workers-ai.ts";
 import {
   DISCLOSURE_OTHER,
   DISCLOSURE_PROBLEM,
@@ -409,6 +414,7 @@ describe("signed sponsor disclosure and public canonical document routes", () =>
     });
     let decision: "reject" | "quarantine" | "pass" = "reject";
     let screened = 0;
+    const screeningBindings: Awaited<ReturnType<typeof promotionScreeningBinding>>[] = [];
     const router = createProblemRouter({
       service: f.service,
       verifiedSponsor: async (request) => ({
@@ -420,6 +426,7 @@ describe("signed sponsor disclosure and public canonical document routes", () =>
         expect(input.kind).toBe("directive-disclosure");
         expect(input.fellowId).toBe(f.binding.fellowId);
         expect(input.publicationContext).toBeDefined();
+        screeningBindings.push(await promotionScreeningBinding(input));
         return syntheticScreeningObservation(input, {
           decision,
           coarse_category: decision === "pass" ? "benign-context" : "injection",
@@ -449,9 +456,21 @@ describe("signed sponsor disclosure and public canonical document routes", () =>
         f.env,
       );
 
+    const publicBefore = f.sql
+      .query("SELECT public_seq FROM problems WHERE id = ?")
+      .get(DISCLOSURE_PROBLEM);
     const rejected = await publish("rejected");
     expect(rejected.status).toBe(403);
-    expect(await rejected.json()).toMatchObject({ code: "POLICY_DENIED" });
+    expect(rejected.headers.get("cache-control")).toBe("private, no-store");
+    const denial = (await rejected.json()) as ScreeningPromotionDeniedResponse & {
+      case_id: string;
+    };
+    expect(denial).toEqual({
+      code: "POLICY_DENIED",
+      coarse_category: "injection",
+      appeal: "SPONSOR_APPEAL_AVAILABLE",
+      case_id: expect.stringMatching(/^QC-[0-9A-HJKMNP-TV-Z]{26}$/),
+    });
     expect(await postureOf(f.db, f.binding.fellowId)).toMatchObject({
       refusalsInWindow: 2,
       quarantineFirst: false,
@@ -459,21 +478,59 @@ describe("signed sponsor disclosure and public canonical document routes", () =>
     decision = "quarantine";
     const held = await publish("held");
     expect(held.status).toBe(202);
-    const hold = (await held.json()) as { case_id: string };
-    expect(hold).toMatchObject({ code: "SCREENING_HOLD", coarse_category: "injection" });
-    const heldCase = f.sql
-      .query(`SELECT sponsor_id, fellow_id, state, contextual_input_json
-      FROM screening_cases WHERE case_id = ?`)
-      .get(hold.case_id) as Record<string, unknown>;
-    expect(heldCase).toMatchObject({
-      sponsor_id: DISCLOSURE_SPONSOR,
-      fellow_id: f.binding.fellowId,
-      state: "pending",
+    expect(held.headers.get("cache-control")).toBe("private, no-store");
+    const hold = (await held.json()) as ScreeningPromotionHoldResponse & {
+      case_id: string;
+    };
+    expect(hold).toEqual({
+      code: "SCREENING_HOLD",
+      coarse_category: "injection",
+      appeal: "SPONSOR_APPEAL_AVAILABLE",
+      case_id: expect.stringMatching(/^QC-[0-9A-HJKMNP-TV-Z]{26}$/),
     });
-    expect(heldCase.contextual_input_json).toBeString();
+    expect(hold.case_id).not.toBe(denial.case_id);
+    for (const [index, caseId] of [denial.case_id, hold.case_id].entries()) {
+      const retained = await getScreeningCase(f.db, caseId);
+      const screeningBinding = screeningBindings[index];
+      if (!retained || !screeningBinding) throw new Error("The exact disclosure was not retained.");
+      expect(retained).toMatchObject({
+        problem_id: DISCLOSURE_PROBLEM,
+        sponsor_id: DISCLOSURE_SPONSOR,
+        fellow_id: f.binding.fellowId,
+        route: "directive-disclosure",
+        input_digest: screeningBinding.bodyDigest.slice(7),
+        context_digest: screeningBinding.contextDigest.slice(7),
+        outcome: "quarantine",
+        coarse_category: "injection",
+        state: "pending",
+        decided_by: null,
+        decided_at: null,
+      });
+      expect(JSON.parse(retained.contextual_input_json ?? "null")).toEqual(
+        screeningBinding.contextualInput,
+      );
+    }
+    const moderationLog = f.sql.query("SELECT * FROM moderation_log ORDER BY seq").all();
+    expect(moderationLog).toHaveLength(2);
+    for (const entry of moderationLog)
+      expect(entry).toMatchObject({
+        action: "quarantined",
+        category: "injection",
+        subject: "candidate",
+        problem_id: DISCLOSURE_PROBLEM,
+      });
+    for (const publicText of [
+      JSON.stringify(denial),
+      JSON.stringify(hold),
+      JSON.stringify(moderationLog),
+    ]) {
+      expect(publicText).not.toContain("supplied this rejected summary");
+      expect(publicText).not.toContain("supplied this held summary");
+      expect(publicText).not.toContain("Private initial search direction");
+    }
     expect(
-      f.sql.query("SELECT COUNT(*) AS n FROM moderation_log WHERE action = 'quarantined'").get(),
-    ).toEqual({ n: 1 });
+      f.sql.query("SELECT public_seq FROM problems WHERE id = ?").get(DISCLOSURE_PROBLEM),
+    ).toEqual(publicBefore);
     expect(f.sql.query("SELECT COUNT(*) AS n FROM directive_disclosure_records").get()).toEqual({
       n: 0,
     });

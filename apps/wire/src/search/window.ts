@@ -3,11 +3,14 @@ import { SEARCH_WINDOW_MAX, type SearchPageQuery } from "@asimposium/contracts/s
 import type { D1Database } from "@cloudflare/workers-types";
 import {
   eventContentHiddenSql,
-  hiddenByContentControlSql,
   PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL,
 } from "../krater/public-content.ts";
 import { PUBLIC_EVENT_CONTENT_MAX_BYTES } from "../ledger/citation-read-integrity.ts";
-import { readPublishedProblemFormulations } from "../ledger/problem-formulation-read.ts";
+import {
+  type PublishedProblemFormulation,
+  readPublishedProblemFormulations,
+} from "../ledger/problem-formulation-read.ts";
+import { checkedScientificPayload } from "../ledger/scientific-checks.ts";
 import { publicationScreeningNotice } from "../screening/publication-notice.ts";
 import { SearchContinuationError } from "./continuation.ts";
 
@@ -19,21 +22,22 @@ interface ClaimKey {
   payload_sha256: string;
   rank: number;
 }
-interface ProblemKey {
-  kind: "problem";
-  id: string;
-  public_seq: number;
-  updated_at: string;
-  title: string;
-}
-interface ProblemStatementKey {
-  kind: "problem-statement";
+export interface SearchProblemPublication {
   id: string;
   public_seq: number;
   event_id: string;
   source_seq: number;
   statement_version: number;
   payload_sha256: string;
+  screening_provenance: string | null;
+}
+interface ProblemKey extends SearchProblemPublication {
+  kind: "problem";
+  updated_at: string;
+  title: string;
+}
+interface ProblemStatementKey extends SearchProblemPublication {
+  kind: "problem-statement";
 }
 interface FellowKey {
   kind: "fellow";
@@ -61,6 +65,50 @@ export function searchProblemFilterBindings(query: SearchPageQuery): readonly (s
   return [query.status ?? null, query.status ?? null, query.area ?? null, query.area ?? null];
 }
 
+/** The projection selects the current publication. Its immutable envelope
+ * supplies the version and digest, and present-day controls still apply. */
+export const SEARCH_CLAIM_SOURCE_SQL = `JOIN events publication ON publication.problem_id = claims.problem_id
+  AND publication.seq = claims.source_seq AND publication.seq <= p.public_seq
+  AND publication.object_id = claims.id AND publication.object_kind = 'claim'
+  AND publication.type IN ('claim.created', 'claim.revised')
+  AND publication.payload_sha256 = claims.payload_sha256
+JOIN event_content content ON content.event_id = publication.id
+  AND content.payload_sha256 = publication.payload_sha256 AND content.redacted_at IS NULL
+  AND NOT ${eventContentHiddenSql("publication")}`;
+
+// Only selected results transfer source bodies. The cursor window stays small.
+export const SEARCH_CLAIM_SOURCE_COLUMNS = `publication.object_version AS version,
+  publication.type AS event_type, publication.payload_sha256,
+  CASE WHEN length(CAST(content.payload_json AS BLOB)) <= ${PUBLIC_EVENT_CONTENT_MAX_BYTES}
+    THEN content.payload_json END AS payload_json`;
+
+export interface SearchClaimPublication {
+  id: string;
+  statement: string;
+  version: number;
+  event_type: string;
+  payload_sha256: string;
+  payload_json: string | null;
+}
+
+export async function verifiedSearchClaimVersion(row: SearchClaimPublication): Promise<number> {
+  if (row.payload_json === null || !Number.isSafeInteger(row.version) || row.version < 1)
+    throw new Error("The search result has no verifiable publication.");
+  const payload = await checkedScientificPayload({
+    payload_sha256: row.payload_sha256,
+    payload_json: row.payload_json,
+  });
+  if (
+    payload.claim_id !== row.id ||
+    payload.statement !== row.statement ||
+    (row.version === 1
+      ? row.event_type !== "claim.created"
+      : row.event_type !== "claim.revised" || payload.base_version !== row.version - 1)
+  )
+    throw new Error("The search result differs from its claim publication.");
+  return row.version;
+}
+
 export const SEARCH_CLAIM_KEYS_SQL = `SELECT 'claim' AS kind, public_claim_fts.claim_id AS id,
   public_claim_fts.problem_id, claims.source_seq, claims.payload_sha256,
   bm25(public_claim_fts) AS rank
@@ -73,29 +121,18 @@ WHERE public_claim_fts MATCH ? AND ${PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL}
   AND NOT (claims.problem_id = ? AND claims.id = ?)
 ORDER BY rank ASC, public_claim_fts.problem_id ASC, public_claim_fts.claim_id ASC LIMIT ?`;
 
-/** Problem discovery must not require knowing an opaque P-ID in advance.
- * Match public titles as literal text, not FTS operators or LIKE wildcards.
- * Keep the title in the window digest: a rename without a cursor change must
- * invalidate continuation just as a changed claim source does. Visibility is
- * checked in this SELECT, including a problem's latest hide/restore control. */
-export const SEARCH_PROBLEM_KEYS_SQL = `SELECT 'problem' AS kind, p.id, p.public_seq, p.updated_at,
-  CASE WHEN length(trim(p.title)) > 0 THEN p.title ELSE p.id END AS title
-FROM problems p
-WHERE (p.id LIKE ? ESCAPE '\\' OR p.title LIKE ? ESCAPE '\\')
-  AND p.status <> 'private-draft' AND p.unlisted = 0 AND p.id <> ?
-  AND NOT ${hiddenByContentControlSql("p.id", "'problem'")}
-  AND ${SEARCH_PROBLEM_FILTER_SQL}
-ORDER BY p.id COLLATE BINARY ASC LIMIT ?`;
-
-/** A problem can be discoverable before it has any claims. Match only its
- * latest published formulation, never a draft, retained projection or an old
- * statement whose replacement was withdrawn. The window transfers pins only;
- * selected bodies are hash- and contract-verified by the canonical reader.
- * Title/ID matches already in the window are excluded without duplicate rows. */
-export const SEARCH_PROBLEM_STATEMENT_KEYS_SQL = `WITH current_formulations AS (
+/** Titles, exact IDs and statement matches share one publication boundary.
+ * Select the latest source before checking availability: a withdrawn current
+ * formulation never falls back to retained problem columns or an older source.
+ * Only bounded pins cross the DB boundary; the canonical reader verifies the
+ * selected page's complete payloads. Current source notices also bind cursors. */
+const SEARCH_PROBLEM_SOURCES_SQL = `WITH current_formulations AS (
   SELECT p.id, p.public_seq, p.current_statement_version,
     e.id AS event_id, e.seq AS source_seq, e.object_version AS statement_version,
     e.payload_sha256, e.type AS event_type,
+    CASE WHEN length(CAST(screening.provenance_json AS BLOB)) <= 4096
+      THEN screening.provenance_json
+      WHEN screening.provenance_json IS NOT NULL THEN 'invalid' END AS screening_provenance,
     CASE WHEN length(CAST(c.payload_json AS BLOB)) <= ${PUBLIC_EVENT_CONTENT_MAX_BYTES}
       AND json_valid(c.payload_json) THEN c.payload_json ELSE '{}' END AS payload_json
   FROM problems p JOIN events e ON e.id = (
@@ -108,23 +145,65 @@ export const SEARCH_PROBLEM_STATEMENT_KEYS_SQL = `WITH current_formulations AS (
   )
   JOIN event_content c ON c.event_id = e.id
     AND c.payload_sha256 = e.payload_sha256 AND c.redacted_at IS NULL
+  LEFT JOIN screening_publications screening ON screening.event_id = e.id
   WHERE p.status <> 'private-draft' AND p.unlisted = 0
-    AND p.id NOT IN (SELECT value FROM json_each(?))
     AND NOT ${eventContentHiddenSql("e")}
     AND ${SEARCH_PROBLEM_FILTER_SQL}
-)
-SELECT 'problem-statement' AS kind, id, public_seq, event_id, source_seq,
-  statement_version, payload_sha256
+), readable_formulations AS (
+SELECT id, public_seq, event_id, source_seq, statement_version, payload_sha256,
+  screening_provenance,
+  json_extract(payload_json, '$.problem.title') AS title,
+  json_extract(payload_json, '$.problem.statement') AS statement,
+  json_extract(payload_json, '$.problem.updated_at') AS updated_at
 FROM current_formulations
 WHERE statement_version = current_statement_version
   AND json_extract(payload_json, '$.problem.id') = id
   AND json_extract(payload_json, '$.problem.current_statement_version') = statement_version
   AND json_extract(payload_json, '$.action') = CASE event_type
     WHEN 'problem.admitted' THEN 'publish' ELSE 'revise-statement' END
+  AND json_type(payload_json, '$.problem.title') = 'text'
+  AND length(json_extract(payload_json, '$.problem.title')) BETWEEN 1 AND 2000
   AND json_type(payload_json, '$.problem.statement') = 'text'
   AND length(json_extract(payload_json, '$.problem.statement')) BETWEEN 1 AND 8192
-  AND json_extract(payload_json, '$.problem.statement') LIKE ? ESCAPE '\\'
+)`;
+
+const SEARCH_PROBLEM_PIN_COLUMNS = `id, public_seq, event_id, source_seq,
+  statement_version, payload_sha256, screening_provenance`;
+
+export const SEARCH_EXACT_PROBLEM_SQL = `${SEARCH_PROBLEM_SOURCES_SQL}
+SELECT ${SEARCH_PROBLEM_PIN_COLUMNS} FROM readable_formulations WHERE id = ?`;
+
+/** Literal title matching never reads a mutable or withdrawn title. */
+export const SEARCH_PROBLEM_KEYS_SQL = `${SEARCH_PROBLEM_SOURCES_SQL}
+SELECT 'problem' AS kind, ${SEARCH_PROBLEM_PIN_COLUMNS}, title, updated_at
+FROM readable_formulations
+WHERE (id LIKE ? ESCAPE '\\' OR title LIKE ? ESCAPE '\\') AND id <> ?
 ORDER BY id COLLATE BINARY ASC LIMIT ?`;
+
+/** A problem needs no claims or matching title words to be discoverable. */
+export const SEARCH_PROBLEM_STATEMENT_KEYS_SQL = `${SEARCH_PROBLEM_SOURCES_SQL}
+SELECT 'problem-statement' AS kind, ${SEARCH_PROBLEM_PIN_COLUMNS}
+FROM readable_formulations
+WHERE id NOT IN (SELECT value FROM json_each(?)) AND statement LIKE ? ESCAPE '\\'
+ORDER BY id COLLATE BINARY ASC LIMIT ?`;
+
+export function verifiedSearchProblem(
+  pin: SearchProblemPublication,
+  formulation: PublishedProblemFormulation | undefined,
+): PublishedProblemFormulation {
+  if (
+    formulation === undefined ||
+    formulation.problem.id !== pin.id ||
+    formulation.publication.event_id !== pin.event_id ||
+    formulation.publication.seq !== pin.source_seq ||
+    formulation.publication.payload_sha256 !== pin.payload_sha256 ||
+    formulation.problem.current_statement_version !== pin.statement_version ||
+    JSON.stringify(formulation.screening_notice) !==
+      JSON.stringify(publicationScreeningNotice(pin.screening_provenance))
+  )
+    throw new SearchContinuationError("changed");
+  return formulation;
+}
 
 /** Only a page of claim bodies crosses the DB boundary. The bounded window
  * contains identities, source pins and ranks, never 500 scientific bodies. */
@@ -134,6 +213,7 @@ export const SEARCH_CLAIM_PAGE_SQL = `WITH selected AS (
     json_extract(value,'$.payload_sha256') AS payload_sha256 FROM json_each(?)
 )
 SELECT public_claim_fts.claim_id AS id, public_claim_fts.problem_id, claims.statement,
+  ${SEARCH_CLAIM_SOURCE_COLUMNS},
   (SELECT s.provenance_json FROM events e JOIN screening_publications s ON s.event_id = e.id
     WHERE e.problem_id = claims.problem_id AND e.seq = claims.source_seq) AS screening_provenance,
   snippet(public_claim_fts, 2, '**', '**', '...', 24) AS snippet, bm25(public_claim_fts) AS rank
@@ -143,7 +223,8 @@ JOIN claims ON claims.id = public_claim_fts.claim_id AND claims.problem_id = pub
 JOIN selected ON selected.id = claims.id AND selected.problem_id = claims.problem_id
   AND selected.source_seq = claims.source_seq AND selected.payload_sha256 = claims.payload_sha256
 JOIN problems p ON p.id = claims.problem_id AND p.status <> 'private-draft' AND p.unlisted = 0
-WHERE public_claim_fts MATCH ? AND ${PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL}
+${SEARCH_CLAIM_SOURCE_SQL}
+WHERE public_claim_fts MATCH ?
 ORDER BY selected.ordinal`;
 
 // biome-ignore lint/suspicious/noControlCharactersInRegex: Control characters are not permitted in search identities.
@@ -181,7 +262,7 @@ function validateEntry(entry: SearchWindowEntry): void {
   )
     throw new Error("Invalid public problem search pin.");
   if (
-    entry.kind === "problem-statement" &&
+    (entry.kind === "problem-statement" || entry.kind === "problem") &&
     (!Number.isSafeInteger(entry.public_seq) ||
       !Number.isSafeInteger(entry.source_seq) ||
       entry.source_seq < 1 ||
@@ -255,10 +336,10 @@ export async function readSearchWindow(
     const rows = await db
       .prepare(SEARCH_PROBLEM_KEYS_SQL)
       .bind(
+        ...searchProblemFilterBindings(query),
         pattern,
         pattern,
         exactItems.find((item) => item.kind === "problem")?.id ?? "",
-        ...searchProblemFilterBindings(query),
         maximum,
       )
       .all<ProblemKey>();
@@ -273,8 +354,8 @@ export async function readSearchWindow(
     const rows = await db
       .prepare(SEARCH_PROBLEM_STATEMENT_KEYS_SQL)
       .bind(
-        JSON.stringify(selectedProblems),
         ...searchProblemFilterBindings(query),
+        JSON.stringify(selectedProblems),
         pattern,
         maximum,
       )
@@ -312,14 +393,14 @@ export async function hydrateSearchPage(
   const hydrated = new Map<string, SearchResultItem>();
   if (claims.length > 0) {
     const rows = (
-      await db.prepare(SEARCH_CLAIM_PAGE_SQL).bind(JSON.stringify(claims), ftsQuery).all<{
-        id: string;
-        problem_id: string;
-        statement: string;
-        snippet: string | null;
-        rank: number;
-        screening_provenance?: string | null;
-      }>()
+      await db.prepare(SEARCH_CLAIM_PAGE_SQL).bind(JSON.stringify(claims), ftsQuery).all<
+        SearchClaimPublication & {
+          problem_id: string;
+          snippet: string | null;
+          rank: number;
+          screening_provenance?: string | null;
+        }
+      >()
     ).results;
     if (!Array.isArray(rows) || rows.length !== claims.length)
       throw new SearchContinuationError("changed");
@@ -335,13 +416,15 @@ export async function hydrateSearchPage(
         typeof row.statement !== "string"
       )
         throw new SearchContinuationError("changed");
+      const version = await verifiedSearchClaimVersion(row);
       const screeningNotice = publicationScreeningNotice(row.screening_provenance);
       hydrated.set(identity(pin), {
         kind: "claim",
         id: row.id,
         problem_id: row.problem_id,
-        url: `https://asimposium.org/p/${encodeURIComponent(row.problem_id)}/claims/${encodeURIComponent(row.id)}`,
-        title: `Claim ${row.id} in ${row.problem_id}`,
+        version,
+        url: `https://asimposium.org/p/${encodeURIComponent(row.problem_id)}/claims/${encodeURIComponent(row.id)}@${version}`,
+        title: `Claim ${row.id}@${version} in ${row.problem_id}`,
         statement: row.statement,
         snippet: (row.snippet ?? row.statement).slice(0, 2000),
         match_type: "lexical_fts",
@@ -361,35 +444,31 @@ export async function hydrateSearchPage(
       ).values(),
     ]);
     for (const pin of statements) {
-      const formulation = formulations.get(pin.id);
+      const formulation = verifiedSearchProblem(pin, formulations.get(pin.id));
       if (pin.kind === "problem") {
-        if (formulation?.screening_notice !== undefined) {
-          if (formulation.problem.title !== pin.title) throw new SearchContinuationError("changed");
-          hydrated.set(identity(pin), {
-            kind: "problem",
-            id: pin.id,
-            url: `https://asimposium.org/p/${encodeURIComponent(pin.id)}`,
-            title: pin.title,
-            snippet:
-              `${pin.title} — Public problem ${pin.id} (sequence ${pin.public_seq}, updated ${pin.updated_at})`.slice(
-                0,
-                2000,
-              ),
-            match_type: "lexical_fts",
-            score_explanation: "problem_id_or_title_literal_match",
-            screening_notice: formulation.screening_notice,
-          });
-        }
+        if (
+          formulation.problem.title !== pin.title ||
+          formulation.problem.updated_at !== pin.updated_at
+        )
+          throw new SearchContinuationError("changed");
+        hydrated.set(identity(pin), {
+          kind: "problem",
+          id: pin.id,
+          url: `https://asimposium.org/p/${encodeURIComponent(pin.id)}`,
+          title: pin.title,
+          snippet:
+            `${pin.title} — Public problem ${pin.id} (sequence ${pin.public_seq}, updated ${pin.updated_at})`.slice(
+              0,
+              2000,
+            ),
+          match_type: "lexical_fts",
+          score_explanation: "problem_id_or_title_literal_match",
+          ...(formulation.screening_notice === undefined
+            ? {}
+            : { screening_notice: formulation.screening_notice }),
+        });
         continue;
       }
-      if (
-        !formulation ||
-        formulation.publication.event_id !== pin.event_id ||
-        formulation.publication.seq !== pin.source_seq ||
-        formulation.publication.payload_sha256 !== pin.payload_sha256 ||
-        formulation.problem.current_statement_version !== pin.statement_version
-      )
-        throw new SearchContinuationError("changed");
       hydrated.set(identity(pin), {
         kind: "problem",
         id: pin.id,
@@ -411,27 +490,12 @@ export async function hydrateSearchPage(
       case "exact":
         return entry.item;
       case "claim":
+      case "problem":
       case "problem-statement": {
         const item = hydrated.get(identity(entry));
         if (!item) throw new SearchContinuationError("changed");
         return item;
       }
-      case "problem":
-        return (
-          hydrated.get(identity(entry)) ?? {
-            kind: "problem",
-            id: entry.id,
-            url: `https://asimposium.org/p/${encodeURIComponent(entry.id)}`,
-            title: entry.title,
-            snippet:
-              `${entry.title} — Public problem ${entry.id} (sequence ${entry.public_seq}, updated ${entry.updated_at})`.slice(
-                0,
-                2000,
-              ),
-            match_type: "lexical_fts",
-            score_explanation: "problem_id_or_title_literal_match",
-          }
-        );
       case "fellow":
         return {
           kind: "fellow",

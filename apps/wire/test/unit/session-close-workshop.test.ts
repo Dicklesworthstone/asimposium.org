@@ -557,6 +557,147 @@ function saveDeadEndPublication(f: ReturnType<typeof fixture>, publication = dea
   savePublicationSource(f, "W-A");
 }
 
+const typedPublications = [
+  {
+    kind: "hypothesis" as const,
+    type: "scratch",
+    eventType: "hypothesis.created",
+    eventKind: "hypothesis",
+    payload: {
+      route: "Reduce the domain to four odd residue classes.",
+      mechanism: "Squaring each representative yields the same residue.",
+      falsifier: "An odd residue whose square has a different residue.",
+      origin: "proposed",
+      body_md: "Check the four classes before generalizing.",
+    },
+  },
+  {
+    kind: "evidence" as const,
+    type: "evidence-draft",
+    eventType: "evidence.created",
+    eventKind: "evidence",
+    payload: {
+      bears_on_kind: "claim",
+      bears_on_id: "C-1",
+      bears_on_version: 1,
+      direction: "informs",
+      kind: "argument",
+      source: { kind: "model_memory" },
+      mode: "exploratory",
+      body_md: "A proposed check of the four residue classes.",
+    },
+  },
+  {
+    kind: "dead-end" as const,
+    type: "dead-end-draft",
+    eventType: "dead_end.recorded",
+    eventKind: "dead_end",
+    payload: JSON.parse(deadEndPublication).payload,
+  },
+];
+
+for (const typed of typedPublications) {
+  test(`close selects and archives exact saved ${typed.kind} bytes with its matching event`, () =>
+    using(async (f) => {
+      const publicationJson = JSON.stringify({ object_kind: typed.kind, payload: typed.payload });
+      f.sql
+        .query(
+          "UPDATE workshop_objects SET type=?,publication_json=?,ledger_intent_json=? WHERE workshop_id='W-A'",
+        )
+        .run(
+          typed.type,
+          publicationJson,
+          JSON.stringify({ kind: "create", target_kind: typed.kind }),
+        );
+      savePublicationSource(f, "W-A");
+      const [selected] = await readSessionClosePublications(f.db, {
+        ...closePublicationInput,
+        promote: ["W-A"],
+      });
+      assert.ok(selected && selected.kind === typed.kind);
+      assert.equal(selected.publicationJson, publicationJson);
+      assert.ok(!JSON.stringify(selected).includes("body a"));
+      const plan = await prepareSessionCloseWorkshopActions(f.db, {
+        ...closeInput,
+        promote: [
+          {
+            workshopId: "W-A",
+            expectedVersion: 1,
+            publicationJson,
+            eventId: "E-typed",
+            kind: typed.kind,
+          },
+        ],
+        discard: [],
+      });
+      await f.db.batch([
+        f.db
+          .prepare("INSERT INTO events VALUES('E-typed','P-1',?,?)")
+          .bind(typed.eventType, typed.eventKind),
+        ...plan.statements,
+      ]);
+      assert.deepEqual(
+        f.sql
+          .query("SELECT state,current_version FROM workshop_objects WHERE workshop_id='W-A'")
+          .get(),
+        { state: "archived", current_version: 2 },
+      );
+      assert.deepEqual(
+        f.sql
+          .query(
+            "SELECT version,publication_json,publication_event_id FROM workshop_revisions WHERE workshop_id='W-A' ORDER BY version",
+          )
+          .all(),
+        [
+          { version: 1, publication_json: publicationJson, publication_event_id: null },
+          { version: 2, publication_json: publicationJson, publication_event_id: "E-typed" },
+        ],
+      );
+    }));
+
+  test(`close refuses a mismatched ${typed.kind} intent and wrong-kind archival event`, () =>
+    using(async (f) => {
+      const publicationJson = JSON.stringify({ object_kind: typed.kind, payload: typed.payload });
+      f.sql
+        .query(
+          "UPDATE workshop_objects SET type=?,publication_json=?,ledger_intent_json=? WHERE workshop_id='W-A'",
+        )
+        .run(typed.type, publicationJson, JSON.stringify({ kind: "create", target_kind: "claim" }));
+      savePublicationSource(f, "W-A");
+      await assert.rejects(
+        readSessionClosePublications(f.db, { ...closePublicationInput, promote: ["W-A"] }),
+        SessionClosePublicationError,
+      );
+      const plan = await prepareSessionCloseWorkshopActions(f.db, {
+        ...closeInput,
+        promote: [
+          {
+            workshopId: "W-A",
+            expectedVersion: 1,
+            publicationJson,
+            eventId: "E-typed",
+            kind: typed.kind,
+          },
+        ],
+        discard: [],
+      });
+      await assert.rejects(
+        f.db.batch([
+          f.db.prepare("INSERT INTO events VALUES('E-typed','P-1','claim.created','claim')"),
+          ...plan.statements,
+        ]),
+        /SESSION_CLOSE_WORKSHOP_CHANGED/,
+      );
+      assert.deepEqual(f.sql.query("SELECT * FROM events").all(), []);
+      assert.deepEqual(
+        f.sql
+          .query("SELECT state,current_version FROM workshop_objects WHERE workshop_id='W-A'")
+          .get(),
+        { state: "open", current_version: 1 },
+      );
+    }));
+}
+
 test("close reads the selected immutable claim publication without publishing private notes", () =>
   using(async (f) => {
     saveClaimPublication(f, claimPublication);

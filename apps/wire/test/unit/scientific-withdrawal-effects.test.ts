@@ -7,7 +7,7 @@ import {
 } from "../../src/ledger/scientific-disposition.ts";
 import { scientificInputEffects } from "../../src/ledger/scientific-withdrawal-effects.ts";
 import { withdrawScientificInput } from "../../src/ledger/scientific-withdrawals.ts";
-import { SESSION, sha, withdrawalFixture } from "./scientific-withdrawal-fixture.ts";
+import { claimDigest, SESSION, withdrawalFixture } from "./scientific-withdrawal-fixture.ts";
 
 type Fixture = ReturnType<typeof withdrawalFixture>;
 async function using(fn: (f: Fixture) => Promise<void>) {
@@ -26,7 +26,7 @@ function support(f: Fixture) {
   const base = f.source("evidence", "E-base", { kind: "argument" });
   f.source("evidence", "E-check", {
     falsification_check: {
-      target_digest: `sha256:${sha("statement")}`,
+      target_digest: claimDigest(),
       attempted_falsifier: "Search for n=0 violating the bound.",
       capable_of_failure: "The observed output could exceed it.",
       result: "survived",
@@ -108,14 +108,14 @@ test("withdrawing an input on @1 never withdraws or contaminates the fresh @2 he
       "claim.revised",
       "claim",
       "C-1",
-      { claim_id: "C-1", base_version: 1, statement: "A revised bound." },
+      { claim_id: "C-1", base_version: 1, kind: "conjecture", statement: "A revised bound." },
       "fellow-b",
       "P-DEMO",
       2,
     );
     f.sql
       .query("INSERT INTO claim_versions VALUES('P-DEMO','C-1',2,?,?,'conjecture')")
-      .run(`sha256:${sha("revision")}`, "A revised bound.");
+      .run(claimDigest("A revised bound."), "A revised bound.");
     const after = await foldScientificRows((await rows(f)).results);
     assert.equal(after.currentVersion, 2);
     assert.equal(after.disposition, "open");
@@ -135,7 +135,7 @@ test("withdrawal removes a full-write-up review while missing sponsor coverage w
     const base = f.source("evidence", "E-argument", { kind: "argument" }, "fellow-b");
     f.source("evidence", "E-check", {
       falsification_check: {
-        target_digest: `sha256:${sha("statement")}`,
+        target_digest: claimDigest(),
         attempted_falsifier: "Check the excluded case.",
         capable_of_failure: "The bound could fail.",
         result: "survived",
@@ -144,7 +144,7 @@ test("withdrawal removes a full-write-up review while missing sponsor coverage w
     });
     const verification = {
       kind: "full-write-up",
-      target_digest: `sha256:${sha("statement")}`,
+      target_digest: claimDigest(),
       evidence: { evidence_id: base.id, digest: base.request.source_digest },
       coverage: ["Every case in the statement."],
       result: "verified",

@@ -902,6 +902,14 @@ export const HelloUnreadReviewSchema = z
   .strict();
 export type HelloUnreadReview = z.infer<typeof HelloUnreadReviewSchema>;
 
+/** Current visible, unexpired inbox state. Absence means unavailable, not empty. */
+export const HelloInboxSummarySchema = z
+  .object({
+    unacknowledged_count: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+  })
+  .strict();
+export type HelloInboxSummary = z.infer<typeof HelloInboxSummarySchema>;
+
 export const ProtocolAckRequestSchema = z
   .object({
     protocol_digest: z.string().min(1).max(128),
@@ -941,7 +949,9 @@ export const EnrollmentHelloResponseSchema = z
     read_budget: RateLimitBudgetSchema.optional(),
     assignments: z.array(HelloAssignmentSchema).optional(),
     open_sessions: z.array(HelloOpenSessionSchema).optional(),
-    unread_reviews: z.array(HelloUnreadReviewSchema).optional(),
+    inbox: HelloInboxSummarySchema.optional(),
+    /** At most 50 exact review publications with visible unacknowledged inbox notices. */
+    unread_reviews: z.array(HelloUnreadReviewSchema).max(50).optional(),
     protocol_digest: z.string().min(1).max(128).optional(),
     protocol_acknowledged: z.boolean().optional(),
     next_actions: z.array(EnrollmentNextActionSchema).max(8),

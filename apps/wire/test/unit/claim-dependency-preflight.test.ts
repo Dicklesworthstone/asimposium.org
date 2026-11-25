@@ -97,7 +97,7 @@ function fixture() {
       padding,
     });
     const hash = digest(payload),
-      content = `sha256:${digest(statement)}`;
+      content = `sha256:${digest(JSON.stringify({ falsifier: null, kind: "lemma", statement }))}`;
     db.prepare(
       "INSERT INTO events VALUES (?, ?, ?, ?, ?, ?, 'claim', ?, ?, 'SP-A', 'SS-A', 'declared', 'harness')",
     ).run(
@@ -359,6 +359,40 @@ test("exact-version scientific reads remain available for historical review", as
   f.withdraw("C-1");
   assert.equal((await readScientificClaim(f.d1, "P-TEST", "C-3", 1)).version, 1);
   await assert.rejects(resolveClaimDependencies(f.d1, "P-TEST", ["C-3"]), ScientificInputError);
+});
+
+test("exact-version scientific reads reject semantic projection drift without retargeting history", async () => {
+  const f = fixture();
+  const original = f.claim(1);
+  const revision = f.claim(1, [], { version: 2 });
+  assert.equal(
+    (await readScientificClaim(f.d1, "P-TEST", "C-1", 2)).contentDigest,
+    revision.content_digest,
+  );
+
+  // Source bytes and their event hash are intact; only the derived identity is
+  // corrupted. It must not authorize a new review, grounding or dependency.
+  f.db
+    .prepare("UPDATE claim_versions SET content_digest=? WHERE claim_id='C-1' AND version=2")
+    .run(`sha256:${"0".repeat(64)}`);
+  await assert.rejects(readScientificClaim(f.d1, "P-TEST", "C-1", 2), /semantic digest/);
+  await assert.rejects(resolveClaimDependencies(f.d1, "P-TEST", ["C-1"]), ScientificInputError);
+  assert.equal(
+    (await readScientificClaim(f.d1, "P-TEST", "C-1", 1)).contentDigest,
+    original.content_digest,
+  );
+
+  f.db
+    .prepare("UPDATE claim_versions SET content_digest=? WHERE claim_id='C-1' AND version=2")
+    .run(revision.content_digest);
+  f.db.exec(
+    "UPDATE claim_versions SET statement='An unrelated stronger statement.' WHERE claim_id='C-1' AND version=1",
+  );
+  await assert.rejects(readScientificClaim(f.d1, "P-TEST", "C-1", 1), /exact version/);
+  assert.equal(
+    (await readScientificClaim(f.d1, "P-TEST", "C-1", 2)).contentDigest,
+    revision.content_digest,
+  );
 });
 
 test("preflight success cannot bypass a withdrawal before transactional settlement", async () => {

@@ -1,4 +1,4 @@
-import type { ReviewQueueItem } from "@asimposium/contracts/review-queue";
+import { REVIEW_QUEUE_NEED_TEXT, type ReviewQueueItem } from "@asimposium/contracts/review-queue";
 import type { PackCandidate } from "@asimposium/render";
 import type { D1Database } from "@cloudflare/workers-types";
 import {
@@ -26,6 +26,9 @@ function reference(item: ReviewQueueItem) {
     cursor: item.cursor,
     kind: item.kind,
     disposition: item.disposition,
+    ...(item.stale === true
+      ? { stale: true, recovery_boundary: REVIEW_QUEUE_NEED_TEXT["recheck-stale-inputs"] }
+      : {}),
     review_need: item.need,
     best_recorded_tier: item.best_recorded_tier,
     direct_dependents: item.direct_dependents,

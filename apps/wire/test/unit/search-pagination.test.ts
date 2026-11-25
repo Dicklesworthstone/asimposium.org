@@ -53,7 +53,7 @@ test("exact claim occurs once, then claim/problem/Fellow phases continue without
   try {
     f.claim("C-1");
     f.claim("C-2");
-    f.problem("P-test");
+    f.publishedProblem("P-test");
     f.fellow("F-1");
     f.fellow("F-2");
     const exact = {

@@ -322,14 +322,17 @@ test("gap-source outage preserves valid artifacts and does not fabricate an empt
   assert.ok(section.candidates.some((i) => i.kind === "formal-artifact"));
   assert.equal(section.omitted[0]?.reason, "formal_gaps_unavailable");
 });
-test("clean empty baseline requires both complete sources", async () => {
+test("empty selection is stated without asserting a complete empty history", async () => {
   const section = await readFormalPack(
     db,
     "P-DEMO",
     100,
     deps({ records: async () => recordPage(), gaps: async () => gapPage() }),
   );
-  assert.ok(section.candidates.some((i) => i.id === "SYS-formal-empty"));
+  const empty = section.candidates.find((i) => i.id === "SYS-formal-empty");
+  assert.ok(empty);
+  assert.match(empty.body, /not an empty-history/);
+  assert.ok(empty.body.includes("/p/P-DEMO/formal.md?through=100"));
   assert.deepEqual(section.omitted, []);
   const missing = await readFormalPack(
     db,
@@ -660,4 +663,24 @@ test("new public section entry points reject malformed scope before I/O", async 
     await assert.rejects(read(db, "P-DEMO", -1, source), /QUERY_INVALID/);
   }
   assert.equal(calls, 0);
+});
+
+test("formal and graveyard sections request distinct candidate indexes and expose canonical history", async () => {
+  const selections: string[] = [];
+  const source = deps({
+    records: async (_db, _problem, _cursor, _after, selection) => {
+      selections.push(selection ?? "missing");
+      return recordPage();
+    },
+  });
+  const formal = await readFormalRecordSection(db, "P-DEMO", 100, source);
+  const graveyard = await readGraveyardFrictionSection(db, "P-DEMO", 100, source);
+  await readFormalPack(db, "P-DEMO", 100, source);
+  assert.deepEqual(selections, ["formal", "friction", "formal"]);
+  for (const section of [formal, graveyard]) {
+    const notice = section.candidates[0]!.body;
+    assert.match(notice, /candidate index is not an exhaustive history/);
+    assert.ok(notice.includes("/p/P-DEMO/formal.md?through=100"));
+    assert.ok(!notice.includes("complete admissions"));
+  }
 });

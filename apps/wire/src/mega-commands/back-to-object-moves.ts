@@ -79,7 +79,7 @@ export async function selectBackToObjectMove(
       ceremonyNeeds,
     );
     if (!ceremony.active) {
-      return { move: null, degraded: false };
+      return { move: null, degraded: ceremony.degraded };
     }
 
     const template = getMoveTemplate("back-to-the-object");

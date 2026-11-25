@@ -24,8 +24,10 @@ export const PUBLIC_RESOURCE_KINDS = [
   "hypothesis",
   "hypotheses-list",
   "evidence",
+  "evidence-list",
   "evidence-artifacts",
   "review",
+  "reviews-list",
   "citation",
   "citation-version",
   "citations-list",
@@ -54,6 +56,7 @@ export const PUBLIC_RESOURCE_KINDS = [
   "stats",
   "full-pack",
   "governance",
+  "integrity-notices",
 ] as const;
 
 export const FORBIDDEN_PRIVATE_KINDS = [
@@ -61,6 +64,9 @@ export const FORBIDDEN_PRIVATE_KINDS = [
   "workshop-draft",
   "moderation-screening",
   "screening-detail",
+  "integrity-case",
+  "integrity-investigation",
+  "integrity-response",
   "session-private",
   "harness-transcript",
   "private-draft",
@@ -100,6 +106,21 @@ export const PublicResourceEntrySchema = z
 export type PublicResourceEntry = z.infer<typeof PublicResourceEntrySchema>;
 
 export const PUBLIC_RESOURCE_REGISTRY: readonly PublicResourceEntry[] = Object.freeze([
+  {
+    kind: "integrity-notices",
+    title: "Scientific-integrity Notices",
+    description:
+      "Neutral notices and exact correction links; restricted investigations and allegations are never public resources.",
+    agent_markdown_url: "/p/:id/integrity.md",
+    json_url: "/p/:id/integrity.json",
+    html_url: "/p/:id/integrity.html",
+    human_route_key: "/p/:id/integrity",
+    allowed_suffixes: [".md", ".json", ".html"],
+    license_policy_id: LICENSE_POLICY_ID,
+    license: CANONICAL_CONTENT_LICENSE,
+    policy_url: CANONICAL_POLICY_URL,
+    patent_warning_url: CANONICAL_PATENT_WARNING_URL,
+  },
   {
     kind: "problem",
     title: "Problem Digest",
@@ -242,6 +263,21 @@ export const PUBLIC_RESOURCE_REGISTRY: readonly PublicResourceEntry[] = Object.f
     patent_warning_url: CANONICAL_PATENT_WARNING_URL,
   },
   {
+    kind: "evidence-list",
+    title: "Evidence Directory",
+    description:
+      "All public evidence publications for a problem, paginated at a fixed ledger snapshot with immutable attribution and exact targets.",
+    agent_markdown_url: "/p/:id/evidence.md",
+    json_url: "/p/:id/evidence.json",
+    html_url: "/p/:id/evidence.html",
+    human_route_key: "/p/:id/evidence",
+    allowed_suffixes: [".md", ".json", ".html"],
+    license_policy_id: LICENSE_POLICY_ID,
+    license: CANONICAL_CONTENT_LICENSE,
+    policy_url: CANONICAL_POLICY_URL,
+    patent_warning_url: CANONICAL_PATENT_WARNING_URL,
+  },
+  {
     kind: "evidence-artifacts",
     title: "Evidence Artifact Downloads",
     description:
@@ -263,6 +299,21 @@ export const PUBLIC_RESOURCE_REGISTRY: readonly PublicResourceEntry[] = Object.f
     json_url: "/p/:id/reviews/:rid.json",
     human_route_key: "/r/p/:id/reviews/:rid",
     allowed_suffixes: [".md", ".json"],
+    license_policy_id: LICENSE_POLICY_ID,
+    license: CANONICAL_CONTENT_LICENSE,
+    policy_url: CANONICAL_POLICY_URL,
+    patent_warning_url: CANONICAL_PATENT_WARNING_URL,
+  },
+  {
+    kind: "reviews-list",
+    title: "Completed Review Directory",
+    description:
+      "All public completed reviews for a problem, paginated at a fixed ledger snapshot with publication-time independence and exact claim versions.",
+    agent_markdown_url: "/p/:id/reviews.md",
+    json_url: "/p/:id/reviews.json",
+    html_url: "/p/:id/reviews.html",
+    human_route_key: "/p/:id/reviews",
+    allowed_suffixes: [".md", ".json", ".html"],
     license_policy_id: LICENSE_POLICY_ID,
     license: CANONICAL_CONTENT_LICENSE,
     policy_url: CANONICAL_POLICY_URL,

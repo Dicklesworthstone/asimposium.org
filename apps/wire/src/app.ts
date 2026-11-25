@@ -72,14 +72,19 @@ import { createInboxRouter } from "./inbox/router";
 import { createCheckpointFaceRoutes } from "./krater/checkpoint-face.ts";
 import { hiddenByContentControlSql } from "./krater/public-content";
 import { createEventTailRoutes } from "./ledger/event-tail-router";
+import { createEvidenceListRoutes } from "./ledger/evidence-list-http.ts";
 import { createHypothesesRoutes } from "./ledger/hypotheses-router";
+import { createReviewListRoutes } from "./ledger/reviews-list-router.ts";
 import { createStatementRoutes } from "./ledger/statements-router.ts";
 import { createLedgerFaceRoutes } from "./ledger-face";
 import type { MegaCommandsMoveProvider } from "./mega-commands/provider";
 import { loadPublicMoves } from "./mega-commands/public-moves";
 import { createMegaCommandsRouter } from "./mega-commands/router";
 import { createScreeningAppealsApp } from "./moderation/appeals-http";
+import { createIntegrityCaseRouter } from "./moderation/integrity-http.ts";
+import { createIntegrityNoticeRoutes } from "./moderation/integrity-notices-http.ts";
 import { createModerationLogRoutes, createModerationRouter } from "./moderation/router";
+import { createSponsorReportsRouter } from "./moderation/sponsor-reports";
 import { sponsorMutationRefusal } from "./moderation/sponsor-suspension";
 import { createSynthesisDraftsAndExternalReviewsApp } from "./problems/nkz2-router";
 import { createProblemRouter } from "./problems/router";
@@ -95,6 +100,7 @@ import {
   problemMembershipAdmissionProblem,
 } from "./sessions/problem-membership-admission.ts";
 import { createSessionRouter, type PromotionScreener } from "./sessions/router";
+import { createSponsorActivityRouter } from "./sessions/sponsor-activity";
 import { createSponsorWorkshopSearchRouter } from "./sessions/sponsor-workshop-search";
 import { loadPlatformStats } from "./stats/service.ts";
 
@@ -170,6 +176,10 @@ const EXACT_ENROLLMENT_PATHS = new Set([
   "/v1/operators/quarantine/decision",
   "/v1/operators/reports",
   "/v1/operators/reports/resolution",
+  "/v1/operators/integrity/cases/query",
+  "/v1/operators/integrity/cases/read",
+  "/v1/operators/integrity/cases/open",
+  "/v1/operators/integrity/cases/resolve",
   "/v1/operators/screening-appeals",
   "/v1/operators/screening-appeals/decision",
   "/v1/operators/content-control",
@@ -181,11 +191,16 @@ const EXACT_ENROLLMENT_PATHS = new Set([
   "/v1/sponsors/email-preferences",
   "/v1/sponsors/panic",
   "/v1/sponsors/reports",
+  "/v1/sponsors/reports/list",
+  "/v1/sponsors/integrity/cases/query",
+  "/v1/sponsors/integrity/cases/read",
+  "/v1/sponsors/integrity/cases/respond",
   "/v1/sponsors/screening-posture",
   "/v1/sponsors/screening-posture/clear",
   "/v1/sponsors/screening-cases",
   "/v1/sponsors/screening-appeals",
   "/v1/sponsors/workshops/search",
+  "/v1/sponsors/fellow-activity",
   // W3.8 lifecycle (asimposiumorg-mtx): these routes were mounted in the
   // enrollment router but not owned here, so the Worker answered ROUTE_NOT_FOUND.
   "/v1/sponsors/transfers",
@@ -996,7 +1011,6 @@ function enrollmentStack(env: Env, options: CreateAppOptions): EnrollmentStack |
   const router = createEnrollmentRouter({
     service,
     db: env.DB,
-    sponsorPromotionRateLimit: env.SPONSOR_PROMOTION_RATE_LIMIT,
     verifiedSponsor,
     verifiedOperator,
   });
@@ -1006,6 +1020,9 @@ function enrollmentStack(env: Env, options: CreateAppOptions): EnrollmentStack |
     createSynthesisDraftsAndExternalReviewsApp({ db: env.DB, verifiedSponsor, verifiedOperator }),
   );
   router.route("/", createTransactionalEmailApp({ db: env.DB, verifiedSponsor, verifiedOperator }));
+  router.route("/", createIntegrityCaseRouter({ db: env.DB, verifiedSponsor, verifiedOperator }));
+  router.route("/", createSponsorActivityRouter({ verifiedSponsor }));
+  router.route("/", createSponsorReportsRouter({ verifiedSponsor }));
   router.route("/", createSponsorWorkshopSearchRouter({ verifiedSponsor }));
   // A mounted sub-app's default Hono 404 is text/plain. Mark only that internal
   // miss so createApp can replace it with the canonical ProblemDocument without
@@ -1046,7 +1063,6 @@ function enrollmentStack(env: Env, options: CreateAppOptions): EnrollmentStack |
     service,
     db: env.DB,
     movesProvider: options.megaCommandsMovesProvider,
-    sponsorPromotionRateLimit: env.SPONSOR_PROMOTION_RATE_LIMIT,
   });
   megaCommandsRouter.notFound(
     () =>
@@ -1539,6 +1555,9 @@ export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env 
   // Mount before the broad legacy digest/quarantine matcher can consume them.
   app.route("/", createHypothesesRoutes());
   app.route("/", createStatementRoutes());
+  app.route("/", createIntegrityNoticeRoutes());
+  app.route("/", createEvidenceListRoutes());
+  app.route("/", createReviewListRoutes());
 
   // Let only contracted problem and exact-claim faces reach D1. The digest's
   // regex parameter can consume slashes, so unknown nested paths must be

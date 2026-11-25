@@ -489,6 +489,8 @@ export {
   FellowPromotedContributionSchema,
   type FellowReviewItem,
   FellowReviewItemSchema,
+  type FellowReviewOutcome,
+  FellowReviewOutcomeSchema,
 } from "./fellow-card.ts";
 export { isSingleEdit, requestFieldHints, SuggestedFieldsSchema } from "./field-hints.ts";
 export {
@@ -548,6 +550,7 @@ export {
   SponsorInboxSourceRefSchema,
   sponsorInboxPageIsValid,
 } from "./inbox.ts";
+export * from "./integrity-cases.ts";
 export {
   LEASE_OBJECT_KINDS,
   LEASE_STATUSES,
@@ -634,6 +637,8 @@ export {
   ProblemIndexTimestampSchema,
   type ProblemsIndexResponse,
   ProblemsIndexResponseSchema,
+  PUBLIC_PROBLEM_ROSTER_LIMIT,
+  PUBLIC_PROBLEM_ROSTER_NOTICE,
   type PublicClaimState,
   PublicClaimStateSchema,
   PublicClaimTargetSchema,
@@ -641,6 +646,8 @@ export {
   PublicLedgerEventSchema,
   type PublicLedgerProblemId,
   PublicLedgerProblemIdSchema,
+  type PublicProblemRoster,
+  PublicProblemRosterSchema,
   SINGLE_TEAM_PROBLEM_NOTICE,
 } from "./ledger.ts";
 export {
@@ -706,6 +713,8 @@ export {
 export {
   type HelloAssignment,
   HelloAssignmentSchema,
+  type HelloInboxSummary,
+  HelloInboxSummarySchema,
   type HelloOpenSession,
   HelloOpenSessionSchema,
   type HelloUnreadReview,
@@ -751,12 +760,24 @@ export {
   ReportRequestSchema,
   type ReportResponse,
   ReportResponseSchema,
+  SPONSOR_REPORTS_MAX_LIMIT,
+  SPONSOR_REPORTS_MAX_RESPONSE_BYTES,
+  SPONSOR_REPORTS_PAGE_LIMIT,
   type SponsorPostureClearRequest,
   SponsorPostureClearRequestSchema,
   type SponsorPostureClearResponse,
   SponsorPostureClearResponseSchema,
+  type SponsorReportSummary,
+  SponsorReportSummarySchema,
+  type SponsorReportsCursor,
+  SponsorReportsCursorSchema,
+  type SponsorReportsRequest,
+  SponsorReportsRequestSchema,
+  type SponsorReportsResponse,
+  SponsorReportsResponseSchema,
   type SponsorScreeningPostureResponse,
   SponsorScreeningPostureResponseSchema,
+  sponsorReportsMatchRequest,
 } from "./moderation.ts";
 export {
   MODERATION_CONTROL_KINDS,
@@ -1305,10 +1326,14 @@ export {
   ReviewRequestSchema,
   type ReviewResponse,
   ReviewResponseSchema,
+  type ReviewSubmission,
+  ReviewSubmissionSchema,
   type ReviseRequest,
   ReviseRequestSchema,
   type ReviseResponse,
   ReviseResponseSchema,
+  type SessionClosePublicationReceipt,
+  SessionClosePublicationReceiptSchema,
   type SessionCloseRequest,
   SessionCloseRequestSchema,
   type SessionCloseResponse,
@@ -1329,6 +1354,12 @@ export {
   SessionOpenResponseSchema,
   type SessionProvenance,
   SessionProvenanceSchema,
+  type SessionSharedHandoffPin,
+  SessionSharedHandoffPinSchema,
+  type SessionSharedHandoffReceipt,
+  SessionSharedHandoffReceiptSchema,
+  type SessionSharedHandoffRequest,
+  SessionSharedHandoffRequestSchema,
   type SessionStatusResponse,
   SessionStatusResponseSchema,
   SPONSOR_WORKSHOP_CURSOR_MAX_RESPONSE_BYTES,
@@ -1401,6 +1432,7 @@ export {
   type WorkshopReviseRequest,
   WorkshopReviseRequestSchema,
 } from "./sessions.ts";
+export * from "./sponsor-activity.ts";
 export * from "./sponsor-follows.ts";
 export * from "./statements.ts";
 export {

@@ -1,10 +1,11 @@
 import { NowStripQuerySchema } from "@asimposium/contracts";
 import type { Metadata } from "next";
 import Link from "next/link";
-import { PublicReadUnavailable } from "@/components/public-read-unavailable";
+import { ThemeToggle } from "@/app/theme-toggle";
 import { PublicLedgerLive } from "@/components/public-ledger-live";
-import { publicViewWatchTargets } from "@/lib/public-watch-view";
+import { PublicReadUnavailable } from "@/components/public-read-unavailable";
 import { stoaFetchNowStrip } from "@/lib/public-ledger";
+import { publicViewWatchTargets } from "@/lib/public-watch-view";
 import { SITE } from "@/lib/site";
 
 export const metadata: Metadata = {
@@ -51,6 +52,9 @@ export default async function NowPage({
           <p className="quiet">
             Material events append-only stream. Current cursor: <code>{cursor}</code>.
           </p>
+          <div className="theme-toggle-row">
+            <ThemeToggle />
+          </div>
         </header>
         <PublicLedgerLive origin={nowData.origin} targets={publicViewWatchTargets(nowData.watch)} />
 
@@ -100,6 +104,13 @@ export default async function NowPage({
                     <strong>{event.summary}</strong>
                   </p>
                   <footer className="event-footer quiet">
+                    <Link
+                      href={`/r/p/${encodeURIComponent(event.problem_id)}/events/${event.seq}`}
+                      prefetch={false}
+                    >
+                      Read publication event
+                    </Link>
+                    {" · "}
                     <span>
                       Problem:{" "}
                       <Link href={`/p/${encodeURIComponent(event.problem_id)}`}>
@@ -147,7 +158,8 @@ export default async function NowPage({
           </h2>
           <p className="quiet">
             Only <strong>object-level events</strong> feed the Now strip: promoted claims, published
-            reviews, filed evidence, killed hypotheses, and checked dead ends.
+            claim revisions, published reviews, filed evidence, killed hypotheses, and substantive
+            dead ends. Statement work also appears when it was published during sharpening.
           </p>
           <p className="quiet">
             Session lifecycle markers, heartbeats, pack retrievals, and workshop scratch events are

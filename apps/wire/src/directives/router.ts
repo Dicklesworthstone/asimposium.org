@@ -9,8 +9,24 @@ import {
 import { Hono } from "hono";
 import type { Env } from "../env.ts";
 import { problem } from "../http/envelope.ts";
+import { hiddenByContentControlSql } from "../krater/public-content.ts";
 
 const MAX_IDEMPOTENCY_KEY = 160;
+
+// A sponsor may route its unbound Fellow toward publicly joinable work before
+// that Fellow opens its first session. This authorizes private focus delivery
+// only; memberships, scope grants and session admission remain unchanged.
+// Keep the predicate inside both inserts so late access changes roll back the
+// notice and its receipt together.
+const OPEN_PROBLEM_FOCUS_SQL = `? = 'focus'
+  AND json_extract(g.granted_resources_json, '$.problemBinding') IS NULL
+  AND json_extract(g.granted_resources_json, '$.problem_binding') IS NULL
+  AND EXISTS (SELECT 1 FROM problems recruitment
+    WHERE recruitment.id = ? AND recruitment.unlisted = 0
+      AND recruitment.admission_mode = 'open'
+      AND recruitment.status IN ('sharpening', 'active', 'dormant', 'under-result-review')
+      AND NOT ${hiddenByContentControlSql("recruitment.id", "'problem'")}
+      AND NOT ${hiddenByContentControlSql("recruitment.id", "recruitment.id")})`;
 
 export interface DirectiveRouterOptions {
   readonly verifiedSponsor: (
@@ -182,7 +198,8 @@ export function createDirectiveRouter(options: DirectiveRouterOptions): Hono<{ B
             ? = json_extract(g.granted_resources_json, '$.problemBinding') OR
             ? = json_extract(g.granted_resources_json, '$.problem_binding') OR
             EXISTS (SELECT 1 FROM problem_memberships m
-              WHERE m.problem_id = ? AND m.fellow_id = f.fellow_id))
+              WHERE m.problem_id = ? AND m.fellow_id = f.fellow_id) OR
+            (${OPEN_PROBLEM_FOCUS_SQL}))
         ON CONFLICT(id) DO NOTHING`).bind(
         noticeId,
         requestedProblem,
@@ -195,6 +212,8 @@ export function createDirectiveRouter(options: DirectiveRouterOptions): Hono<{ B
         requestedProblem,
         requestedProblem,
         requestedProblem,
+        requestedProblem,
+        parsed.data.verb,
         requestedProblem,
       ),
       c.env.DB.prepare(`INSERT INTO sponsor_directives
@@ -213,7 +232,8 @@ export function createDirectiveRouter(options: DirectiveRouterOptions): Hono<{ B
             ? = json_extract(g.granted_resources_json, '$.problemBinding') OR
             ? = json_extract(g.granted_resources_json, '$.problem_binding') OR
             EXISTS (SELECT 1 FROM problem_memberships m
-              WHERE m.problem_id = ? AND m.fellow_id = f.fellow_id))
+              WHERE m.problem_id = ? AND m.fellow_id = f.fellow_id) OR
+            (${OPEN_PROBLEM_FOCUS_SQL}))
         ON CONFLICT(sponsor_id, idempotency_key) DO NOTHING`).bind(
         directiveId,
         sponsorId,
@@ -232,6 +252,8 @@ export function createDirectiveRouter(options: DirectiveRouterOptions): Hono<{ B
         requestedProblem,
         requestedProblem,
         requestedProblem,
+        parsed.data.verb,
+        requestedProblem,
       ),
       c.env.DB.prepare(`SELECT CASE WHEN EXISTS (
           SELECT 1 FROM sponsor_directives d
@@ -247,9 +269,9 @@ export function createDirectiveRouter(options: DirectiveRouterOptions): Hono<{ B
         requestDigest,
       ),
     ]).catch((error: unknown) => {
-      // The guard aborts the batch when the target is not an active Fellow of
-      // this sponsor on an assigned problem, or a concurrent request took the
-      // key: the read below answers 404 or 409, not 500. Other failures throw.
+      // The guard aborts the batch when current ownership or problem routing
+      // no longer permits delivery, or a concurrent request took the key:
+      // the read below answers 404 or 409, not 500. Other failures throw.
       if (!isDirectiveNotCommitted(error)) throw error;
     });
 
@@ -259,8 +281,8 @@ export function createDirectiveRouter(options: DirectiveRouterOptions): Hono<{ B
         404,
         "DIRECTIVE_TARGET_NOT_FOUND",
         "Directive target unavailable",
-        "The requested Fellow is not an active Fellow owned by this sponsor, or the problem is outside the Fellow's assignment.",
-        "Refresh the sponsor console and direct only an active Fellow on an assigned problem.",
+        "The Fellow is not active under this sponsor, or the problem is neither assigned nor eligible for an unbound Fellow's focus request.",
+        "Use an active owned Fellow on an assigned problem, or send focus to an unbound Fellow for a visible, listed, open problem. Session admission and granted scopes still apply.",
       );
     }
     if (saved.request_digest !== requestDigest) {

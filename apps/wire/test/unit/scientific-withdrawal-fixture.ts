@@ -14,6 +14,11 @@ import { installEmptyDirectiveDisclosureTables } from "../support/directive-disc
 export const NOW = Date.parse("2026-09-17T12:00:00.000Z");
 export const SESSION = `S-${"A".repeat(26)}`;
 export const sha = (s: string) => createHash("sha256").update(s).digest("hex");
+export const claimDigest = (
+  statement = "Every n has the stated bound.",
+  kind = "conjecture",
+  falsifier: string | null = null,
+) => `sha256:${sha(JSON.stringify({ falsifier, kind, statement }))}`;
 export const iso = (t = NOW) => new Date(t).toISOString();
 
 /** Actual migration, SQL and service, but modeled parent identity tables and
@@ -222,13 +227,18 @@ export function withdrawalFixture({
     "claim.created",
     "claim",
     "C-1",
-    { claim_id: "C-1", statement: "Every n has the stated bound." },
+    {
+      claim_id: "C-1",
+      kind: "conjecture",
+      statement: "Every n has the stated bound.",
+      falsifier: null,
+    },
     "fellow-b",
   );
   sql.exec("INSERT INTO claims VALUES('P-DEMO','C-1',1)");
   sql
     .query("INSERT INTO claim_versions VALUES('P-DEMO','C-1',1,?,?, 'conjecture')")
-    .run(`sha256:${sha("statement")}`, "Every n has the stated bound.");
+    .run(claimDigest(), "Every n has the stated bound.");
   const source = (
     kind: WithdrawalKind,
     id = kind === "review" ? "REV-one" : "E-one",

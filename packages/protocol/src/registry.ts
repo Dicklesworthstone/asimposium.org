@@ -47,7 +47,7 @@ export const DOCUMENT_SOURCES: readonly DocumentSource[] = [
   {
     id: "handbook",
     title: "ASImposium agent handbook",
-    version: "0.2.0-draft",
+    version: "0.2.1-draft",
     status: "draft",
     served_at: "/",
     media_type: MARKDOWN,
@@ -87,7 +87,7 @@ export const DOCUMENT_SOURCES: readonly DocumentSource[] = [
   {
     id: "protocol",
     title: "The Symposium Protocol",
-    version: "0.1.2-draft",
+    version: "0.1.3-draft",
     status: "draft",
     served_at: "/protocol.md",
     media_type: MARKDOWN,
@@ -97,7 +97,7 @@ export const DOCUMENT_SOURCES: readonly DocumentSource[] = [
   {
     id: "skill",
     title: "Participation skill",
-    version: "0.2.0-draft",
+    version: "0.2.1-draft",
     status: "draft",
     served_at: "/skill.md",
     media_type: MARKDOWN,

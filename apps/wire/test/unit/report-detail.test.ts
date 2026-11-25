@@ -2,6 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import {
   AdminReportDetailSchema,
   ProblemDocumentSchema,
+  type ReportReason,
   ReportResponseSchema,
 } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
@@ -19,7 +20,7 @@ import {
   readOperatorReportDetail,
 } from "../../src/moderation/report-detail.ts";
 import { fileReportRequest } from "../../src/moderation/router.ts";
-import { fileReport } from "../../src/moderation/store.ts";
+import { currentContentControl, fileReport, resolveReport } from "../../src/moderation/store.ts";
 import { resolveModerationTarget } from "../../src/moderation/target.ts";
 import { PROBLEM, publicationContextFixture } from "../support/publication-context.ts";
 
@@ -67,14 +68,18 @@ async function fixture() {
       { statementsAfterEvent: () => [] },
     );
   };
-  const report = async (target = "C-1@1", sponsor = REPORTER.reporterSponsorId) => {
+  const report = async (
+    target = "C-1@1",
+    sponsor: string = REPORTER.reporterSponsorId,
+    reason: ReportReason = "integrity",
+  ) => {
     const response = await fileReportRequest(
       f.db,
       { ...REPORTER, reporterSponsorId: sponsor },
       {
         problem_id: PROBLEM,
         target,
-        reason: "integrity",
+        reason,
         note: NOTE,
       },
     );
@@ -116,7 +121,11 @@ test("reported claim version remains exact through revisions, hiding and sponsor
     note: "A replay must not replace the original allegation or source.",
   });
   expect(replay.status).toBe(200);
-  expect(ReportResponseSchema.parse(await replay.json()).report_id).toBe(receipt.report_id);
+  expect(ReportResponseSchema.parse(await replay.json())).toMatchObject({
+    report_id: receipt.report_id,
+    target: "C-1@1",
+    deduplicated: true,
+  });
   expect(await readOperatorReportDetail(f.db, receipt.report_id)).toEqual(detail);
   const queue = JSON.stringify(await (await operatorReportsQueue(f.db)).json());
   expect(queue).not.toContain(NOTE);
@@ -137,6 +146,42 @@ test("unversioned reports retain the publication captured at filing without clai
     requested_target: "C-1",
     event_id: captured.eventId,
     object_version: 2,
+  });
+});
+
+test("reviewing one publication leaves other revisions and legacy reports pending", async () => {
+  const f = await fixture();
+  await f.publish(1);
+  const initial = await f.report("C-1@1", "sponsor-one", "privacy");
+  const samePublication = await f.report("C-1", "sponsor-two", "privacy");
+  await f.publish(2);
+  const revised = await f.report("C-1@2", "sponsor-three", "privacy");
+  const unpinned = await fileReport(f.db, {
+    problemId: PROBLEM,
+    targetKind: "claim",
+    targetRef: "C-1",
+    reason: "privacy",
+    note: null,
+    ...REPORTER,
+  });
+  const status = async (id: string) => (await readOperatorReportDetail(f.db, id))?.report.status;
+  const review = (id: string, resolution: "dismiss" | "uphold") =>
+    resolveReport(f.db, "reviewer", {
+      reportId: id,
+      resolution,
+      reason: "Reviewed the available source for this allegation.",
+    });
+  expect((await review(initial.report_id, "dismiss")).ok).toBe(true);
+  expect(await status(samePublication.report_id)).toBe("dismissed");
+  expect(await status(revised.report_id)).toBe("pending");
+  expect(await status(unpinned.reportId)).toBe("pending");
+  expect((await currentContentControl(f.db, PROBLEM, "C-1"))?.source).toBe("community-reports");
+  expect((await review(revised.report_id, "uphold")).ok).toBe(true);
+  expect(await status(unpinned.reportId)).toBe("pending");
+  expect((await review(unpinned.reportId, "dismiss")).ok).toBe(true);
+  expect(await currentContentControl(f.db, PROBLEM, "C-1")).toMatchObject({
+    visibility: "hidden",
+    source: "operator",
   });
 });
 

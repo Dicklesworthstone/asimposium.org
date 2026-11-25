@@ -1,10 +1,14 @@
 import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
+import { getMoveTemplate } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
 import type { FellowCredentialBinding } from "../../src/enrollment/service.ts";
 import { readPublishedProblemFormulation } from "../../src/ledger/problem-formulation-read.ts";
 import { type DigestPackDependencies, readDigestPack } from "../../src/sessions/digest.ts";
-import type { WorkingMovesPackSection } from "../../src/sessions/working-moves.ts";
+import {
+  readWorkingMovesPack,
+  type WorkingMovesPackSection,
+} from "../../src/sessions/working-moves.ts";
 
 const PROBLEM = "P-DIGEST";
 const STATEMENT = "For every integer n, n squared and n have equal parity.";
@@ -126,6 +130,39 @@ function summary(section: Awaited<ReturnType<typeof readDigestPack>>) {
 }
 
 describe("compact digest pack", () => {
+  test("digest preserves the canonical selector's evidence and dead-end recommendations", async () => {
+    const f = await fixture();
+    for (const kind of ["add-refuter", "record-dead-end"] as const) {
+      const result = await f.read({
+        moves: (input) =>
+          readWorkingMovesPack(input, {
+            async nextMoves() {
+              return {
+                primaryMove: {
+                  move: kind,
+                  why: "Check the recorded result.",
+                  refs: [PROBLEM, "C-1@1"],
+                  contract: {
+                    ...getMoveTemplate(kind),
+                    preparation: { problem_id: PROBLEM, captured_cursor: input.cursor },
+                  },
+                },
+                alternatives: [],
+                capturedCursor: input.cursor,
+                degraded: false,
+                effectivePermissions: { session_open: true, evidence: true, dead_end: true },
+              };
+            },
+            async triageMove() {
+              throw new Error("unexpected triage call");
+            },
+          }),
+      });
+      expect(summary(result).next_move).toEqual({ move: kind, refs: ["C-1@1"] });
+      expect(result.actions.every((action) => action.method === "GET")).toBe(true);
+    }
+  });
+
   test("hashes the verified statement and counts visible publication records without transferring bodies", async () => {
     const f = await fixture();
     await f.append("claim.created", "claim", "C-1");

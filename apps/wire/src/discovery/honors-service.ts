@@ -9,7 +9,11 @@ import {
 import type { D1Database } from "@cloudflare/workers-types";
 import { sha256Hex } from "../krater/krater.ts";
 import { hiddenByContentControlSql } from "../krater/public-content.ts";
-import { readScientificDispositions } from "../ledger/scientific-disposition.ts";
+import {
+  readScientificDispositions,
+  type ScientificDisposition,
+  ScientificReadBudgetExceededError,
+} from "../ledger/scientific-disposition.ts";
 import { readHonorsDagContexts } from "./honors-context.ts";
 import { honorsCandidateVersion } from "./honors-eligibility.ts";
 import {
@@ -83,7 +87,15 @@ export async function loadHonorsRecord(
   for (const problem of problems.results) {
     // This bounded shared fold is a cheap candidate selector only. The exact
     // publication/dependency snapshot below must independently earn recognition.
-    const dispositions = await readScientificDispositions(db, problem.id, problem.public_seq, 100);
+    let dispositions = new Map<string, ScientificDisposition>();
+    try {
+      dispositions = await readScientificDispositions(db, problem.id, problem.public_seq, 100);
+    } catch (error) {
+      if (!(error instanceof ScientificReadBudgetExceededError)) throw error;
+      unavailable.add(
+        "some candidate histories exceed the scientific read budget; no recognition is inferred from a partial history; exact published resolution claims are checked independently",
+      );
+    }
     const records = new Map<string, HonorsClaimRecord>();
     const readClaim = async (claim: string, version: number): Promise<HonorsClaimRecord | null> => {
       const target = `${claim}@${version}`;

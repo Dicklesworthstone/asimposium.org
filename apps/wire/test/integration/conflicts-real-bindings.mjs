@@ -257,6 +257,24 @@ await runLocalWorkerJourney(async (context) => {
   assert.equal(await clearScreeningPosture(sponsorA), 1, "the author was quarantine-first");
 
   // 6. A publishable screening warning must carry the normalization, not hold it.
+  // The public notice is server-owned, never accepted from the author.
+  const conflictWarning = {
+    category: "dual-use-boundary",
+    action: "published-with-warning",
+    notice: "screening-warning",
+  };
+  const screensBeforeForgery = await fixtures.screeningCalls();
+  const forgedConflict = await call(
+    `/v1/sessions/${sessionIdA}/conflicts`,
+    { ...validPayload, screening_notice: conflictWarning },
+    authorA,
+    422,
+    "conflict-forged-warning",
+  );
+  assert.equal(forgedConflict.code, "CONFLICT_BODY_INVALID");
+  assert.equal(await fixtures.screeningCalls(), screensBeforeForgery);
+
+  // 6. Normalization: a publishable warning preserves the scientific account.
   await fixtures.setScreenMode("allow-with-warning");
   const normalized = await call(
     `/v1/sessions/${sessionIdA}/conflicts`,
@@ -266,6 +284,7 @@ await runLocalWorkerJourney(async (context) => {
     "idempotent-normalize-key-1",
   );
   await fixtures.setScreenMode("pass");
+  const screensAfterNormalization = await fixtures.screeningCalls();
   NormalizeConflictResponseSchema.parse(normalized);
   const warning = {
     action: "published-with-warning",
@@ -287,6 +306,8 @@ await runLocalWorkerJourney(async (context) => {
     "idempotent-normalize-key-1",
   );
   assert.equal(replayed.conflict_id, conflictId);
+  assert.deepEqual(replayed, normalized, "warning publication replays its original receipt");
+  assert.equal(await fixtures.screeningCalls(), screensAfterNormalization);
 
   // 7. Duplicate open conflict refusal (409)
   const duplicateConflict = await call(
@@ -318,6 +339,7 @@ await runLocalWorkerJourney(async (context) => {
   assert.deepEqual(firstConflict.screening_notice, warning);
   assert.equal(firstConflict.conflict_id, conflictId);
   assert.equal(firstConflict.status, "open");
+  assert.deepEqual(firstConflict.screening_notice, conflictWarning);
   assert.equal(firstConflict.claims[0].claim_id, claim1Id);
   assert.equal(firstConflict.claims[1].claim_id, claim2Id);
   assert.equal(conflictsJson.target, null);
@@ -358,6 +380,11 @@ await runLocalWorkerJourney(async (context) => {
   assert.ok(conflictsMd.includes(conflictId));
   assert.ok(conflictsMd.includes("open"));
   assert.ok(conflictsMd.includes("Smallest Disagreement"));
+  assert.equal(conflictsMd.split("Published with a screening context notice:").length - 1, 1);
+  assert.ok(
+    conflictsMd.indexOf("Published with a screening context notice:") <
+      conflictsMd.indexOf(validPayload.aligned_definitions),
+  );
 
   const conflictsHtmlRes = await worker.fetch(`${origin}/p/${problemId}/conflicts.html`);
   assert.equal(conflictsHtmlRes.status, 200);
@@ -369,6 +396,7 @@ await runLocalWorkerJourney(async (context) => {
     const notice = text.indexOf(warningText);
     assert.ok(notice >= 0 && notice < text.indexOf("Claim 1 bounds the cycle length by"));
   }
+  assert.equal(conflictsHtml.split('data-screening-notice="screening-warning"').length - 1, 1);
 
   // --------------------------------------------------------------------------
   // RESOLUTION JOURNEY
@@ -411,6 +439,15 @@ await runLocalWorkerJourney(async (context) => {
         .all()
         .then((result) => result.results),
   });
+  const forgedResolution = await call(
+    `/v1/sessions/${sessionIdA}/conflicts/${conflictId}/resolve`,
+    { ...resolvePayload, screening_notice: conflictWarning },
+    authorA,
+    422,
+    "conflict-forged-resolution-warning",
+  );
+  assert.equal(forgedResolution.code, "CONFLICT_BODY_INVALID");
+  await fixtures.setScreenMode("allow-with-warning");
   const resolved = await call(
     `/v1/sessions/${sessionIdA}/conflicts/${conflictId}/resolve`,
     resolvePayload,
@@ -418,6 +455,8 @@ await runLocalWorkerJourney(async (context) => {
     200,
     "idempotent-resolve-key-1",
   );
+  await fixtures.setScreenMode("pass");
+  const screensAfterResolution = await fixtures.screeningCalls();
   ResolveConflictResponseSchema.parse(resolved);
   assert.equal(resolved.conflict_id, conflictId);
   assert.equal(resolved.status, "resolved");
@@ -433,6 +472,31 @@ await runLocalWorkerJourney(async (context) => {
   );
   assert.equal(resolveReplay.conflict_id, conflictId);
   assert.equal(resolveReplay.status, "resolved");
+  assert.deepEqual(resolveReplay, resolved);
+  assert.equal(await fixtures.screeningCalls(), screensAfterResolution);
+
+  for (const seq of [normalized.seq, resolved.seq]) {
+    const receipts = await env.DB.prepare(
+      `SELECT s.provenance_json FROM events e
+       JOIN screening_publications s ON s.event_id=e.id
+       WHERE e.problem_id=? AND e.seq=?`,
+    )
+      .bind(problemId, seq)
+      .all();
+    assert.equal(receipts.results.length, 1, "one exact account receipt after replay");
+    assert.deepEqual(
+      JSON.parse(receipts.results[0].provenance_json).public_action,
+      conflictWarning,
+    );
+    const pack = await call(
+      `/v1/sessions/${sessionIdA}/pack?profile=full&max_tokens=8000&through=${seq}&after=${seq - 1}`,
+      undefined,
+      authorA,
+    );
+    const account = pack.items.find((item) => item.kind === "full-event");
+    assert.deepEqual(account?.screening_notice, conflictWarning);
+    assert.ok(!Object.hasOwn(JSON.parse(account.body).content, "screening_notice"));
+  }
 
   // 10. Already settled conflict refusal (409)
   const alreadySettled = await call(
@@ -454,6 +518,7 @@ await runLocalWorkerJourney(async (context) => {
   assert.equal(updatedJson.conflicts[0].status, "resolved");
   assert.equal(updatedJson.conflicts[0].resolution, resolvePayload.resolution);
   assert.deepEqual(updatedJson.conflicts[0].screening_notice, warning);
+  assert.deepEqual(updatedJson.conflicts[0].screening_notice, conflictWarning);
   assert.deepEqual(updatedJson.conflicts[0].resolution_event, {
     event_id: (
       await env.DB.prepare("SELECT id FROM events WHERE problem_id = ? AND seq = ?")
@@ -467,6 +532,7 @@ await runLocalWorkerJourney(async (context) => {
     model_string_self_declared: firstConflict.model_string_self_declared,
     harness: firstConflict.harness,
     created_at: resolved.resolved_at,
+    screening_notice: conflictWarning,
   });
   const historicalResponse = await worker.fetch(`${origin}${exactOpenPath}`);
   assert.equal(historicalResponse.status, 200);
@@ -483,6 +549,7 @@ await runLocalWorkerJourney(async (context) => {
   const updatedMd = await updatedMdRes.text();
   assert.ok(updatedMd.includes("resolved"));
   assert.ok(updatedMd.includes("### Resolution"));
+  assert.equal(updatedMd.split("Published with a screening context notice:").length - 1, 2);
 
   // A second admitted disagreement proves continuation is an actual next page,
   // including an empty filtered first page, rather than a truncation notice.
@@ -523,8 +590,10 @@ await runLocalWorkerJourney(async (context) => {
     `${origin}/p/${problemId}/conflicts.json?limit=1&target=${second.conflict_id}`,
   );
   assert.equal(exactSecond.status, 200);
+  const exactSecondBody = await exactSecond.json();
+  assert.equal(exactSecondBody.conflicts[0].screening_notice, undefined);
   assert.deepEqual(
-    (await exactSecond.json()).conflicts.map((item) => item.conflict_id),
+    exactSecondBody.conflicts.map((item) => item.conflict_id),
     [second.conflict_id],
   );
   const frozenAgain = await worker.fetch(`${origin}${exactOpenPath}`, {

@@ -115,6 +115,30 @@ export function renderTriageMarkdown(response: TriageResponse): string {
         "",
       );
   }
+  lines.push("## Inbox feedback", "");
+  if (response.hello.inbox !== undefined) {
+    lines.push(
+      "```json",
+      JSON.stringify(
+        {
+          inbox: response.hello.inbox,
+          unread_reviews: response.hello.unread_reviews ?? [],
+        },
+        null,
+        2,
+      )
+        .replaceAll("`", "\\u0060")
+        .replaceAll("<", "\\u003c"),
+      "```",
+      "Read the inbox for complete notices and next actions. This summary does not acknowledge receipt.",
+      "",
+    );
+  } else {
+    lines.push(
+      "Inbox feedback is currently unavailable. Use the inbox read action below; absence of a summary does not mean there are no notices.",
+      "",
+    );
+  }
   if (response.hello.next_actions.length > 0) {
     // Preserve the authenticated bootstrap's instruction continuation before
     // any proposed move. JSON retains the exact server-authored action shape.

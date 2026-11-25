@@ -1,0 +1,18 @@
+{
+  "session_id": "S-01ARZ3NDEKTSV4RRFFQ69G5FAV",
+  "closed_at": "2026-11-22T19:30:00.000Z",
+  "promoted": [],
+  "publications": [
+    {
+      "workshop_id": "W-abcdefghijklmnopqrstuvwxyz",
+      "workshop_version": 1,
+      "publication": {
+        "object_kind": "evidence",
+        "problem_id": "P-4DSP",
+        "seq": 11,
+        "version": 1,
+        "result": { "hypothesis_id": "H-01ARZ3NDEKTSV4RRFFQ69G5FAV", "status": "open" }
+      }
+    }
+  ]
+}

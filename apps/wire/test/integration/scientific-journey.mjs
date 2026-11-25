@@ -15,6 +15,239 @@ import { scientificContentGuards } from "../../src/ledger/scientific-checks.ts";
 import { claimDependencies } from "./claim-dependencies.mjs";
 import { outboxFairness } from "./outbox-fairness.mjs";
 
+/** A failed counterexample can be corrected without changing the proposition.
+ * All publications, resolutions and withdrawals go through the real Worker. */
+export async function refutationResolutionJourney({
+  call,
+  enroll,
+  fixtures,
+  env,
+  worker,
+  origin,
+  userAgent,
+}) {
+  const problem = "P-REFUTATION-RESOLUTION";
+  await fixtures.seedProblem(problem);
+  const actors = {};
+  for (const name of ["author", "evidence", "resolver"]) {
+    const token = await enroll(`resolution-${name}`, `usr_resolution_${name}`);
+    const session = await call(
+      "/v1/sessions",
+      { problem_id: problem, intent: "explore" },
+      token,
+      201,
+    );
+    actors[name] = { token, path: `/v1/sessions/${session.session_id}` };
+  }
+  const { author, evidence, resolver } = actors;
+  const draft = await call(
+    `${author.path}/workshop`,
+    {
+      type: "claim-draft",
+      title: "Integer domain check",
+      body_md: "Private integer-domain scratch.",
+      relates_to: [],
+    },
+    author.token,
+    201,
+  );
+  const claim = await call(
+    `${author.path}/promote`,
+    {
+      workshop_id: draft.workshop_id,
+      kind: "conjecture",
+      statement: "For every integer n, 2n is even.",
+      falsifier: "An integer n whose double is odd.",
+      relates_to: [],
+    },
+    author.token,
+    201,
+  );
+  const claimPath = `/p/${problem}/claims/${claim.claim_id}@1`;
+  const read = async (through) =>
+    ClaimFaceResponseSchema.parse(
+      await call(`${claimPath}.json${through === undefined ? "" : `?through=${through}`}`),
+    );
+  const initial = await read();
+  const detail = JSON.parse(initial.items.find((item) => item.kind === "claim-detail").body);
+  const source = async (kind, id) => {
+    const result = await env.DB.prepare(
+      "SELECT id, seq, payload_sha256 FROM events WHERE problem_id = ? AND object_kind = ? AND object_id = ?",
+    )
+      .bind(problem, kind, id)
+      .first();
+    assert.ok(result);
+    return result;
+  };
+  const counterexample = async (input) => {
+    const published = await call(
+      `${evidence.path}/evidence`,
+      {
+        bears_on_kind: "claim",
+        bears_on_id: claim.claim_id,
+        bears_on_version: 1,
+        direction: "refutes",
+        kind: "computation",
+        mode: "confirmatory",
+        source: {
+          kind: "locator",
+          locator: `https://example.invalid/domain-check/${input}`,
+          excerpt: `The reported input is ${input}/2; its double is ${input}.`,
+        },
+        computation_domain_or_floor: `The rational singleton {${input}/2}, rather than the quantified integer domain.`,
+        body_md: `Reported counterexample n=${input}/2 gives the odd double ${input}. Its domain must be independently checked.`,
+      },
+      evidence.token,
+      201,
+    );
+    return { ...published, source: await source("evidence", published.evidence_id) };
+  };
+  const first = await counterexample(1);
+  const second = await counterexample(3);
+  const disputed = await read();
+  assert.equal(disputed.claim_state.disposition, "disputed");
+  assert.equal(disputed.claim_state.recorded_refutation_attempts, 2);
+  function mismatch(target) {
+    return {
+      target_claim_id: claim.claim_id,
+      target_version: 1,
+      verdict: "inform",
+      basis: "Recomputed the exact cited witness and checked the integer-domain hypothesis.",
+      capable_of_failure: "An integer witness with an odd double would confirm the counterexample.",
+      body_md:
+        "The submitted rational witness is not an integer. It does not refute this exact quantified statement; this finding alone does not verify the claim.",
+      verification: {
+        kind: "refutation",
+        target_digest: detail.content_digest,
+        evidence: {
+          evidence_id: target.evidence_id,
+          digest: `sha256:${target.source.payload_sha256}`,
+        },
+        coverage: ["Exact claim statement", "Witness membership in the integer domain"],
+        result: "mismatch",
+      },
+    };
+  }
+  const beforeRefusal = disputed.cursor;
+  await call(`${evidence.path}/review`, mismatch(first), evidence.token, 422);
+  await call(
+    `${resolver.path}/review`,
+    {
+      ...mismatch(first),
+      verification: { ...mismatch(first).verification, target_digest: `sha256:${"0".repeat(64)}` },
+    },
+    resolver.token,
+    422,
+  );
+  assert.equal(
+    (await read()).cursor,
+    beforeRefusal,
+    "Dependent and mistargeted findings cannot write or resolve science",
+  );
+  const resolvedFirst = await call(`${resolver.path}/review`, mismatch(first), resolver.token, 201);
+  assert.equal(
+    (await read()).claim_state.disposition,
+    "disputed",
+    "The second counterexample remains unresolved",
+  );
+  const key = "independent-counterevidence-resolution";
+  const resolvedSecond = await call(
+    `${resolver.path}/review`,
+    mismatch(second),
+    resolver.token,
+    201,
+    key,
+  );
+  const resolved = await read();
+  assert.equal(resolved.claim_state.disposition, "open");
+  assert.equal(resolved.claim_state.review_state, "unreviewed");
+  assert.equal(resolved.claim_state.recorded_refutation_attempts, 0);
+  const resolutionSource = await source("review", resolvedSecond.review_id);
+  assert.deepEqual(resolved.claim_state.status_basis, {
+    kind: "transition",
+    event_id: resolutionSource.id,
+    seq: resolutionSource.seq,
+    from: "disputed",
+    to: "open",
+    cause: "review-created",
+  });
+  assert.ok(
+    resolved.items.some((item) => item.id === first.evidence_id),
+    "Resolved counterevidence remains in the public record",
+  );
+  assert.ok(resolved.items.some((item) => item.id === second.evidence_id));
+  const replay = await call(`${resolver.path}/review`, mismatch(second), resolver.token, 200, key);
+  assert.deepEqual(replay, resolvedSecond);
+  assert.equal((await read()).cursor, resolved.cursor);
+  assert.equal(
+    (await read(disputed.cursor)).claim_state.disposition,
+    "disputed",
+    "A frozen cursor cannot borrow a later mismatch finding",
+  );
+  const pack = PackResponseSchema.parse(
+    await call(`${resolver.path}/pack?profile=working&max_tokens=8000`, undefined, resolver.token),
+  );
+  const packed = pack.items.find((item) => item.kind === "claim" && item.id === claim.claim_id);
+  assert.ok(
+    packed.body.includes(", open · review: unreviewed"),
+    "Working pack and public face share the same resolved fold",
+  );
+  for (const suffix of ["md", "html"]) {
+    const response = await worker.fetch(`${origin}${claimPath}.${suffix}`, {
+      headers: { "User-Agent": userAgent },
+    });
+    assert.equal(response.status, 200);
+    const body = await response.text();
+    assert.ok(body.includes(resolved.fingerprint));
+    assert.ok(!body.includes("Private integer-domain scratch."));
+  }
+  const firstReview = await source("review", resolvedFirst.review_id);
+  await call(
+    `${resolver.path}/reviews/${resolvedFirst.review_id}/retract`,
+    {
+      source_event_id: firstReview.id,
+      source_digest: `sha256:${firstReview.payload_sha256}`,
+      reason: "Withdrawing my mismatch assessment pending a fresh check of the input domain.",
+    },
+    resolver.token,
+    200,
+  );
+  assert.equal(
+    (await read()).claim_state.disposition,
+    "disputed",
+    "A withdrawn resolver cannot continue discharging its objection",
+  );
+  const renewed = await call(`${resolver.path}/review`, mismatch(first), resolver.token, 201);
+  assert.equal(
+    (await read()).claim_state.disposition,
+    "open",
+    "A fresh independent finding can resolve the exact remaining objection",
+  );
+  const renewedSource = await source("review", renewed.review_id);
+  await fixtures.redactPublicContent(renewedSource.id);
+  const hidden = await read();
+  assert.equal(hidden.claim_state.disposition, "disputed");
+  assert.equal(hidden.claim_state.stale, true);
+  assert.ok(!hidden.items.some((item) => item.id === renewed.review_id));
+  console.log(
+    JSON.stringify({
+      kind: "refutation-resolution-real-bindings",
+      status: "pass",
+      assertions: [
+        "exact independent mismatch",
+        "each objection resolved separately",
+        "no invented support",
+        "source retention",
+        "frozen cursor",
+        "receipt replay",
+        "pack and public face parity",
+        "withdrawal and hidden resolver revoke resolution",
+      ],
+      boundary: "real local Workerd/D1/R2; fixture enrollment, initial problem and screening",
+    }),
+  );
+}
+
 // Known-outcome scientific products, exercised through the production HTTP app.
 // Only sponsor setup, empty problem creation and classifier decisions use the
 // existing local fixture seam. No scientific event or final state is seeded.
@@ -639,6 +872,54 @@ export async function scientificJourney({
   );
   await standing("open · unchallenged");
 
+  // An author-supplied certificate label must not mint computational standing.
+  // Without an artifact scan or a sourced excerpt this is still an assertion,
+  // and a second publication cannot launder it into a falsification attempt.
+  const unscannedCertificate = await call(
+    `${author.path}/evidence`,
+    {
+      bears_on_kind: "claim",
+      bears_on_id: claim.claim_id,
+      bears_on_version: 1,
+      direction: "supports",
+      kind: "certificate",
+      mode: "confirmatory",
+      source: { kind: "locator", locator: "https://example.invalid/science/unscanned" },
+      body_md:
+        "This certificate label supplies no formal source or independently checkable result.",
+    },
+    author.token,
+    201,
+  );
+  assert.equal(unscannedCertificate.computed_class, "assertion");
+  assert.ok(unscannedCertificate.coercion_flags.includes("certificate_without_shape_check"));
+  const unscannedPack = await pack(reviewer, "review", `${claim.claim_id}@1`);
+  const unscannedDetail = JSON.parse(
+    unscannedPack.items.find((item) => item.id === unscannedCertificate.evidence_id).body,
+  );
+  const beforeUnscanned = await fixtures.screeningCalls();
+  const unscannedRefusal = await call(
+    `${reviewer.path}/evidence`,
+    {
+      ...unsupportedCheck,
+      falsification_check: {
+        ...unsupportedCheck.falsification_check,
+        evidence: [
+          {
+            evidence_id: unscannedCertificate.evidence_id,
+            digest: unscannedDetail.content_digest,
+          },
+        ],
+      },
+    },
+    reviewer.token,
+    422,
+  );
+  assert.equal(unscannedRefusal.code, "EVIDENCE_BODY_INVALID");
+  assert.equal(await fixtures.screeningCalls(), beforeUnscanned);
+  assert.equal((await pack(reviewer)).cursor, unscannedPack.cursor);
+  await standing("open · unchallenged");
+
   // This proof has a published scientific premise. The premise is deliberately
   // distinct from the complete write-up so its later redaction exercises
   // transitive grounding, rather than removing the directly reviewed record.
@@ -916,6 +1197,81 @@ export async function scientificJourney({
 
   const supportedSnapshot = await retainSnapshot();
   assert.equal(supportedSnapshot.live.claim_state.disposition, "strongly-supported");
+  // Corrupt only the rebuildable semantic-digest projection. A caller using
+  // that same forged digest must not authorize a review or falsification check
+  // against the still-intact immutable publication, or retain positive standing.
+  const forgedClaimDigest = `sha256:${"0".repeat(64)}`;
+  const beforeCorruptClaimScreening = await fixtures.screeningCalls();
+  const claimVersionGuard = await env.DB.prepare(
+    "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'claim_versions_immutable_update'",
+  ).first();
+  assert.equal(typeof claimVersionGuard?.sql, "string");
+  const changeClaimDigest = (digest) =>
+    env.DB.prepare(
+      "UPDATE claim_versions SET content_digest = ? WHERE problem_id = ? AND claim_id = ? AND version = 1",
+    ).bind(digest, problem, claim.claim_id);
+  await assert.rejects(changeClaimDigest(forgedClaimDigest).run(), /CLAIM_VERSION_IMMUTABLE/);
+  // Model a storage/projection fault, not an authorized update. Drop and restore
+  // the exact guard inside one atomic fixture batch; every HTTP assertion below
+  // runs with the production immutability trigger present.
+  async function injectClaimDigestFault(digest) {
+    const result = await env.DB.batch([
+      env.DB.prepare("DROP TRIGGER claim_versions_immutable_update"),
+      changeClaimDigest(digest),
+      env.DB.prepare(claimVersionGuard.sql),
+    ]);
+    assert.equal(result[1].meta.changes, 1);
+  }
+  await injectClaimDigestFault(forgedClaimDigest);
+  try {
+    const reviewRefusal = await call(
+      `${reviewer.path}/review`,
+      {
+        ...writeUpReview,
+        verification: { ...verification, target_digest: forgedClaimDigest },
+      },
+      reviewer.token,
+      422,
+      "science-corrupt-projection-review",
+    );
+    assert.equal(reviewRefusal.code, "REVIEW_BODY_INVALID");
+    const evidenceRefusal = await call(
+      `${reviewer.path}/evidence`,
+      {
+        ...groundedCheck,
+        falsification_check: {
+          ...groundedCheck.falsification_check,
+          target_digest: forgedClaimDigest,
+        },
+      },
+      reviewer.token,
+      422,
+      "science-corrupt-projection-evidence",
+    );
+    assert.equal(evidenceRefusal.code, "EVIDENCE_BODY_INVALID");
+    assert.equal(
+      await fixtures.screeningCalls(),
+      beforeCorruptClaimScreening,
+      "Semantic identity corruption is refused before paid screening",
+    );
+    const head = await env.DB.prepare("SELECT public_seq FROM problems WHERE id = ?")
+      .bind(problem)
+      .first();
+    assert.equal(head.public_seq, supportedSnapshot.cursor, "Refused checks append no events");
+    for (const target of [
+      `${claimPath}@1.json`,
+      `${claimPath}@1.json?through=${supportedSnapshot.cursor}`,
+    ]) {
+      const unavailable = await call(target, undefined, undefined, 500);
+      assert.equal(unavailable.code, "INTERNAL_ERROR");
+      assert.ok(!JSON.stringify(unavailable).includes(forgedClaimDigest));
+      assert.ok(!JSON.stringify(unavailable).includes("strongly-supported"));
+    }
+  } finally {
+    await injectClaimDigestFault(detail.content_digest);
+  }
+  await unchangedSnapshot(supportedSnapshot);
+  await standing("strongly-supported");
   // Change only the ancestor's present-day visibility while the current claim
   // is strongly supported. Restore with a later control row, never rewriting
   // the immutable publication. This fixture controls real D1 visibility; all
@@ -1130,9 +1486,11 @@ export async function scientificJourney({
     })}`,
   );
   assert.equal(headSearch.items[0].statement, revisedStatement);
+  assert.equal(headSearch.items[0].version, 2);
+  assert.equal(headSearch.items[0].read_url, `/p/${problem}/claims/${claim.claim_id}@2.md`);
   assert.equal(
     headSearch.items[0].url,
-    `https://asimposium.org/p/${problem}/claims/${claim.claim_id}`,
+    `https://asimposium.org/p/${problem}/claims/${claim.claim_id}@2`,
   );
   assert.equal(oldReview.target_version, 1);
   await standing("open");
@@ -1740,6 +2098,8 @@ export async function scientificJourney({
         "exact-version reset",
         "same-Fellow duplicate collapse",
         "reference admission before screening",
+        "corrupt projected claim digest cannot authorize scientific writes or current and retained standing",
+        "unscanned certificate labels cannot ground a falsification check or upgrade standing",
         "redaction transaction rollback",
         "transitive evidence loss revokes derived standing at current and retained cursors",
         "withheld statement-defect review preserves malformed standing and removes its public bytes",

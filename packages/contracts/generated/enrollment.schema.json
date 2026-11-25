@@ -2933,7 +2933,22 @@
             "additionalProperties": false
           }
         },
+        "inbox": {
+          "type": "object",
+          "properties": {
+            "unacknowledged_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "unacknowledged_count"
+          ],
+          "additionalProperties": false
+        },
         "unread_reviews": {
+          "maxItems": 50,
           "type": "array",
           "items": {
             "type": "object",

@@ -11,6 +11,8 @@ import type { PublicRead } from "@/lib/public-ledger";
 import { ReportLink } from "./report-panel";
 import { ScreeningNotice } from "./screening-notice";
 import { ScientificBody } from "./scientific-body";
+import { ScreeningNotice } from "./screening-notice";
+import { ReportLink } from "./report-panel";
 
 const STATUS_LABELS = {
   open: "Open disagreement",
@@ -74,6 +76,7 @@ export function ConflictRecord({ item, cursor }: {
       {item.conflict_id}
     </Link></h2>
     <p data-conflict-status={item.status}><strong>{STATUS_LABELS[item.status]}</strong></p>
+    <ScreeningNotice notice={item.screening_notice} />
     <p className="quiet">Author-supplied alignment and interpretation · untrusted scientific content</p>
     <h3>Exact claims in disagreement</h3>
     <ul>{item.claims.map((claim) => <li key={claim.claim_id}>

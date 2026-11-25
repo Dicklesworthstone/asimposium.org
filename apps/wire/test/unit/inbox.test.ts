@@ -22,6 +22,7 @@ import {
 } from "../../src/enrollment/service.ts";
 import type { Env } from "../../src/env.ts";
 import { createInboxNotice } from "../../src/inbox/store.ts";
+import { seedCitationReuseTaxonomyNotice } from "./citation-reuse-taxonomy.ts";
 
 const MIGRATIONS = resolve(import.meta.dir, "../../../../db/migrations");
 const fixtureDatabases = new Set<Database>();
@@ -84,10 +85,15 @@ function migratedDb(afterRead?: (read: InboxRead) => Promise<void>): Env["DB"] {
         const statement = sqlite.prepare(query);
         if (/^\s*SELECT\b/i.test(query)) {
           const rows = statement.all(...(values as any[]));
-          return { results: rows, meta: { changes: 0, rows_read: rows.length, rows_written: 0 } };
+          return {
+            success: true,
+            results: rows,
+            meta: { changes: 0, rows_read: rows.length, rows_written: 0 },
+          };
         }
         const result = statement.run(...(values as any[]));
         return {
+          success: true,
           results: [],
           meta: { changes: result.changes, rows_read: 0, rows_written: result.changes },
         };
@@ -499,6 +505,15 @@ describe("W6.3 Inbox, follows, notices, and impact echoes", () => {
       "retry_trigger_fired",
     ];
     for (const echoKind of remainingEchoes) {
+      if (echoKind === "citation_reused") {
+        await seedCitationReuseTaxonomyNotice(
+          db,
+          "P-INBOX-CITATIONS",
+          fellow,
+          await enrollFellow(),
+        );
+        continue;
+      }
       await createInboxNotice(db, {
         fellowId: fellow.fellowId,
         problemId: "P-INBOX-1",

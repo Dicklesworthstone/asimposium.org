@@ -23,7 +23,9 @@ const viewer = { fellowId: "F-READER", sponsorId: "SP-READER" };
 const emptyInvitations = async (): Promise<LedgerPackSection> => ({ candidates: [], omitted: [] });
 const science: ReviewQueueScience = {
   prepare(db, _problem, _cursor, _limit, target) {
-    return db.prepare("SELECT ? AS target_version").bind(target.version);
+    return db
+      .prepare("SELECT ? AS target_version, 0 AS scientific_budget_exceeded")
+      .bind(target.version);
   },
   async fold(rows) {
     return {
@@ -45,8 +47,8 @@ function templateFor(move: "review" | "add-refuter"): MoveTemplate {
 function fixture() {
   const sql = new Database(":memory:");
   sql.exec(`
-    CREATE TABLE problems(id TEXT PRIMARY KEY, public_seq INTEGER, status TEXT, unlisted INTEGER);
-    INSERT INTO problems VALUES('P-DEMO',0,'active',0),('P-OTHER',0,'active',1);
+    CREATE TABLE problems(id TEXT PRIMARY KEY, public_seq INTEGER, status TEXT, unlisted INTEGER, admission_mode TEXT NOT NULL DEFAULT 'open');
+    INSERT INTO problems(id,public_seq,status,unlisted) VALUES('P-DEMO',0,'active',0),('P-OTHER',0,'active',1);
     CREATE TABLE events(id TEXT PRIMARY KEY, problem_id TEXT, seq INTEGER, object_kind TEXT,
       object_id TEXT, object_version INTEGER, type TEXT, payload_sha256 TEXT, created_at TEXT,
       actor_fellow_id TEXT, actor_sponsor_id TEXT);
@@ -256,6 +258,40 @@ test("pack uses canonical dependency consequence ahead of raw oldest-first order
     assert.equal(record.best_recorded_tier, "none");
     assert.equal(Object.hasOwn(record, "prospective_independence_tier"), false);
     assert.equal(record.read_url, "/p/P-DEMO/claims/C-2@1.md?through=4");
+  } finally {
+    f.sql.close();
+  }
+});
+
+test("stale recovery packs keep the lost-authority boundary and exact source", async () => {
+  const f = fixture();
+  try {
+    f.claim(1);
+    const pack = await f.read(f.cursor(), {
+      loadQueue: (db, query, snapshot) =>
+        readReviewQueue(
+          db,
+          query,
+          {
+            ...science,
+            async fold(rows, at) {
+              return { ...(await science.fold(rows, at)), stale: true };
+            },
+          },
+          snapshot,
+        ),
+    });
+    assert.deepEqual(pack.targets, ["C-1@1"]);
+    const item = pack.candidates.find((candidate) => candidate.id === "C-1@1");
+    assert.ok(item);
+    assert.equal(item.untrusted, true);
+    const record = JSON.parse(item.body);
+    assert.equal(record.review_need, "recheck-stale-inputs");
+    assert.equal(record.stale, true);
+    assert.equal(record.best_recorded_tier, "none");
+    assert.equal(record.read_url, "/p/P-DEMO/claims/C-1@1.md?through=1");
+    assert.match(record.recovery_boundary, /cannot-verify/);
+    assert.match(record.recovery_boundary, /does not erase staleness/);
   } finally {
     f.sql.close();
   }

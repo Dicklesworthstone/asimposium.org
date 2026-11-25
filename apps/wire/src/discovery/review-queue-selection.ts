@@ -4,10 +4,11 @@ import type { ScientificDisposition } from "../ledger/scientific-disposition";
 const TIERS = { T0: 0, T1: 1, T2: 2, T3: 3 } as const;
 const NEED_PRIORITY: Readonly<Record<ReviewQueueNeed, number>> = {
   "resolve-dispute": 0,
-  "independent-review": 1,
-  "cross-family-review": 2,
-  "falsification-attempt": 3,
-  "full-write-up-review": 4,
+  "recheck-stale-inputs": 1,
+  "independent-review": 2,
+  "cross-family-review": 3,
+  "falsification-attempt": 4,
+  "full-write-up-review": 5,
 };
 
 /** Consume the canonical fold; do not implement another disposition evaluator.
@@ -17,11 +18,18 @@ export function reviewNeed(
   authorFellowId: string,
 ): { need: ReviewQueueNeed; bestRecordedTier: ReviewQueueTier } | undefined {
   if (
-    fold.stale ||
     fold.currentVersion === null ||
-    !["open", "disputed", "corroborated", "reduced-to"].includes(fold.disposition)
+    !["open", "disputed", "corroborated", "reduced-to", "strongly-supported"].includes(
+      fold.disposition,
+    )
   )
     return undefined;
+  // Staleness is a reason to seek a fresh, bounded check, never evidence that
+  // the claim itself is readable or its prior support is still authoritative.
+  // The caller must independently verify the exact public statement. Do not
+  // advertise a tier from an incomplete history or mutate the scientific fold.
+  if (fold.stale) return { need: "recheck-stale-inputs", bestRecordedTier: "none" };
+  if (fold.disposition === "strongly-supported") return undefined;
   let bestRecordedTier: ReviewQueueTier = "none";
   let best = -1;
   for (const review of fold.context.verified_reviews) {

@@ -26,20 +26,20 @@ import {
 } from "../screening/publication-notice";
 import { readSearchContinuation, SearchContinuationError } from "./continuation";
 import { executeSearchPage } from "./page";
-import { SEARCH_PROBLEM_FILTER_SQL, searchProblemFilterBindings } from "./window";
+import {
+  SEARCH_CLAIM_SOURCE_COLUMNS,
+  SEARCH_CLAIM_SOURCE_SQL,
+  SEARCH_EXACT_PROBLEM_SQL,
+  SEARCH_PROBLEM_FILTER_SQL,
+  type SearchClaimPublication,
+  type SearchProblemPublication,
+  searchProblemFilterBindings,
+  verifiedSearchClaimVersion,
+  verifiedSearchProblem,
+} from "./window";
 
-interface ProblemRow {
-  readonly id: string;
-  readonly title: string;
-  readonly public_seq: number;
-  readonly created_at: string;
-  readonly updated_at: string;
-}
-
-interface ClaimRow {
-  readonly id: string;
+interface ClaimRow extends SearchClaimPublication {
   readonly problem_id: string;
-  readonly statement: string;
   readonly source_seq: number;
   readonly created_at: string;
 }
@@ -100,72 +100,75 @@ export async function executeSearch(
   }
   const sourceCursor = cursorResult.cursor;
 
-  // The lexical index is filled from the outbox after each public write, so
-  // it can trail source_cursor. Say so rather than imply it is current (A4).
-  // Read the backlog BEFORE the lexical query: a write indexed in between then
-  // shows up as a redundant notice, never as a silent miss.
-  let indexLag: SearchOmission | null = null;
-  try {
-    const pending = await db
-      .prepare(
-        "SELECT COUNT(*) AS n FROM outbox WHERE kind = 'search.index' AND state <> 'delivered'",
-      )
-      .first<{ n: number }>();
-    if ((pending?.n ?? 0) > 0) {
-      indexLag = {
-        reason: "index_pending",
-        detail: `${pending?.n} recent public writes are not yet in the lexical index; exact references still resolve. Retry shortly for full text matches.`,
-      };
-    }
-  } catch {
-    indexLag = {
-      reason: "index_freshness_unknown",
-      detail: "Whether the lexical index has caught up with source_cursor could not be checked.",
-    };
-  }
-
-  // 2. Exact reference resolution (higher precedence than lexical search).
-  // It is read again after a page is hydrated, so a withdrawal between the
-  // two reads fails closed instead of serving a stale exact row.
   const exactTarget = parseExactReference(request.q);
   const pinnedClaim = exactTarget?.kind === "claim" && exactTarget.version !== undefined;
   // A version-pinned reference is a single result; no cursor was ever issued for it.
   if (pinnedClaim && request.cursor !== undefined) throw new SearchContinuationError("invalid");
+
+  // Only claim text depends on the async index. Scope the lag signal to
+  // discoverable current publications and the requested problem filters,
+  // just like lexical results. A queue-wide count would leak hidden work.
+  let indexLag: SearchOmission | null = null;
+  if (!pinnedClaim && (filterKind === "claim" || filterKind === "all")) {
+    try {
+      const pending = await db
+        .prepare(
+          `SELECT 1 FROM outbox job
+           JOIN events e ON e.id = job.event_id AND e.problem_id = job.problem_id
+             AND e.payload_sha256 = job.payload_sha256
+             AND e.object_kind = 'claim' AND e.type IN ('claim.created', 'claim.revised')
+           JOIN claims ON claims.problem_id = e.problem_id AND claims.id = e.object_id
+             AND claims.source_seq = e.seq AND claims.payload_sha256 = e.payload_sha256
+           JOIN problems p ON p.id = e.problem_id AND p.status <> 'private-draft' AND p.unlisted = 0
+           WHERE job.kind = 'search.index' AND job.state = 'pending'
+             AND ${PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL} AND ${SEARCH_PROBLEM_FILTER_SQL}
+           LIMIT 1`,
+        )
+        .bind(...searchProblemFilterBindings(pageQuery))
+        .first();
+      if (pending !== null) {
+        indexLag = {
+          reason: "index_pending",
+          detail:
+            "Indexing is pending for public claims within these filters. Full text matches may be incomplete. Exact references still resolve.",
+        };
+      }
+    } catch {
+      indexLag = {
+        reason: "index_freshness_unknown",
+        detail: "Whether the lexical index has caught up with source_cursor could not be checked.",
+      };
+    }
+  }
+
   const resolveExact = async (): Promise<SearchResultItem[]> => {
     const found: SearchResultItem[] = [];
     if (exactTarget) {
       if ((filterKind === "all" || filterKind === "problem") && exactTarget.kind === "problem") {
         const problem = await db
-          .prepare(
-            `SELECT p.id, p.public_seq, p.created_at, p.updated_at,
-               CASE WHEN length(trim(p.title)) > 0 THEN p.title ELSE p.id END AS title
-             FROM problems p
-             WHERE p.id = ? AND p.status <> 'private-draft' AND p.unlisted = 0
-               AND NOT ${hiddenByContentControlSql("p.id", "'problem'")}
-               AND ${SEARCH_PROBLEM_FILTER_SQL}`,
-          )
-          .bind(exactTarget.id, ...searchProblemFilterBindings(pageQuery))
-          .first<ProblemRow>();
+          .prepare(SEARCH_EXACT_PROBLEM_SQL)
+          .bind(...searchProblemFilterBindings(pageQuery), exactTarget.id)
+          .first<SearchProblemPublication>();
 
         if (problem) {
-          const formulation = await readPublishedProblemFormulation(
-            db,
-            problem.id,
-            problem.public_seq,
+          const formulation = verifiedSearchProblem(
+            problem,
+            await readPublishedProblemFormulation(db, problem.id, problem.public_seq),
           );
+          const title = formulation.problem.title;
           found.push({
             kind: "problem",
             id: problem.id,
             url: `https://asimposium.org/p/${encodeURIComponent(problem.id)}`,
-            title: problem.title,
+            title,
             snippet:
-              `${problem.title} — Public problem ${problem.id} (sequence ${problem.public_seq}, updated ${problem.updated_at})`.slice(
+              `${title} — Public problem ${problem.id} (sequence ${problem.public_seq}, updated ${formulation.problem.updated_at})`.slice(
                 0,
                 SEARCH_SNIPPET_MAX_LENGTH,
               ),
             match_type: "exact_reference",
             score_explanation: "exact_problem_id",
-            ...(formulation?.screening_notice === undefined
+            ...(formulation.screening_notice === undefined
               ? {}
               : { screening_notice: formulation.screening_notice }),
           });
@@ -217,16 +220,18 @@ export async function executeSearch(
         } else {
           const claim = await db
             .prepare(
-              `SELECT claims.id, claims.problem_id, claims.statement, claims.source_seq, claims.created_at
+              `SELECT claims.id, claims.problem_id, claims.statement, claims.source_seq, claims.created_at, ${SEARCH_CLAIM_SOURCE_COLUMNS}
                FROM claims
                JOIN problems p ON p.id = claims.problem_id AND p.status != 'private-draft' AND p.unlisted = 0
-               WHERE claims.id = ? AND claims.problem_id = ? AND ${PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL}
+               ${SEARCH_CLAIM_SOURCE_SQL}
+               WHERE claims.id = ? AND claims.problem_id = ?
                  AND ${SEARCH_PROBLEM_FILTER_SQL}`,
             )
             .bind(exactTarget.id, exactTarget.problemId, ...searchProblemFilterBindings(pageQuery))
             .first<ClaimRow>();
 
           if (claim) {
+            const version = await verifiedSearchClaimVersion(claim);
             const screeningNotice = (
               await readPublicationNotices(db, claim.problem_id, [claim.source_seq])
             ).get(claim.source_seq);
@@ -234,8 +239,9 @@ export async function executeSearch(
               kind: "claim",
               id: claim.id,
               problem_id: claim.problem_id,
-              url: `https://asimposium.org/p/${claim.problem_id}/claims/${claim.id}`,
-              title: `Claim ${claim.id} in ${claim.problem_id}`,
+              version,
+              url: `https://asimposium.org/p/${claim.problem_id}/claims/${claim.id}@${version}`,
+              title: `Claim ${claim.id}@${version} in ${claim.problem_id}`,
               statement: claim.statement,
               snippet: claim.statement.slice(0, SEARCH_SNIPPET_MAX_LENGTH),
               match_type: "exact_reference",

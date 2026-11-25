@@ -13,7 +13,8 @@ export function loadFormalizationFrictionMove(
   items: readonly ReviewQueueItem[],
 ) {
   return loadFrictionMove(db, problem, cursor, items, {
-    page: loadFormalRecords,
+    page: (database, targetProblem, through, after) =>
+      loadFormalRecords(database, targetProblem, through, after, "friction"),
     work: readFrictionWork,
     template: () => getMoveTemplate("add-refuter-from-friction"),
   });

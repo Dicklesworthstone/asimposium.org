@@ -1,5 +1,7 @@
 import { AdminReportIdSchema } from "@asimposium/contracts";
 import Link from "next/link";
+import { OpenIntegrityCaseForm } from "@/components/integrity-forms";
+import { integrityAuthIsRecent, integrityCaseHref } from "@/lib/integrity-view";
 import { signIn } from "@/auth";
 import { getReportDetail, requireOperatorSession } from "@/lib/admin";
 import { AdminModerationControl } from "../../moderation-control";
@@ -21,6 +23,8 @@ export default async function ReportReviewPage({ params }: {
   const result = operatorId && valid ? await getReportDetail(operatorId, reportId) : undefined;
   const detail = result?.state === "ok" ? result.detail : undefined;
   const permalink = valid ? `/admin/reports/${reportId}` : "/admin";
+  const freshIntegrityAuth = session.state === "authorized" && integrityAuthIsRecent(session.authIssuedAt);
+  const integrity = detail?.report.category === "integrity";
   return (
     <main className="landing col console" id="content">
       <header className="masthead console-head">
@@ -34,12 +38,27 @@ export default async function ReportReviewPage({ params }: {
         : detail === undefined ? <p role="alert">{result?.state === "not-found" ? "No report matches this identifier." : "The report could not be loaded. Reload this page to retry."}</p>
         : <>
           <ReportEvidence detail={detail} />
+          {integrity ? <>
+            {detail.integrity_case_id !== undefined ? <p>
+              This report has a scientific-integrity case.{" "}
+              <Link href={integrityCaseHref("operator", detail.integrity_case_id)} prefetch={false}>
+                Read the case, sponsor responses and outcome
+              </Link>
+            </p> : <p>Investigate a concrete integrity concern through a case. A pending report may be dismissed without opening a case; integrity concerns cannot create a content removal or conduct strike through the generic report action.</p>}
+            <OpenIntegrityCaseForm operatorId={operatorId} reportId={reportId}
+              initialKey={"integrity-open-" + crypto.randomUUID()}
+              available={freshIntegrityAuth && detail.report.status === "pending" &&
+                detail.source.state === "available" && detail.integrity_case_id === undefined} />
+          </> : null}
           <AdminModerationControl operatorId={operatorId} kind="report" permalink={permalink}
+            reportDismissOnly={integrity}
             initialKey={`admin-report-${crypto.randomUUID()}`}
-            available={session.state === "authorized" && detail.report.status === "pending" && detail.source.state === "available"}
+            available={session.state === "authorized" && detail.report.status === "pending" &&
+              detail.source.state === "available" && detail.integrity_case_id === undefined}
             targets={[{ id: reportId, label: `${reportId} · ${detail.problem_id}/${detail.target_ref} · ${detail.report.category}` }]} />
         </>}
-      {(session.state === "unauthenticated" || session.state === "step_up_required") ? <form action={async () => {
+      {(session.state === "unauthenticated" || session.state === "step_up_required" ||
+        (integrity && session.state === "authorized" && !freshIntegrityAuth)) ? <form action={async () => {
         "use server";
         await signIn("google", { redirectTo: permalink }, { prompt: "select_account", max_age: "0" });
       }} className="card">

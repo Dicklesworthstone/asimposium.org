@@ -3,7 +3,7 @@ import {
   type PublicHypothesis,
   PublicHypothesisIdSchema,
 } from "@asimposium/contracts/hypotheses";
-import type { PackCandidate } from "@asimposium/render";
+import { type PackCandidate, screeningNoticeText } from "@asimposium/render";
 import type { D1Database } from "@cloudflare/workers-types";
 import type { LedgerPackSection } from "./ledger-pack.ts";
 
@@ -138,6 +138,9 @@ export async function readKilledHypothesisPack(
         status: "killed",
         publication: publication(item.publication),
         last_event: publication(item.last_event),
+        ...(item.last_event_screening_notice === undefined
+          ? {}
+          : { last_event_screening_notice: item.last_event_screening_notice }),
         read_url: `${path}/hypotheses/${encodeURIComponent(item.hypothesis_id)}.md?through=${cursor}`,
         killing_evidence: {
           evidence_id: item.kill.killed_by_evidence_id,
@@ -169,7 +172,10 @@ export async function readKilledHypothesisPack(
         ...(item.screening_notice === undefined ? {} : { screening_notice: item.screening_notice }),
         stable_prefix: 20 + index,
         why_included:
-          "recorded elimination with original and killing-event provenance; read its actual evidence before retrying",
+          "recorded elimination with original and killing-event provenance; read its actual evidence before retrying" +
+          (item.last_event_screening_notice === undefined
+            ? ""
+            : `. Elimination (#${item.last_event.seq}): ${screeningNoticeText(item.last_event_screening_notice)}`),
       });
     }
     const next = face.next_after;

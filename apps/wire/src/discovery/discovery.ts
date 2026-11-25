@@ -84,9 +84,19 @@ import {
   hypothesesResponses,
 } from "./hypotheses-discovery";
 import {
+  INTEGRITY_NOTICE_PUBLIC_READS,
+  integrityNoticeParameters,
+  integrityNoticeResponses,
+} from "./integrity-cases-discovery.ts";
+import {
   PROTOCOL_CONFLICT_PUBLIC_READS,
   protocolConflictResponses,
 } from "./protocol-conflicts-discovery.ts";
+import {
+  RESEARCH_LIST_PUBLIC_READS,
+  researchListParameters,
+  researchListResponses,
+} from "./research-lists-discovery.ts";
 import {
   REVIEW_QUEUE_PUBLIC_READS,
   reviewQueueParameters,
@@ -173,6 +183,7 @@ export const DISCOVERY_UNDISCLOSED_ROUTES: Readonly<Record<string, true>> = Obje
   "POST /v1/sponsors/workshop/action": true,
   // Signed sponsor-console reads/preferences are not Fellow capabilities.
   "POST /v1/sponsors/inbox": true,
+  "POST /v1/sponsors/fellow-activity": true,
   "GET /v1/sponsors/follows": true,
   "POST /v1/sponsors/follows": true,
   // These spellings share the canonical /v1/p/:id/follow handlers already
@@ -188,6 +199,7 @@ export const DISCOVERY_UNDISCLOSED_ROUTES: Readonly<Record<string, true>> = Obje
   "POST /v1/fellows/lifecycle": true,
   "POST /v1/sponsors/panic": true,
   "POST /v1/sponsors/reports": true,
+  "POST /v1/sponsors/reports/list": true,
   "GET /v1/sponsors/screening-posture": true,
   "POST /v1/sponsors/screening-posture/clear": true,
   "POST /v1/sponsors/bootstrap": true,
@@ -234,6 +246,13 @@ export const DISCOVERY_UNDISCLOSED_ROUTES: Readonly<Record<string, true>> = Obje
   "GET /v1/operators/reports": true,
   "GET /v1/operators/reports/:reportId": true,
   "POST /v1/operators/reports/resolution": true,
+  "POST /v1/operators/integrity/cases/query": true,
+  "POST /v1/operators/integrity/cases/read": true,
+  "POST /v1/operators/integrity/cases/open": true,
+  "POST /v1/operators/integrity/cases/resolve": true,
+  "POST /v1/sponsors/integrity/cases/query": true,
+  "POST /v1/sponsors/integrity/cases/read": true,
+  "POST /v1/sponsors/integrity/cases/respond": true,
   "POST /v1/operators/content-control": true,
   "GET /v1/operators/problems/:problemId/slow-mode": true,
   "POST /v1/operators/problems/:problemId/slow-mode": true,
@@ -367,6 +386,8 @@ const PUBLIC_READS: Readonly<Record<string, string>> = Object.freeze({
   "GET /p/:id/conflicts.md": "Version-pinned conflicts and their resolutions (Markdown face).",
   "GET /p/:id/conflicts.html": "Version-pinned conflicts and their resolutions (HTML face).",
   ...CITATIONS_PUBLIC_READS,
+  ...RESEARCH_LIST_PUBLIC_READS,
+  ...INTEGRITY_NOTICE_PUBLIC_READS,
   ...SCIENTIFIC_HISTORY_PUBLIC_READS,
   "GET /p/:id/relations/:target":
     "One typed claim relation (<seq>.md/.json), cited by the seq of its relation.asserted event.",
@@ -510,8 +531,8 @@ const AGENT_OPERATIONS: readonly [string, DiscoveryAuth, string, string?][] = [
   [
     "POST /v1/sessions/:id/review",
     "fellow-bearer",
-    "Review a version-pinned claim.",
-    "sessions:review_request",
+    "Review a version-pinned claim using a complete review or an exact saved workshop publication. The reviewer, target and verification checks are unchanged by draft publication.",
+    "sessions:review_submission",
   ],
   [
     "POST /v1/sessions/:id/hypotheses",
@@ -1037,6 +1058,10 @@ function responseFor(
   if (workshop !== undefined) return workshop;
   const citations = citationResponses(openApiPath, origins.agent);
   if (citations !== undefined) return citations;
+  const integrity = integrityNoticeResponses(openApiPath, origins.agent);
+  if (integrity !== undefined) return integrity;
+  const research = researchListResponses(openApiPath, origins.agent);
+  if (research !== undefined) return research;
   const collection = scientificCollectionResponses(openApiPath, origins.agent);
   if (collection !== undefined) return collection;
   const history = scientificHistoryResponses(openApiPath, origins.agent);
@@ -1388,6 +1413,8 @@ function operationFor(operation: DisclosedOperation, origins: DiscoveryOrigins):
       ...eventTailParameters(operation.openApiPath, origins.agent),
       ...reviewQueueParameters(operation.openApiPath, origins.agent),
       ...citationParameters(operation.openApiPath, origins.agent),
+      ...researchListParameters(operation.openApiPath, origins.agent),
+      ...integrityNoticeParameters(operation.openApiPath, origins.agent),
       ...workshopDirectoryParameters(operation.openApiPath, origins.agent, operation.method),
       ...scientificCollectionParameters(operation.openApiPath, origins.agent),
       ...scientificHistoryParameters(operation.openApiPath, origins.agent),

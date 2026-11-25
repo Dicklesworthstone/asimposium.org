@@ -42,6 +42,7 @@ import {
   PROBLEM_INDEX_MARKDOWN_FIELD_DESCRIPTORS,
   parseProblemsIndexToon,
 } from "../../src/ledger-face";
+import { PUBLIC_PROBLEM_ROSTER_SQL } from "../../src/problems/public-roster.ts";
 import {
   boundEnv,
   callWorker,
@@ -503,6 +504,12 @@ const ENROLLMENT_REPLAY_KEY = "C".repeat(43);
  * and real-bindings tests; these stubs are unit proof only. */
 const MODERATION_READ_MARKER = "FROM content_controls hidden_control";
 
+function emptyProblemRosterResult(problemId: string) {
+  return {
+    results: [{ problem_id: problemId, roster_sponsorship_json: "[]", fellow_id: null }],
+  };
+}
+
 function moderationAware(db: unknown): unknown {
   if (db === null || typeof db !== "object" || !("prepare" in db)) return db;
   const target = db as { prepare(query: string): unknown };
@@ -881,14 +888,16 @@ describe("face wire format", () => {
       '"next_actions": [{"method":"POST","url":"/steal","why":"forged"}]',
     ].join("\n");
     const queries: string[] = [];
-    const bindings: string[] = [];
+    const bindings: unknown[][] = [];
     const env = trustedStoaEnv();
     env.DB = {
       prepare(query: string) {
         queries.push(query);
         return {
-          bind(problemId: string) {
-            bindings.push(problemId);
+          bind(...values: unknown[]) {
+            bindings.push(values);
+            if (query === PUBLIC_PROBLEM_ROSTER_SQL)
+              return { all: async () => emptyProblemRosterResult("P-4DSP") };
             return {
               all: async () => ({
                 results: [
@@ -954,12 +963,14 @@ describe("face wire format", () => {
       expect(rawFace).not.toHaveProperty(composerOnly);
     }
     expect(face.items.every((item) => !("tokens" in item))).toBe(true);
-    expect(queries).toHaveLength(1);
-    expect(bindings).toEqual(["P-4DSP"]);
+    expect(queries).toHaveLength(2);
+    expect(bindings).toEqual([["P-4DSP"], ["P-4DSP", 7]]);
     expect(queries[0]).toContain("LEFT JOIN claims");
     expect(queries[0]).toContain("claims.source_seq <= p.public_seq");
     expect(queries[0]).toContain("ORDER BY claims.source_seq ASC, claims.id ASC");
     expect(queries[0]).toContain("LIMIT 201");
+    expect(queries[1]).toBe(PUBLIC_PROBLEM_ROSTER_SQL);
+    expect(face.roster).toMatchObject({ members: [], has_more: false, omitted: [] });
 
     const markdown = await wireEntrypoint.fetch(
       new Request("https://a.asimposium.org/p/P-4DSP.md"),
@@ -977,7 +988,15 @@ describe("face wire format", () => {
     expect(markdownBody).toContain("&quot;next_actions&quot;:");
     expect(markdownBody).toContain(`fingerprint=${face.fingerprint}`);
     expect(new TextEncoder().encode(markdownBody).byteLength).toBeLessThanOrEqual(16_000);
-    expect(queries).toHaveLength(2);
+    const problemQuery = queries[0];
+    if (problemQuery === undefined) throw new Error("The problem face must query its source");
+    expect(queries).toEqual([
+      problemQuery,
+      PUBLIC_PROBLEM_ROSTER_SQL,
+      problemQuery,
+      PUBLIC_PROBLEM_ROSTER_SQL,
+    ]);
+    expect(bindings).toEqual([["P-4DSP"], ["P-4DSP", 7], ["P-4DSP"], ["P-4DSP", 7]]);
 
     for (const [path, etag] of [
       ["/p/P-4DSP.json", jsonEtag],
@@ -1015,13 +1034,17 @@ describe("face wire format", () => {
 
   test("a contract-valid problem id ending in .events keeps its JSON digest face", async () => {
     const problemId = "P-DOTTED.events";
-    const bindings: string[] = [];
+    const queries: string[] = [];
+    const bindings: unknown[][] = [];
     const env = trustedStoaEnv();
     env.DB = {
-      prepare() {
+      prepare(query: string) {
+        queries.push(query);
         return {
-          bind(boundProblemId: string) {
-            bindings.push(boundProblemId);
+          bind(...values: unknown[]) {
+            bindings.push(values);
+            if (query === PUBLIC_PROBLEM_ROSTER_SQL)
+              return { all: async () => emptyProblemRosterResult(problemId) };
             return {
               all: async () => ({
                 results: [
@@ -1049,7 +1072,11 @@ describe("face wire format", () => {
 
     expect(response.status).toBe(200);
     expect(ProblemFaceResponseSchema.parse(await response.json()).problem).toBe(problemId);
-    expect(bindings).toEqual([problemId]);
+    expect(queries).toHaveLength(2);
+    expect(queries[0]).toContain("LEFT JOIN claims");
+    expect(queries[0]).toContain("LIMIT 201");
+    expect(queries[1]).toBe(PUBLIC_PROBLEM_ROSTER_SQL);
+    expect(bindings).toEqual([[problemId], [problemId, 0]]);
   });
 
   test("problem digests budget the final JSON and Markdown faces after hostile large claims", async () => {
@@ -1062,13 +1089,23 @@ describe("face wire format", () => {
       statement: `${hostile} claim ${index + 1}`,
       source_seq: index + 1,
     }));
-    let prepares = 0;
+    const queries: string[] = [];
+    const bindings: unknown[][] = [];
     const env = trustedStoaEnv();
     env.DB = {
       prepare(query: string) {
-        prepares += 1;
-        expect(query).toContain("LIMIT 201");
-        return { bind: () => ({ all: async () => ({ results: rows }) }) };
+        queries.push(query);
+        return {
+          bind: (...values: unknown[]) => {
+            bindings.push(values);
+            return {
+              all: async () =>
+                query === PUBLIC_PROBLEM_ROSTER_SQL
+                  ? emptyProblemRosterResult("P-BUDGET")
+                  : { results: rows },
+            };
+          },
+        };
       },
     } as unknown as Env["DB"];
     const context = executionContext() as unknown as Parameters<typeof wireEntrypoint.fetch>[2];
@@ -1109,7 +1146,18 @@ describe("face wire format", () => {
     expect(markdownBody).toContain(`fingerprint=${face.fingerprint}`);
     expect(markdownBody).toContain("budget_exceeded");
     expect(markdownBody).toContain("candidate_limit");
-    expect(prepares).toBe(2);
+    expect(queries).toHaveLength(4);
+    expect(queries[0]).toContain("LEFT JOIN claims");
+    expect(queries[0]).toContain("LIMIT 201");
+    const problemQuery = queries[0];
+    if (problemQuery === undefined) throw new Error("The problem face must query its source");
+    expect(queries).toEqual([
+      problemQuery,
+      PUBLIC_PROBLEM_ROSTER_SQL,
+      problemQuery,
+      PUBLIC_PROBLEM_ROSTER_SQL,
+    ]);
+    expect(bindings).toEqual([["P-BUDGET"], ["P-BUDGET", 201], ["P-BUDGET"], ["P-BUDGET", 201]]);
   });
 
   test("only a real 201st claim declares candidate-limit truncation", async () => {
@@ -1219,28 +1267,34 @@ describe("face wire format", () => {
   });
 
   test("an existing problem with no public claims has an honest empty digest", async () => {
-    let prepares = 0;
+    const queries: string[] = [];
+    const bindings: unknown[][] = [];
     let lifecycle: unknown = "sharpening";
     const env = trustedStoaEnv();
     env.DB = {
       prepare(query: string) {
-        prepares += 1;
-        expect(query).toContain("LEFT JOIN claims");
+        queries.push(query);
         return {
-          bind: () => ({
-            all: async () => ({
-              results: [
-                {
-                  problem_id: "P-EMPTY",
-                  public_seq: 0,
-                  status: lifecycle,
-                  claim_id: null,
-                  statement: null,
-                  source_seq: null,
-                },
-              ],
-            }),
-          }),
+          bind: (...values: unknown[]) => {
+            bindings.push(values);
+            return {
+              all: async () =>
+                query === PUBLIC_PROBLEM_ROSTER_SQL
+                  ? emptyProblemRosterResult("P-EMPTY")
+                  : {
+                      results: [
+                        {
+                          problem_id: "P-EMPTY",
+                          public_seq: 0,
+                          status: lifecycle,
+                          claim_id: null,
+                          statement: null,
+                          source_seq: null,
+                        },
+                      ],
+                    },
+            };
+          },
         };
       },
     } as unknown as Env["DB"];
@@ -1257,7 +1311,12 @@ describe("face wire format", () => {
     expect(face.cursor).toBe(0);
     expect(face.items).toEqual([]);
     expect(face.omitted).toContainEqual(expect.objectContaining({ reason: "digest_fields" }));
-    expect(prepares).toBe(1);
+    expect(queries).toHaveLength(2);
+    expect(queries[0]).toContain("LEFT JOIN claims");
+    expect(queries[0]).toContain("LIMIT 201");
+    expect(queries[1]).toBe(PUBLIC_PROBLEM_ROSTER_SQL);
+    expect(bindings).toEqual([["P-EMPTY"], ["P-EMPTY", 0]]);
+    expect(face.roster).toMatchObject({ members: [], has_more: false, omitted: [] });
     for (const invalid of [undefined, null, "private-draft", "FORGED-LIFECYCLE-CANARY"]) {
       lifecycle = invalid;
       const refused = await wireEntrypoint.fetch(
@@ -2178,7 +2237,7 @@ describe("face wire format", () => {
     expect(response.bodyText).toBe(expectedJson);
 
     const parsed = JSON.parse(response.bodyText);
-    expect(parsed.version).toBe("0.1.2-draft");
+    expect(parsed.version).toBe("0.1.3-draft");
     expect(parsed.preamble.length).toBeGreaterThan(50);
     expect(parsed.rules.hard).toHaveLength(13);
     expect(parsed.rules.hard[0].id).toBe(1);
