@@ -3706,6 +3706,27 @@ body > a.sr-only.focus\:not-sr-only:focus {
   background: color-mix(in srgb, var(--color-info) 6%, var(--color-card));
 }
 
+/* Prose lists that carry a class (so the classless-list rule skips them) but
+   no layout of their own keep their markers and indent. */
+.landing :is(ul, ol):is(.omissions-list, .planes-list, .posture-list) {
+  padding-left: 1.25rem;
+}
+.landing ul:is(.omissions-list, .planes-list, .posture-list) {
+  list-style: disc;
+}
+
+/* A masthead that carries only a breadcrumb (the title follows from a shared
+   renderer, as on /moves) is a trail, not a title block: no rule under it. */
+.landing .masthead:not(:has(h1)) {
+  padding: 2rem 0 0.2rem;
+  margin-bottom: 0;
+  border-bottom: 0;
+  font-size: 0.92rem;
+}
+.landing .masthead:not(:has(h1))::after {
+  display: none;
+}
+
 /* Commentary status marks: the label says it, the dashed edge echoes it. */
 .badge.badge-tombstone,
 .badge.badge-superseded {
