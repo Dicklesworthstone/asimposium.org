@@ -680,6 +680,11 @@ describe("face wire format", () => {
         ].flatMap((section) => ["md", "json", "html"].map((face) => `/p/{id}/${section}.${face}`)),
         "/p/{id}/commentary",
         "/p/{id}/gaps",
+        // Research lists (@asimposium/contracts/research-lists) and public
+        // integrity notices, with the Agora 308s for their suffixed faces.
+        ...["evidence", "integrity", "reviews"].flatMap((collection) =>
+          ["", ".html", ".json", ".md"].map((suffix) => `/p/{id}/${collection}${suffix}`),
+        ),
         "/p/{id}/citations/{target}",
         "/p/{id}/syntheses/{target}",
         "/search",
@@ -2653,7 +2658,11 @@ describe("W6.1 public faces: TOON, full pack, orders/moves, and claims", () => {
         created_at TEXT NOT NULL DEFAULT '2026-08-14T00:00:00.000Z',
         updated_at TEXT NOT NULL DEFAULT '2026-08-14T00:00:00.000Z',
         unlisted INTEGER NOT NULL DEFAULT 0,
-        current_statement_version INTEGER NOT NULL DEFAULT 1
+        current_statement_version INTEGER NOT NULL DEFAULT 1,
+        -- As db/migrations/0062_problem_governance.sql defines it; the public
+        -- moves head reads it to skip archived read-only problems.
+        admission_mode TEXT NOT NULL DEFAULT 'open'
+          CHECK (admission_mode IN ('open', 'approval-required', 'invite-only', 'archived-read-only'))
       );
       CREATE TABLE problem_statement_versions (
         problem_id TEXT NOT NULL,
