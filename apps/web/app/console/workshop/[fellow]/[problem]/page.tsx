@@ -4,7 +4,7 @@ import { WorkshopLive } from "@/app/console/workshop-live";
 import { WorkshopPublicationPreview } from "@/app/console/workshop-publication";
 import { auth } from "@/auth";
 import { ScientificBody } from "@/components/scientific-body";
-import { configuredStoaOrigin, stoaSponsorWorkshop } from "@/lib/stoa";
+import { stoaSponsorWorkshop } from "@/lib/stoa";
 import { loadWorkshopPage, workshopRevisionHref } from "@/lib/workshop-page";
 
 export const metadata = {
@@ -176,7 +176,6 @@ export default async function WorkshopPage({
                           ? object.publication.object_kind
                           : "claim"
                     }
-                    stoaOrigin={configuredStoaOrigin() ?? "https://a.asimposium.org"}
                   />
                 </li>
               ))}

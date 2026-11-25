@@ -17,7 +17,6 @@ const problem = "P-4DSP";
 const sponsor = "usr_workshop_reader";
 
 test("typed promotion receipts link to the exact canonical object and disclose computed evidence", () => {
-  const origin = "https://a-staging.asimposium.org";
   const hypothesis = SponsorWorkshopPromotionReceiptSchema.parse({
     object_kind: "hypothesis",
     problem_id: problem,
@@ -25,7 +24,7 @@ test("typed promotion receipts link to the exact canonical object and disclose c
     version: 1,
     result: { hypothesis_id: "H-7", status: "open" },
   });
-  expect(workshopPromotionDestination(hypothesis, origin)).toEqual({
+  expect(workshopPromotionDestination(hypothesis)).toEqual({
     label: "H-7",
     href: `/p/${problem}/hypotheses/H-7?through=7`,
   });
@@ -41,7 +40,7 @@ test("typed promotion receipts link to the exact canonical object and disclose c
       drives_promotion: false,
     },
   });
-  const destination = workshopPromotionDestination(evidence, origin);
+  const destination = workshopPromotionDestination(evidence);
   expect(destination.href).toBe(`/r/p/${problem}/evidence/E-8`);
   expect(destination.label).toBe("E-8");
   expect(destination.assessment).toContain("Computed evidence class: heuristic");
@@ -54,12 +53,12 @@ test("typed promotion receipts link to the exact canonical object and disclose c
     version: 1,
     queue_position: 0,
   });
-  expect(workshopPromotionDestination(claim, origin)).toEqual({
+  expect(workshopPromotionDestination(claim)).toEqual({
     label: "C-1@1",
     href: `/p/${problem}/claims/C-1%401?through=1`,
   });
   const revised = SponsorWorkshopPromotionReceiptSchema.parse({ ...claim, seq: 9, version: 2 });
-  expect(workshopPromotionDestination(revised, origin)).toEqual({
+  expect(workshopPromotionDestination(revised)).toEqual({
     label: "C-1@2",
     href: `/p/${problem}/claims/C-1%402?through=9`,
   });
@@ -70,7 +69,7 @@ test("typed promotion receipts link to the exact canonical object and disclose c
     version: 1,
     result: { recorded: true, dead_end_id: "DE-10", problem_id: problem, seq: 10 },
   });
-  expect(workshopPromotionDestination(deadEnd, origin)).toEqual({
+  expect(workshopPromotionDestination(deadEnd)).toEqual({
     label: "DE-10",
     href: `/p/${problem}/dead-ends?target=DE-10`,
   });
@@ -87,7 +86,7 @@ test("typed promotion receipts link to the exact canonical object and disclose c
       carries_weight: true,
     },
   });
-  const reviewDestination = workshopPromotionDestination(review, origin);
+  const reviewDestination = workshopPromotionDestination(review);
   expect(reviewDestination.label).toBe("R-11");
   expect(reviewDestination.href).toBe(`/r/p/${problem}/reviews/R-11`);
   expect(reviewDestination.assessment).toContain("Recorded independence tier: T0");
@@ -99,7 +98,7 @@ test("typed promotion receipts link to the exact canonical object and disclose c
     ...review,
     result: { ...review.result, tier: "T1", carries_weight: false },
   });
-  expect(workshopPromotionDestination(assertionOnly, origin).assessment).toContain(
+  expect(workshopPromotionDestination(assertionOnly).assessment).toContain(
     "Assertion-only review; it carries no assessment weight.",
   );
 });

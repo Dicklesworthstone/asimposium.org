@@ -10,12 +10,10 @@ const INITIAL_STATE: WorkshopActionState = { status: "idle" };
 
 function PromotionReceipt({
   receipt,
-  stoaOrigin,
 }: {
   readonly receipt: Extract<SponsorWorkshopMutationResponse, { action: "promote" }>;
-  readonly stoaOrigin: string;
 }) {
-  const destination = workshopPromotionDestination(receipt.promotion, stoaOrigin);
+  const destination = workshopPromotionDestination(receipt.promotion);
   return (
     <p>
       Revision {receipt.promoted_workshop_version} was promoted as{" "}
@@ -37,7 +35,6 @@ export function WorkshopCardActions({
   objectState,
   isReplacement,
   publicationKind,
-  stoaOrigin,
 }: {
   readonly sponsorId: string;
   readonly fellowId: string;
@@ -47,7 +44,6 @@ export function WorkshopCardActions({
   readonly objectState: "open" | "archived" | "discarded";
   readonly isReplacement: boolean;
   readonly publicationKind: "claim" | "hypothesis" | "evidence" | "review" | "dead-end" | undefined;
-  readonly stoaOrigin: string;
 }) {
   const [state, formAction, pending] = useActionState(
     applyWorkshopAction.bind(null, sponsorId, {
@@ -134,7 +130,7 @@ export function WorkshopCardActions({
       ) : state.status === "committed" ? (
         <div role="status" className="mt-2">
           {state.receipt.action === "promote" ? (
-            <PromotionReceipt receipt={state.receipt} stoaOrigin={stoaOrigin} />
+            <PromotionReceipt receipt={state.receipt} />
           ) : (
             <p>
               {state.receipt.action === "keep" ? "Draft kept" : "Draft soft-hidden"} at revision{" "}

@@ -102,7 +102,6 @@ export const ConflictItemSchema = z
     model_string_self_declared: z.string().max(256).nullable().optional(),
     harness: z.string().max(256).nullable().optional(),
     created_at: z.string(),
-    screening_notice: ScreeningPublicationNoticeSchema.optional(),
     resolved_at: z.string().nullable().optional(),
     resolution_event: ConflictResolutionEventSchema.nullable().optional(),
   })

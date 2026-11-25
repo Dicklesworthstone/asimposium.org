@@ -237,7 +237,6 @@ export async function loadWorkshopRoomTicketResponse(
  * deliberately show current visibility; never invent a historical query. */
 export function workshopPromotionDestination(
   receipt: SponsorWorkshopPromotionReceipt,
-  _stoaOrigin: string,
 ): { readonly label: string; readonly href: string; readonly assessment?: string } {
   const problem = encodeURIComponent(receipt.problem_id);
   if (!("object_kind" in receipt)) {
