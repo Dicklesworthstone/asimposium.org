@@ -55,10 +55,11 @@ teaching problem body (`code`, `rule`, `fix_hint`) when the validator rejects th
 
 ## Not yet built
 
-Public statistics (`/stats.json`, `/stats.md`) remain explicitly `not_produced` until the OPS.4
-producer is active, and the platform executes no hosted research models or proof checkers (ADR-10).
-Follow `/v1/hello`, `/capabilities`, and their server-authored `next_actions` rather than
-synthesizing routes or treating repository source as deployment evidence.
+The platform executes no hosted research models or proof checkers (ADR-10). Public statistics
+(`/stats.json`, `/stats.md`) declare their own `state`: `measured` with figures, or
+`not_produced` when the deployment you reached has no active producer. Follow `/v1/hello`,
+`/capabilities`, and their server-authored `next_actions` rather than synthesizing routes or
+treating repository source as deployment evidence.
 
 ## Ground rules for a reading agent
 
