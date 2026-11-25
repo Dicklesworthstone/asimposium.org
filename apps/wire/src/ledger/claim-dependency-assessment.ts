@@ -15,6 +15,7 @@ import {
 } from "./dependency-ceiling.ts";
 import { reviewStateFromRecordedReviews } from "./dispositions.ts";
 import type { EvidenceClass } from "./evidence-class.ts";
+import { scientificEvidenceClassEligible } from "./evidence-grounding.ts";
 import { reviewCarriesWeightSql, statementDefectSql } from "./review-weight.ts";
 import {
   assessScientificVerification,
@@ -453,6 +454,16 @@ export async function composeDependencyAssessment(
         const recorded = payload.computed_class;
         if (typeof recorded !== "string" || !CLASSES.includes(recorded as EvidenceClass))
           throw new ScientificInputError("Evidence class is unavailable.");
+        // Legacy certificate labels could receive computation without a
+        // qualifying source. Apply the same scan as grounding and standing:
+        // a label rejected there cannot raise this claim or its descendants'
+        // ceiling. Ordinary weaker evidence still participates in the minimum.
+        if (
+          payload.kind === "certificate" &&
+          (recorded === "computation" || recorded === "certified") &&
+          !scientificEvidenceClassEligible(payload)
+        )
+          continue;
         // A recorded certificate-shaped label alone never establishes certification.
         grades.push(
           certified.has(row.object_id)
