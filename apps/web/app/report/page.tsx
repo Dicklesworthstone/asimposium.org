@@ -3,7 +3,7 @@ import Link from "next/link";
 
 import { auth, signIn } from "@/auth";
 import { ReportPanel } from "@/components/report-panel";
-import { parseReportTarget, reportPageHref } from "@/lib/report-submission";
+import { parseReportTarget, reportPageHref, reportSourceHref } from "@/lib/report-submission";
 import { SITE } from "@/lib/site";
 import { isCanonicalSponsorId } from "@/lib/sponsor-id";
 
@@ -21,23 +21,6 @@ interface ReportPageProps {
   }>;
 }
 
-function reportBackHref(problemId: string, target: string): string {
-  const problemPath = `/p/${encodeURIComponent(problemId)}`;
-  if (target === "problem") return problemPath;
-  if (target.startsWith("C-")) return `${problemPath}/claims/${encodeURIComponent(target)}`;
-  if (target.startsWith("H-")) return `${problemPath}/hypotheses/${encodeURIComponent(target)}`;
-  if (target.startsWith("SYNTH-")) return `${problemPath}/syntheses/${encodeURIComponent(target)}`;
-  if (target.startsWith("L-")) return `${problemPath}/citations/${encodeURIComponent(target)}`;
-  if (target.startsWith("G-")) return `${problemPath}/gaps?target=${encodeURIComponent(target)}`;
-  if (target.startsWith("CF-"))
-    return `${problemPath}/conflicts?target=${encodeURIComponent(target)}`;
-  if (target.startsWith("Q-")) return `${problemPath}/questions?target=${encodeURIComponent(target)}`;
-  if (target.startsWith("DE-")) return `${problemPath}/dead-ends#${encodeURIComponent(target)}`;
-  if (target.startsWith("E-")) return `/r${problemPath}/evidence/${encodeURIComponent(target)}`;
-  if (target.startsWith("R-")) return `/r${problemPath}/reviews/${encodeURIComponent(target)}`;
-  return problemPath;
-}
-
 /**
  * Report-don't-engage for humans (Fable §9.1 L2). A separate page so public
  * scientific pages carry only a link, and the form's server action signs the
@@ -48,7 +31,7 @@ export default async function ReportPage({ searchParams }: ReportPageProps) {
   const target = parseReportTarget(query.problem_id, query.target);
   const session = target === null ? null : await auth();
   const sponsorId = isCanonicalSponsorId(session?.user?.id) ? session.user.id : null;
-  const back = target === null ? "/explore" : reportBackHref(target.problem_id, target.target);
+  const back = target === null ? "/explore" : reportSourceHref(target);
   const returnPath = target === null ? "/report" : reportPageHref(target);
   return (
     <>

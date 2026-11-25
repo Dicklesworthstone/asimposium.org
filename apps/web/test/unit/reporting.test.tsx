@@ -96,7 +96,7 @@ if (process.env.ASIMPOSIUM_REPORT_PAGE_TEST_CHILD !== import.meta.path) {
       expect(parseReportTarget(["P-4DSP"], "C-1")).toBeNull();
     });
 
-    test("back links use existing registered readers and keep the exact claim version", () => {
+    test("back links use registered readers and keep the exact claim version", async () => {
       const targets = {
         problem: "/p/P-4DSP",
         "C-1@2": "/p/P-4DSP/claims/C-1%402",
@@ -110,8 +110,17 @@ if (process.env.ASIMPOSIUM_REPORT_PAGE_TEST_CHILD !== import.meta.path) {
         "CF-1": "/r/p/P-4DSP/conflicts/CF-1",
         "SYNTH-1": "/p/P-4DSP/syntheses/SYNTH-1",
       };
-      for (const [target, expected] of Object.entries(targets))
-        expect(reportSourceHref({ problem_id: "P-4DSP", target })).toBe(expected);
+      for (const [target, expected] of Object.entries(targets)) {
+        const requested = { problem_id: "P-4DSP", target };
+        expect(reportSourceHref(requested)).toBe(expected);
+        for (const principal of ["usr_report_page", null]) {
+          sponsor = principal;
+          const html = renderToStaticMarkup(
+            await Page({ searchParams: Promise.resolve(requested) }),
+          );
+          expect(html).toContain(`href="${expected}">← Back</a>`);
+        }
+      }
     });
 
     test("a URL status parameter cannot forge success or an authoritative receipt", async () => {
