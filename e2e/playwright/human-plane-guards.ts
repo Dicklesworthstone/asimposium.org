@@ -75,6 +75,11 @@ export function evaluateHumanPlaneCacheAndPrivacyPair(
   if (snapshot.privateWorkshopCanaries.length === 0) {
     violations.push("NO_PRIVATE_WORKSHOP_CANARY_CONFIGURED");
   }
+  for (const canary of allCanaries) {
+    if (canary.trim().length === 0) {
+      violations.push("EMPTY_PRIVATE_CANARY_CONFIGURED");
+    }
+  }
   const ownerSurface = snapshot.surfaces.find((s) => s.surface === "sponsor-a-workshop");
   if (!ownerSurface) {
     violations.push("OWNER_WORKSHOP_SURFACE_MISSING");
@@ -83,7 +88,7 @@ export function evaluateHumanPlaneCacheAndPrivacyPair(
       violations.push(`OWNER_WORKSHOP_UNEXPECTED_STATUS:${ownerSurface.status}`);
     }
     for (const canary of snapshot.privateWorkshopCanaries) {
-      if (!ownerSurface.body.includes(canary)) {
+      if (canary.trim().length > 0 && !ownerSurface.body.includes(canary)) {
         violations.push("OWNER_WORKSHOP_CANARY_ABSENT");
       }
     }

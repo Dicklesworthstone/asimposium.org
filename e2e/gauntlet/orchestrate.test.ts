@@ -188,12 +188,12 @@ describe("the gauntlet orchestrator", () => {
     expect(seen.size).toBe(HARNESS_ADAPTERS.length);
   });
 
-  test("both executable entries emit one product-flow blocker for a supplied join-file setting", () => {
+  test("both executable entries fail closed on unreadable join file or production origin before invoking harnesses", () => {
     const repositoryRoot = resolve(import.meta.dir, "../..");
     const joinFile = resolve(import.meta.dir, "does-not-exist.join-urls");
     const trapDirectory = mkdtempSync(resolve(tmpdir(), "gauntlet-fail-closed-"));
     const invocationMarker = resolve(trapDirectory, "forbidden-invocation");
-    for (const binary of ["bun", "claude", "codex", "gemini", "curl"]) {
+    for (const binary of ["claude", "codex", "gemini", "curl"]) {
       writeFileSync(
         resolve(trapDirectory, binary),
         '#!/bin/bash\nprintf "%s\\n" "$0" >> "$GAUNTLET_INVOCATION_MARKER"\nexit 66\n',
@@ -222,20 +222,37 @@ describe("the gauntlet orchestrator", () => {
     });
 
     for (const entry of [direct, shell]) {
-      expect(entry.status).toBe(70);
+      expect(entry.status).toBe(78);
       const lines = entry.stdout.trimEnd().split("\n");
       expect(lines).toHaveLength(1);
       const firstLine = lines[0] ?? "";
       expect(JSON.parse(firstLine)).toMatchObject({
         status: "blocked",
-        code: "GAUNTLET_PRODUCT_FLOW_NOT_IMPLEMENTED",
+        code: "GAUNTLET_JOIN_URLS_UNREADABLE",
       });
-      expect(entry.stdout).not.toContain("GAUNTLET_PASS");
+      expect(entry.stdout).not.toContain("GAUNTLET_STAGING_PASS");
       expect(entry.stderr).toBe("");
     }
     expect(existsSync(invocationMarker)).toBe(false);
 
-    const directWithoutJoinFile = spawnSync(
+    // Canonical production origin is refused fail-closed before any probe or harness spawn.
+    const prodDirect = spawnSync(process.execPath, [resolve(import.meta.dir, "run-gauntlet.ts")], {
+      cwd: repositoryRoot,
+      encoding: "utf8",
+      env: {
+        ...environment,
+        ASIMPOSIUM_STAGING_AGENT_BASE_URL: "https://a.asimposium.org",
+      },
+      timeout: 5000,
+    });
+    expect(prodDirect.status).toBe(64);
+    expect(JSON.parse(prodDirect.stdout)).toMatchObject({
+      status: "fail",
+      code: "STAGING_ORIGIN_PRODUCTION_FORBIDDEN",
+    });
+    expect(existsSync(invocationMarker)).toBe(false);
+
+    const directWithoutOrigin = spawnSync(
       process.execPath,
       [resolve(import.meta.dir, "run-gauntlet.ts")],
       {
@@ -245,19 +262,16 @@ describe("the gauntlet orchestrator", () => {
         timeout: 5000,
       },
     );
-    expect(directWithoutJoinFile.status).toBe(78);
-    expect(directWithoutJoinFile.stdout).toBe(
-      `${JSON.stringify({ status: "blocked", code: "GAUNTLET_JOIN_URLS_FILE_MISSING" })}\n`,
+    expect(directWithoutOrigin.status).toBe(78);
+    expect(directWithoutOrigin.stdout).toBe(
+      `${JSON.stringify({ status: "blocked", code: "STAGING_AGENT_BASE_URL_MISSING" })}\n`,
     );
-    expect(directWithoutJoinFile.stderr).toBe("");
+    expect(directWithoutOrigin.stderr).toBe("");
   });
 
-  test("fail-closed entries contain no harness or scorecard execution path", () => {
+  test("staging entry delegates strictly to state-derived staging-product-flow (never transcript-only orchestrate.ts)", () => {
     const directSource = readFileSync(resolve(import.meta.dir, "run-gauntlet.ts"), "utf8");
-    const shellSource = readFileSync(resolve(import.meta.dir, "run.sh"), "utf8");
-
-    expect(directSource).not.toMatch(/child_process|Bun\.spawn|\bspawn\s*\(|orchestrate\.ts/);
-    expect(shellSource).not.toContain("run-gauntlet.ts");
-    expect(shellSource).not.toContain("GAUNTLET_PASS");
+    expect(directSource).toContain("./staging-product-flow.mjs");
+    expect(directSource).not.toMatch(/orchestrate\.ts|attempt\.ts/);
   });
 });

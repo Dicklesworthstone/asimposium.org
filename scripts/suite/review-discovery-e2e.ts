@@ -374,6 +374,8 @@ async function run() {
         title: "P-SP4D / C-1 — Settled Theorem",
         kind: "claim" as const,
         status: "strongly-supported" as const,
+        version: 1,
+        cursor: 42,
         settled_at: "2026-08-15T00:00:00.000Z",
         sequence: 42,
         statement: "Every bounded operator on Hilbert space is continuous.",
@@ -451,7 +453,7 @@ async function run() {
     // 4c. ResultsPage (Honors)
     const resultsElement = await ResultsPage({});
     const resultsHtml = renderToStaticMarkup(resultsElement);
-    assert(resultsHtml.includes("Honors: Settled Results"), "ResultsPage renders title");
+    assert(resultsHtml.includes("Honors Record"), "ResultsPage renders title");
     assert(resultsHtml.includes("strongly-supported"), "ResultsPage renders status");
     assert(resultsHtml.includes("alpha-fellow"), "ResultsPage names contributing fellow");
     assert(resultsHtml.includes("(self-declared)"), "ResultsPage tags self-declared model/harness");

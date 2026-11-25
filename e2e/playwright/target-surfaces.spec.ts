@@ -1,4 +1,4 @@
-import { type APIRequestContext, type BrowserContext, expect, test } from "@playwright/test";
+import { type APIRequestContext, expect, type Page, test } from "@playwright/test";
 import {
   ANONYMOUS_AGORA_PATHS,
   checkStrictCspHeaders,
@@ -92,8 +92,8 @@ async function resolveTargetProblemId(
   return null;
 }
 
-async function inspectAgoraPageInContext(
-  context: BrowserContext,
+async function inspectAgoraPage(
+  page: Page,
   agoraOrigin: string,
   path: string,
   jsEnabled: boolean,
@@ -112,18 +112,19 @@ async function inspectAgoraPageInContext(
   readonly workshopLinks: string[];
 }> {
   const startedAt = Date.now();
-  const page = await context.newPage();
   const consoleErrors: string[] = [];
   const pageErrors: string[] = [];
 
-  page.on("console", (msg) => {
+  const onConsole = (msg: { type(): string; text(): string }) => {
     if (msg.type() === "error") {
       consoleErrors.push(msg.text());
     }
-  });
-  page.on("pageerror", (err) => {
+  };
+  const onPageError = (err: Error) => {
     pageErrors.push(err.message);
-  });
+  };
+  page.on("console", onConsole);
+  page.on("pageerror", onPageError);
 
   try {
     const response = await page.goto(`${agoraOrigin}${path}`, {
@@ -265,13 +266,14 @@ async function inspectAgoraPageInContext(
       workshopLinks: domSnapshot.workshopLinks,
     };
   } finally {
-    await page.close();
+    page.off("console", onConsole);
+    page.off("pageerror", onPageError);
   }
 }
 
 async function verifyOgImage1200x630(
   request: APIRequestContext,
-  context: BrowserContext,
+  page: Page,
   agoraOrigin: string,
   pagePath: string,
   ogImageHref: string | null,
@@ -304,23 +306,19 @@ async function verifyOgImage1200x630(
     );
   }
 
-  // Decode in real Chromium to verify browser image decoding succeeds cleanly.
-  const page = await context.newPage();
-  try {
-    const dataUrl = `data:${expectedType};base64,${imageBytes.toString("base64")}`;
-    const decoded = await page.evaluate(async (src) => {
-      const img = new Image();
-      img.src = src;
-      await img.decode();
-      return { width: img.naturalWidth, height: img.naturalHeight };
-    }, dataUrl);
-    expect(decoded, `Chromium failed to decode a 1200x630 image for ${pagePath}`).toEqual({
-      width: 1200,
-      height: 630,
-    });
-  } finally {
-    await page.close();
-  }
+  // Decode in real Chromium on a clean about:blank document (free of page CSP).
+  await page.goto("about:blank");
+  const dataUrl = `data:${expectedType};base64,${imageBytes.toString("base64")}`;
+  const decoded = await page.evaluate(async (src) => {
+    const img = new Image();
+    img.src = src;
+    await img.decode();
+    return { width: img.naturalWidth, height: img.naturalHeight };
+  }, dataUrl);
+  expect(decoded, `Chromium failed to decode a 1200x630 image for ${pagePath}`).toEqual({
+    width: 1200,
+    height: 630,
+  });
 }
 
 if (process.env.ASIMPOSIUM_PLAYWRIGHT_ENTRY === "1") {
@@ -374,8 +372,9 @@ if (process.env.ASIMPOSIUM_PLAYWRIGHT_ENTRY === "1") {
         userAgent: USER_AGENT,
       });
       try {
+        const page = await context.newPage();
         for (const route of routesToCheck) {
-          const result = await inspectAgoraPageInContext(context, agoraOrigin, route, jsEnabled, {
+          const result = await inspectAgoraPage(page, agoraOrigin, route, jsEnabled, {
             principal: "anonymous",
             forbiddenCanary: workshopCanary,
           });
@@ -385,10 +384,10 @@ if (process.env.ASIMPOSIUM_PLAYWRIGHT_ENTRY === "1") {
         }
         if (jsEnabled) {
           for (const [route, ogHref] of ogTargets.entries()) {
-            await verifyOgImage1200x630(request, context, agoraOrigin, route, ogHref);
+            await verifyOgImage1200x630(request, page, agoraOrigin, route, ogHref);
           }
           // Anonymous /console must never be publicly cacheable and must never leak workshop canary bytes.
-          await inspectAgoraPageInContext(context, agoraOrigin, "/console", true, {
+          await inspectAgoraPage(page, agoraOrigin, "/console", true, {
             principal: "anonymous",
             requirePrivateCache: true,
             forbiddenCanary: workshopCanary,
@@ -417,22 +416,17 @@ if (process.env.ASIMPOSIUM_PLAYWRIGHT_ENTRY === "1") {
         storageState: sponsorStorageStatePath,
       });
       try {
-        const consoleResult = await inspectAgoraPageInContext(
-          sponsorContext,
-          agoraOrigin,
-          "/console",
-          true,
-          {
-            principal: "sponsor",
-            requirePrivateCache: true,
-            expectedHeading: "Your account",
-          },
-        );
+        const sponsorPage = await sponsorContext.newPage();
+        const consoleResult = await inspectAgoraPage(sponsorPage, agoraOrigin, "/console", true, {
+          principal: "sponsor",
+          requirePrivateCache: true,
+          expectedHeading: "Your account",
+        });
 
         // Inspect private workshop view (explicit path or discovered link) and confirm private cacheability + canary visibility.
         const workshopPath = explicitWorkshopPath ?? consoleResult.workshopLinks[0];
         if (workshopPath) {
-          await inspectAgoraPageInContext(sponsorContext, agoraOrigin, workshopPath, true, {
+          await inspectAgoraPage(sponsorPage, agoraOrigin, workshopPath, true, {
             principal: "sponsor",
             requirePrivateCache: true,
             requiredCanary: workshopCanary,
@@ -441,7 +435,7 @@ if (process.env.ASIMPOSIUM_PLAYWRIGHT_ENTRY === "1") {
         }
 
         // Check /admin access boundary (200 for operator or 403/404 for non-operator, always private/no-store, never 500).
-        await inspectAgoraPageInContext(sponsorContext, agoraOrigin, "/admin", true, {
+        await inspectAgoraPage(sponsorPage, agoraOrigin, "/admin", true, {
           principal: "sponsor",
           requirePrivateCache: true,
           allowStatusCodes: [200, 403, 404],

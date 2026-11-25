@@ -32,6 +32,7 @@ import {
   EnrollmentService,
 } from "../../apps/wire/src/enrollment/service.ts";
 import type { Env } from "../../apps/wire/src/env.ts";
+import { assessEvidenceClass } from "../../apps/wire/src/ledger/evidence-class.ts";
 
 const REPO_ROOT = resolve(import.meta.dir, "../..");
 const MIGRATIONS = resolve(REPO_ROOT, "db/migrations");
@@ -48,12 +49,14 @@ function localD1(sqlite: Database): Env["DB"] {
           if (/^\s*(?:SELECT|WITH|PRAGMA)\b/i.test(query)) {
             const rows = sqlite.prepare<unknown, LocalBinding[]>(query).all(...values);
             return {
+              success: true,
               results: rows,
               meta: { changes: 0, rows_read: rows.length, rows_written: 0, duration: 0 },
             };
           }
           const result = sqlite.prepare<unknown, LocalBinding[]>(query).run(...values);
           return {
+            success: true,
             results: [],
             meta: {
               changes: result.changes,
@@ -67,9 +70,9 @@ function localD1(sqlite: Database): Env["DB"] {
           const row = sqlite.prepare<T, LocalBinding[]>(query).get(...values);
           return (row ?? null) as T | null;
         },
-        async all<T>(): Promise<{ results: T[] }> {
+        async all<T>(): Promise<{ success: true; results: T[] }> {
           const rows = sqlite.prepare<T, LocalBinding[]>(query).all(...values) as T[];
-          return { results: rows };
+          return { success: true, results: rows };
         },
       });
       return {
@@ -204,39 +207,83 @@ async function runMovesE2E() {
   const fellowA = await createFellow("fellow-alpha", "usr_sponsor_1");
   const fellowB = await createFellow("fellow-beta", "usr_sponsor_2");
 
-  // Helper to create and assign a problem
+  // Helper to create and assign a problem with its canonical problem.admitted
+  // formulation event at seq = 1 (Rule A6: formulation reads verify the log).
   function setupProblem(
     problemId: string,
     status = "active",
     admissionMode = "open",
-    withFalsifier = true,
+    _withFalsifier = true,
   ) {
+    const createdAtIso = "2026-09-01T00:00:00.000Z";
+    const title = `Title for ${problemId}`;
+    const statement = "Formulated problem statement";
+    const falsifier = "Explicit falsifier condition";
+    const motivation = "Motivation";
+
     rawDb.run(
-      `INSERT INTO problems (id, title, admission_mode, status, public_seq, current_statement_version, created_at, updated_at, chain_digest, chain_version)
-       VALUES (?, ?, ?, ?, 0, 1, ?, ?, 'genesis', 2)`,
-      [problemId, `Title for ${problemId}`, admissionMode, status, now, now],
+      `INSERT INTO problems (id, title, admission_mode, status, sponsor_id, created_by_fellow_id, public_seq, current_statement_version, created_at, updated_at, chain_digest, chain_version)
+       VALUES (?, ?, ?, ?, 'usr_sponsor_2', ?, 1, 1, ?, ?, 'genesis', 2)`,
+      [problemId, title, admissionMode, status, fellowB.fellowId, now, now],
     );
     rawDb.run(
       `INSERT INTO krater_integrity_backfill (problem_id, state, legacy_event_count, completed_at, chain_version)
        VALUES (?, 'complete', 0, ?, 2)`,
-      [problemId, new Date().toISOString()],
+      [problemId, createdAtIso],
     );
-    if (withFalsifier && status !== "sharpening") {
-      rawDb.run(
-        `INSERT INTO problem_statement_versions (problem_id, version, statement, norm_hash, falsifier, motivation, created_at)
-         VALUES (?, 1, 'Formulated problem statement', 'norm1', 'Explicit falsifier condition', 'Motivation', ?)`,
-        [problemId, new Date().toISOString()],
-      );
-    }
+    rawDb.run(
+      `INSERT INTO problem_statement_versions (problem_id, version, statement, norm_hash, falsifier, motivation, created_at)
+       VALUES (?, 1, ?, 'norm1', ?, ?, ?)`,
+      [problemId, statement, falsifier, motivation, createdAtIso],
+    );
+
+    const publishEventId = `EV-${problemId}-ADMIT`;
+    const publishPayload = {
+      action: "publish",
+      previous_status: "private-draft",
+      acting_principal: { type: "sponsor", id: "usr_sponsor_2" },
+      source_fellow_id: fellowB.fellowId,
+      scientific_author: {
+        fellow_id: fellowB.fellowId,
+        sponsor_id: "usr_sponsor_2",
+        session_id: `S-00000000000000000000000001`,
+        model_self_declared: "frontier-v1",
+        harness: "cli-harness",
+      },
+      previous_statement_version: 1,
+      problem: {
+        id: problemId,
+        title,
+        status: "sharpening",
+        current_statement_version: 1,
+        statement,
+        falsifier,
+        motivation,
+        updated_at: createdAtIso,
+      },
+    };
+    const publishPayloadStr = JSON.stringify(publishPayload);
+    const publishDigest = createHash("sha256").update(publishPayloadStr).digest("hex");
+    rawDb.run(
+      `INSERT INTO events (id, problem_id, seq, type, object_kind, object_id, object_version, payload_sha256, row_digest, chain_digest, created_at, actor_fellow_id, actor_sponsor_id, actor_session_id, model_string_self_declared, harness)
+       VALUES (?, ?, 1, 'problem.admitted', 'problem', ?, 1, ?, 'row-digest', 'genesis', ?, ?, 'usr_sponsor_2', 'S-00000000000000000000000001', 'frontier-v1', 'cli-harness')`,
+      [publishEventId, problemId, problemId, publishDigest, createdAtIso, fellowB.fellowId],
+    );
+    rawDb.run(
+      `INSERT INTO event_content (event_id, payload_sha256, payload_json)
+       VALUES (?, ?, ?)`,
+      [publishEventId, publishDigest, publishPayloadStr],
+    );
+
     rawDb.run(
       `INSERT INTO problem_memberships (problem_id, fellow_id, role, joined_at)
        VALUES (?, ?, 'contributor', ?)`,
-      [problemId, fellowA.fellowId, new Date().toISOString()],
+      [problemId, fellowA.fellowId, createdAtIso],
     );
     rawDb.run(
       `INSERT INTO problem_memberships (problem_id, fellow_id, role, joined_at)
        VALUES (?, ?, 'contributor', ?)`,
-      [problemId, fellowB.fellowId, new Date().toISOString()],
+      [problemId, fellowB.fellowId, createdAtIso],
     );
   }
 
@@ -251,17 +298,19 @@ async function runMovesE2E() {
     payload: Record<string, unknown>;
     actorFellowId?: string;
     actorSponsorId?: string;
-  }) {
-    rawDb.run("UPDATE problems SET public_seq = ? WHERE id = ?", [input.seq, input.problemId]);
+  }): number {
+    // seq = 1 is the canonical problem.admitted formulation event.
+    const eventSeq = input.seq + 1;
+    rawDb.run("UPDATE problems SET public_seq = ? WHERE id = ?", [eventSeq, input.problemId]);
     const payloadStr = JSON.stringify(input.payload);
     const digest = createHash("sha256").update(payloadStr).digest("hex");
     rawDb.run(
-      `INSERT INTO events (id, problem_id, seq, type, object_kind, object_id, object_version, payload_sha256, row_digest, chain_digest, created_at, actor_fellow_id, actor_sponsor_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'row-digest', 'genesis', '2026-09-01T00:00:00.000Z', ?, ?)`,
+      `INSERT INTO events (id, problem_id, seq, type, object_kind, object_id, object_version, payload_sha256, row_digest, chain_digest, created_at, actor_fellow_id, actor_sponsor_id, actor_session_id, model_string_self_declared, harness)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'row-digest', 'genesis', '2026-09-01T00:00:00.000Z', ?, ?, 'S-00000000000000000000000001', 'frontier-v1', 'cli-harness')`,
       [
         input.id,
         input.problemId,
-        input.seq,
+        eventSeq,
         input.type,
         input.objectKind,
         input.objectId,
@@ -276,6 +325,7 @@ async function runMovesE2E() {
        VALUES (?, ?, ?)`,
       [input.id, digest, payloadStr],
     );
+    return eventSeq;
   }
 
   function seedClaim(input: {
@@ -287,15 +337,24 @@ async function runMovesE2E() {
     fellowId: string;
     seq: number;
     eventId?: string;
+    dependencyPins?: readonly {
+      claim_id: string;
+      version: number;
+      event_id: string;
+      payload_digest: string;
+      content_digest: string;
+    }[];
   }) {
     const eventId = input.eventId ?? `EV-${input.problemId}-${input.claimId}-${input.version}`;
-    const payload = {
+    const falsifier = input.falsifier ?? "Falsifier condition";
+    const payload: Record<string, unknown> = {
       claim_id: input.claimId,
-      kind: "claim",
+      kind: "conjecture",
       statement: input.statement,
-      falsifier: input.falsifier ?? "Falsifier condition",
+      falsifier,
+      dependency_pins: input.dependencyPins ?? [],
     };
-    seedEvent({
+    const eventSeq = seedEvent({
       id: eventId,
       problemId: input.problemId,
       seq: input.seq,
@@ -305,11 +364,11 @@ async function runMovesE2E() {
       objectVersion: input.version,
       payload,
       actorFellowId: input.fellowId,
+      actorSponsorId: input.fellowId === fellowB.fellowId ? "usr_sponsor_2" : "usr_sponsor_1",
     });
 
     const payloadStr = JSON.stringify(payload);
     const digest = createHash("sha256").update(payloadStr).digest("hex");
-    const falsifier = input.falsifier ?? "Falsifier condition";
     const canonicalContent = JSON.stringify({
       falsifier,
       kind: "conjecture",
@@ -320,7 +379,7 @@ async function runMovesE2E() {
     rawDb.run(
       `INSERT OR REPLACE INTO claims (id, problem_id, statement, payload_sha256, source_seq, created_at)
        VALUES (?, ?, ?, ?, ?, '2026-09-01T00:00:00.000Z')`,
-      [input.claimId, input.problemId, input.statement, digest, input.seq],
+      [input.claimId, input.problemId, input.statement, digest, eventSeq],
     );
 
     rawDb.run(
@@ -336,6 +395,13 @@ async function runMovesE2E() {
         input.fellowId,
       ],
     );
+    return {
+      claim_id: input.claimId,
+      version: input.version,
+      event_id: eventId,
+      payload_digest: digest,
+      content_digest: contentDigest,
+    };
   }
 
   function seedHypothesis(input: {
@@ -356,8 +422,9 @@ async function runMovesE2E() {
       discriminating_predictions: ["p1", "p2"],
       body_md: "Markdown body for hypothesis",
     };
-    seedEvent({
-      id: `EV-${input.problemId}-${input.hypothesisId}`,
+    const eventId = `EV-${input.problemId}-${input.hypothesisId}`;
+    const eventSeq = seedEvent({
+      id: eventId,
       problemId: input.problemId,
       seq: input.seq,
       type: "hypothesis.created",
@@ -368,8 +435,8 @@ async function runMovesE2E() {
       actorFellowId: input.fellowId,
     });
     rawDb.run(
-      `INSERT INTO hypotheses (hypothesis_id, problem_id, route, mechanism, falsifier, origin, status, author_fellow_id, created_at, body_md)
-       VALUES (?, ?, ?, ?, ?, 'proposed', 'open', ?, '2026-09-01T00:00:00.000Z', 'Markdown body for hypothesis')`,
+      `INSERT INTO hypotheses (hypothesis_id, problem_id, route, mechanism, falsifier, origin, status, author_fellow_id, created_at, body_md, source_event_id, source_seq)
+       VALUES (?, ?, ?, ?, ?, 'proposed', 'open', ?, '2026-09-01T00:00:00.000Z', 'Markdown body for hypothesis', ?, ?)`,
       [
         input.hypothesisId,
         input.problemId,
@@ -377,6 +444,8 @@ async function runMovesE2E() {
         input.mechanism,
         input.falsifier,
         input.fellowId,
+        eventId,
+        eventSeq,
       ],
     );
   }
@@ -384,28 +453,48 @@ async function runMovesE2E() {
   function seedEvidence(input: {
     problemId: string;
     evidenceId: string;
-    bearsOnKind: string;
+    bearsOnKind: "claim" | "hypothesis";
     bearsOnId: string;
     bearsOnVersion?: number;
-    direction: string;
-    kind: string;
+    direction: "supports" | "refutes" | "neutral";
+    kind: "computation" | "empirical" | "argument" | "certificate" | "literature";
     seq: number;
     fellowId: string;
     sponsorId?: string;
     bodyMd?: string;
   }) {
     const eventId = `EV-${input.problemId}-${input.evidenceId}`;
-    const payload = {
+    const source = {
+      kind: "locator" as const,
+      locator: "https://example.org/evidence/check-1",
+      excerpt: "Exact finite check result.",
+    };
+    const computationDomainOrFloor =
+      input.kind === "computation" ? "finite exhaustive check n <= 1000" : undefined;
+    const assessment = assessEvidenceClass({
+      source,
+      ...(input.kind === "computation"
+        ? { computation: { domainOrFloor: computationDomainOrFloor } }
+        : {}),
+      selectedHypothesis: false,
+      mode: "confirmatory",
+    });
+    const payload: Record<string, unknown> = {
       bears_on_kind: input.bearsOnKind,
       bears_on_id: input.bearsOnId,
-      bears_on_version: input.bearsOnVersion ?? 1,
+      ...(input.bearsOnKind === "claim" ? { bears_on_version: input.bearsOnVersion ?? 1 } : {}),
       direction: input.direction,
       kind: input.kind,
+      source,
       mode: "confirmatory",
-      computed_class: "computation",
-      body_md: input.bodyMd ?? "Body text for evidence",
+      ...(computationDomainOrFloor !== undefined
+        ? { computation_domain_or_floor: computationDomainOrFloor }
+        : {}),
+      body_md: input.bodyMd ?? "Body text for evidence with observed counterexample.",
+      computed_class: assessment.class,
+      coercion_flags: [...assessment.flags],
     };
-    seedEvent({
+    const eventSeq = seedEvent({
       id: eventId,
       problemId: input.problemId,
       seq: input.seq,
@@ -418,20 +507,24 @@ async function runMovesE2E() {
       actorSponsorId: input.sponsorId ?? "usr_sponsor_1",
     });
     rawDb.run(
-      `INSERT INTO evidence (evidence_id, problem_id, bears_on_kind, bears_on_id, bears_on_version, direction, kind, source_kind, mode, computed_class, author_fellow_id, body_md, created_at, source_event_id, source_seq)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 'locator', 'confirmatory', 'computation', ?, ?, '2026-09-01T00:00:00.000Z', ?, ?)`,
+      `INSERT INTO evidence (evidence_id, problem_id, bears_on_kind, bears_on_id, bears_on_version, direction, kind, source_kind, locator, excerpt, mode, computed_class, coercion_flags_json, author_fellow_id, body_md, created_at, source_event_id, source_seq)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'locator', ?, ?, 'confirmatory', ?, ?, ?, ?, '2026-09-01T00:00:00.000Z', ?, ?)`,
       [
         input.evidenceId,
         input.problemId,
         input.bearsOnKind,
         input.bearsOnId,
-        input.bearsOnVersion ?? 1,
+        input.bearsOnKind === "claim" ? (input.bearsOnVersion ?? 1) : null,
         input.direction,
         input.kind,
+        source.locator,
+        source.excerpt,
+        assessment.class,
+        JSON.stringify([...assessment.flags]),
         input.fellowId,
-        input.bodyMd ?? "Body text for evidence",
+        input.bodyMd ?? "Body text for evidence with observed counterexample.",
         eventId,
-        input.seq,
+        eventSeq,
       ],
     );
   }
@@ -453,12 +546,14 @@ async function runMovesE2E() {
       target_claim_id: input.targetClaimId,
       target_version: input.targetVersion,
       verdict: input.verdict ?? "confirm",
+      basis: "argument",
       capable_of_failure: input.capableOfFailure ?? "An unequal result.",
+      body_md: "Body text for review with concrete verification steps.",
       independence_policy: "declared-family-and-grounded-method-v1",
       tier: input.tier ?? "T2",
       rubric: ["sound", "reproduced"],
     };
-    seedEvent({
+    const eventSeq = seedEvent({
       id: eventId,
       problemId: input.problemId,
       seq: input.seq,
@@ -483,7 +578,7 @@ async function runMovesE2E() {
         input.verdict ?? "confirm",
         input.capableOfFailure ?? "An unequal result.",
         eventId,
-        input.seq,
+        eventSeq,
       ],
     );
   }
@@ -705,7 +800,7 @@ async function runMovesE2E() {
     });
     seedHypothesis({
       problemId: "P-KILL",
-      hypothesisId: "H-DEAD",
+      hypothesisId: "H-1",
       route: "Route Dead",
       mechanism: "Mech",
       falsifier: "Falsifier fired",
@@ -714,9 +809,9 @@ async function runMovesE2E() {
     });
     seedEvidence({
       problemId: "P-KILL",
-      evidenceId: "E-KILL",
+      evidenceId: "E-1",
       bearsOnKind: "hypothesis",
-      bearsOnId: "H-DEAD",
+      bearsOnId: "H-1",
       direction: "refutes",
       kind: "computation",
       seq: 3,
@@ -736,7 +831,7 @@ async function runMovesE2E() {
   }
 
   // --- Scenario 8: Collapse Duplicate ---
-  console.log("\n8. Testing Collapse Duplicate on Identical Hashes...");
+  console.log("\n8. Testing Collapse Duplicate on Identical Statements...");
   {
     setupProblem("P-DUP", "active");
     seedClaim({
@@ -751,29 +846,9 @@ async function runMovesE2E() {
       problemId: "P-DUP",
       claimId: "C-2",
       version: 1,
-      statement: "A duplicated claim statement.",
+      statement: "  a   duplicated  claim   statement. ",
       fellowId: fellowA.fellowId,
       seq: 2,
-    });
-    seedEvent({
-      id: "EV-DUP1",
-      problemId: "P-DUP",
-      seq: 3,
-      type: "claim.revised",
-      objectKind: "claim",
-      objectId: "C-1",
-      objectVersion: 2,
-      payload: { statement: "Dup 1", norm_hash: "hash-identical" },
-    });
-    seedEvent({
-      id: "EV-DUP2",
-      problemId: "P-DUP",
-      seq: 4,
-      type: "claim.revised",
-      objectKind: "claim",
-      objectId: "C-2",
-      objectVersion: 2,
-      payload: { statement: "Dup 2", norm_hash: "hash-identical" },
     });
 
     const res = await app.fetch(
@@ -787,7 +862,7 @@ async function runMovesE2E() {
     const moves = [data.primary_move?.move, ...data.alternatives.map((a) => a.move)];
     assert(
       moves.includes("collapse-duplicate"),
-      "offers collapse-duplicate for matching norm_hash",
+      "offers collapse-duplicate for P11-matching statements",
     );
   }
 
@@ -795,9 +870,9 @@ async function runMovesE2E() {
   console.log("\n9. Testing Load-Bearing Formalization by DAG Dependents...");
   {
     setupProblem("P-FORM", "active");
-    seedClaim({
+    const keyPin = seedClaim({
       problemId: "P-FORM",
-      claimId: "C-KEY",
+      claimId: "C-1",
       version: 1,
       statement: "Pivotal foundation.",
       fellowId: fellowA.fellowId,
@@ -805,36 +880,62 @@ async function runMovesE2E() {
     });
     seedClaim({
       problemId: "P-FORM",
-      claimId: "C-DEP1",
+      claimId: "C-2",
       version: 1,
       statement: "Dependent claim 1.",
       fellowId: fellowA.fellowId,
       seq: 2,
+      dependencyPins: [keyPin],
     });
     seedClaim({
       problemId: "P-FORM",
-      claimId: "C-DEP2",
+      claimId: "C-3",
       version: 1,
       statement: "Dependent claim 2.",
       fellowId: fellowA.fellowId,
       seq: 3,
+      dependencyPins: [keyPin],
     });
     seedClaim({
       problemId: "P-FORM",
-      claimId: "C-DEP3",
+      claimId: "C-4",
       version: 1,
       statement: "Dependent claim 3.",
       fellowId: fellowA.fellowId,
       seq: 4,
+      dependencyPins: [keyPin],
+    });
+    seedReview({
+      problemId: "P-FORM",
+      reviewId: "R-1",
+      targetClaimId: "C-1",
+      targetVersion: 1,
+      seq: 5,
+      fellowId: fellowB.fellowId,
+      sponsorId: "usr_sponsor_2",
+      tier: "T2",
+      verdict: "confirm",
+    });
+    seedEvidence({
+      problemId: "P-FORM",
+      evidenceId: "E-1",
+      bearsOnKind: "claim",
+      bearsOnId: "C-1",
+      bearsOnVersion: 1,
+      direction: "refutes",
+      kind: "computation",
+      seq: 6,
+      fellowId: fellowB.fellowId,
+      sponsorId: "usr_sponsor_2",
     });
     rawDb.run(
-      "INSERT INTO claim_deps (problem_id, claim_id, depends_on_claim_id, created_at) VALUES ('P-FORM', 'C-DEP1', 'C-KEY', '2026-09-01T00:00:00.000Z')",
+      "INSERT INTO claim_deps (problem_id, claim_id, depends_on_claim_id, created_at) VALUES ('P-FORM', 'C-2', 'C-1', '2026-09-01T00:00:00.000Z')",
     );
     rawDb.run(
-      "INSERT INTO claim_deps (problem_id, claim_id, depends_on_claim_id, created_at) VALUES ('P-FORM', 'C-DEP2', 'C-KEY', '2026-09-01T00:00:00.000Z')",
+      "INSERT INTO claim_deps (problem_id, claim_id, depends_on_claim_id, created_at) VALUES ('P-FORM', 'C-3', 'C-1', '2026-09-01T00:00:00.000Z')",
     );
     rawDb.run(
-      "INSERT INTO claim_deps (problem_id, claim_id, depends_on_claim_id, created_at) VALUES ('P-FORM', 'C-DEP3', 'C-KEY', '2026-09-01T00:00:00.000Z')",
+      "INSERT INTO claim_deps (problem_id, claim_id, depends_on_claim_id, created_at) VALUES ('P-FORM', 'C-4', 'C-1', '2026-09-01T00:00:00.000Z')",
     );
 
     const res = await app.fetch(
@@ -855,10 +956,10 @@ async function runMovesE2E() {
     setupProblem("P-CEREMONY", "active");
     seedClaim({
       problemId: "P-CEREMONY",
-      claimId: "C-PENDING",
+      claimId: "C-1",
       version: 1,
       statement: "Unfinished object.",
-      fellowId: fellowA.fellowId,
+      fellowId: fellowB.fellowId,
       seq: 1,
     });
 
@@ -889,7 +990,7 @@ async function runMovesE2E() {
       "ceremony breaker forces back-to-the-object primary move",
     );
     assert(
-      Boolean(data.primary_move?.why.includes("Ceremony breaker active")),
+      Boolean(data.primary_move?.why.includes("no object-level increment")),
       "why explains ceremony breaker",
     );
   }
@@ -912,8 +1013,11 @@ async function runMovesE2E() {
       "content-type is text/markdown",
     );
     const mdText = await mdRes.text();
-    assert(mdText.startsWith("---"), "has YAML frontmatter");
-    assert(mdText.includes("# ASImposium Move Catalog"), "has catalog title");
+    assert(
+      mdText.startsWith("# ASImposium: current scientific needs"),
+      "has canonical public moves heading",
+    );
+    assert(mdText.includes("## Move template catalog"), "has move template catalog section");
     assert(mdText.includes("back-to-the-object"), "contains back-to-the-object");
 
     // Content negotiation on /moves with Accept: text/markdown
@@ -930,14 +1034,35 @@ async function runMovesE2E() {
     );
   }
 
-  // --- Scenario 12: Degraded Recovery on Missing Database ---
-  console.log("\n12. Testing Degraded Recovery on DB Absence...");
+  // --- Scenario 12: Fail-Closed Auth on DB Absence & Degraded Moves Recovery on Provider Failure ---
+  console.log("\n12. Testing Fail-Closed DB Absence & Degraded Moves Provider Recovery...");
   {
-    const degradedRes = await app.fetch(
+    // A. Missing D1 binding must fail closed at auth/enrollment (never fake success).
+    const noDbRes = await app.fetch(
       new Request("https://a.asimposium.org/v1/p/P-SHARP/next", {
         headers: { authorization: `Bearer ${fellowA.token}` },
       }),
       { ...env, DB: undefined } as unknown as Env,
+    );
+    assert(noDbRes.status === 503, `missing DB fails closed with 503 (got ${noDbRes.status})`);
+
+    // B. Authenticated request whose moves provider loses DB degrades honestly with 200 MOVES_UNAVAILABLE.
+    const { TruthfulProductionMovesProvider } = await import(
+      "../../apps/wire/src/mega-commands/provider.ts"
+    );
+    const liveProvider = new TruthfulProductionMovesProvider();
+    const degradedApp = createApp({
+      createEnrollmentStore: () => enrollmentStore,
+      megaCommandsMovesProvider: {
+        nextMoves: (req) => liveProvider.nextMoves({ ...req, db: undefined }),
+        triageMove: (req) => liveProvider.triageMove({ ...req, db: undefined }),
+      },
+    });
+    const degradedRes = await degradedApp.fetch(
+      new Request("https://a.asimposium.org/v1/p/P-SHARP/next", {
+        headers: { authorization: `Bearer ${fellowA.token}` },
+      }),
+      env,
     );
     assert(degradedRes.status === 200, "degraded returns 200 envelope");
     const degradedData = ProblemNextResponseSchema.parse(await degradedRes.json());

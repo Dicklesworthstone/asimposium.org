@@ -49,15 +49,17 @@ function localD1(sqlite: Database): Env["DB"] {
         query,
         values,
         async run() {
-          if (/^\s*SELECT\b/i.test(query)) {
+          if (/^\s*(?:SELECT|WITH|PRAGMA)\b/i.test(query)) {
             const rows = sqlite.prepare<unknown, LocalBinding[]>(query).all(...values);
             return {
+              success: true,
               results: rows,
               meta: { changes: 0, rows_read: rows.length, rows_written: 0, duration: 0 },
             };
           }
           const result = sqlite.prepare<unknown, LocalBinding[]>(query).run(...values);
           return {
+            success: true,
             results: [],
             meta: {
               changes: result.changes,
@@ -71,9 +73,9 @@ function localD1(sqlite: Database): Env["DB"] {
           const row = sqlite.prepare<T, LocalBinding[]>(query).get(...values);
           return (row ?? null) as T | null;
         },
-        async all<T>(): Promise<{ results: T[] }> {
+        async all<T>(): Promise<{ success: boolean; results: T[] }> {
           const rows = sqlite.prepare<T, LocalBinding[]>(query).all(...values) as T[];
-          return { results: rows };
+          return { success: true, results: rows };
         },
       });
       return {
@@ -171,20 +173,70 @@ async function runMegaCommandsE2E() {
     createEnrollmentStore: () => enrollmentStore,
   });
 
-  // 2. Seed Sponsor & Problems
+  // 2. Seed Sponsor & Problems (with canonical Rule A6 problem.admitted formulation events)
   const now = Math.floor(Date.now() / 1_000);
+  const nowIso = new Date().toISOString();
   rawDb.run(
     "INSERT OR IGNORE INTO sponsors (sponsor_id, created_at, last_seen_at) VALUES (?, ?, ?)",
     ["usr_sponsor_1", now, now],
   );
-  rawDb.run(
-    "INSERT INTO problems (id, title, admission_mode, status, created_at, updated_at, chain_digest) VALUES (?, ?, 'open', 'active', ?, ?, 'genesis')",
-    ["P-TEST1", "First Test Problem", now, now],
-  );
-  rawDb.run(
-    "INSERT INTO problems (id, title, admission_mode, status, created_at, updated_at, chain_digest) VALUES (?, ?, 'approval-required', 'active', ?, ?, 'genesis')",
-    ["P-TEST2", "Second Test Problem", now, now],
-  );
+  for (const [id, title, mode] of [
+    ["P-TEST1", "First Test Problem", "open"],
+    ["P-TEST2", "Second Test Problem", "approval-required"],
+  ] as const) {
+    const stmt = `Canonical statement for ${title}.`;
+    const falsifier = `A finite counterexample to ${title}.`;
+    const authorFellowId = "F-01M0HCVW4XTFWMZCQ40EJ0S0J7";
+    const payloadJson = JSON.stringify({
+      action: "publish",
+      previous_status: "private-draft",
+      acting_principal: { type: "sponsor", id: "usr_sponsor_1" },
+      source_fellow_id: authorFellowId,
+      scientific_author: {
+        fellow_id: authorFellowId,
+        sponsor_id: "usr_sponsor_1",
+        session_id: "S-00000000000000000000000001",
+        model_self_declared: "frontier-v1",
+        harness: "cli-harness",
+      },
+      previous_statement_version: 1,
+      problem: {
+        id,
+        title,
+        status: "sharpening",
+        current_statement_version: 1,
+        statement: stmt,
+        falsifier,
+        motivation: "Mega-commands fixture formulation.",
+        updated_at: nowIso,
+      },
+    });
+    const payloadSha = sha256(payloadJson);
+    const eventId = `EV-ADMIT-${id}`;
+    rawDb.run(
+      "INSERT INTO problems (id, title, admission_mode, status, sponsor_id, created_by_fellow_id, public_seq, current_statement_version, created_at, updated_at, chain_version, chain_digest) VALUES (?, ?, ?, 'active', 'usr_sponsor_1', ?, 1, 1, ?, ?, 2, 'genesis')",
+      [id, title, mode, authorFellowId, nowIso, nowIso],
+    );
+    rawDb.run(
+      `INSERT INTO krater_integrity_backfill (problem_id, state, legacy_event_count, completed_at, chain_version)
+       VALUES (?, 'complete', 0, ?, 2)`,
+      [id, nowIso],
+    );
+    rawDb.run(
+      `INSERT INTO problem_statement_versions (problem_id, version, statement, norm_hash, falsifier, motivation, created_at)
+       VALUES (?, 1, ?, ?, ?, 'Mega-commands fixture formulation.', ?)`,
+      [id, stmt, sha256(`${id}:v1`), falsifier, nowIso],
+    );
+    rawDb.run(
+      `INSERT INTO events (id, problem_id, seq, type, object_kind, object_id, object_version, payload_sha256, row_digest, chain_digest, created_at, actor_sponsor_id)
+       VALUES (?, ?, 1, 'problem.admitted', 'problem', ?, 1, ?, ?, 'genesis', ?, 'usr_sponsor_1')`,
+      [eventId, id, id, payloadSha, sha256(`${eventId}:row`), nowIso],
+    );
+    rawDb.run(
+      "INSERT INTO event_content (event_id, payload_sha256, payload_json) VALUES (?, ?, ?)",
+      [eventId, payloadSha, payloadJson],
+    );
+  }
 
   // Helper to enroll and approve a fellow
   let fellowSeq = 1;

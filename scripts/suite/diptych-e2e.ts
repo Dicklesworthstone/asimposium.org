@@ -16,6 +16,7 @@
  */
 
 import { Database } from "bun:sqlite";
+import { createHash } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import {
@@ -26,6 +27,7 @@ import {
 import { createApp } from "../../apps/wire/src/app.ts";
 import type { Env } from "../../apps/wire/src/env.ts";
 import { parseProblemsIndexToon } from "../../apps/wire/src/ledger-face.ts";
+import { TOON_MEDIA_TYPE } from "../../packages/render/src/toon.ts";
 
 const REPO_ROOT = resolve(import.meta.dir, "../..");
 const MIGRATIONS = resolve(REPO_ROOT, "db/migrations");
@@ -42,12 +44,14 @@ function localD1(sqlite: Database): Env["DB"] {
           if (/^\s*(?:SELECT|WITH|PRAGMA)\b/i.test(query)) {
             const rows = sqlite.prepare<unknown, LocalBinding[]>(query).all(...values);
             return {
+              success: true,
               results: rows,
               meta: { changes: 0, rows_read: rows.length, rows_written: 0, duration: 0 },
             };
           }
           const result = sqlite.prepare<unknown, LocalBinding[]>(query).run(...values);
           return {
+            success: true,
             results: [],
             meta: {
               changes: result.changes,
@@ -57,13 +61,21 @@ function localD1(sqlite: Database): Env["DB"] {
             },
           };
         },
-        async first<T>(): Promise<T | null> {
-          const row = sqlite.prepare<T, LocalBinding[]>(query).get(...values);
-          return (row ?? null) as T | null;
+        async first<T>(column?: string): Promise<T | null> {
+          const row = sqlite.prepare<Record<string, unknown>, LocalBinding[]>(query).get(...values);
+          if (row === null || row === undefined) return null;
+          if (column !== undefined) {
+            return ((row as Record<string, unknown>)[column] ?? null) as T | null;
+          }
+          return row as unknown as T;
         },
-        async all<T>(): Promise<{ results: T[] }> {
+        async all<T>(): Promise<{ success: true; results: T[]; meta: Record<string, number> }> {
           const rows = sqlite.prepare<T, LocalBinding[]>(query).all(...values) as T[];
-          return { results: rows };
+          return {
+            success: true,
+            results: rows,
+            meta: { changes: 0, rows_read: rows.length, rows_written: 0, duration: 0 },
+          };
         },
       });
       return {
@@ -125,23 +137,216 @@ async function runDiptychE2E() {
   const app = createApp();
 
   // 2. Seed test fixtures: public problem, unlisted problem, private-draft problem, claims, events
+  const sha256Hex = (text: string) => createHash("sha256").update(text).digest("hex");
+  const hexDigest = (digit: string) => `sha256:${digit.repeat(64)}`;
+  const chain1 = hexDigest("1");
+  const chain8 = hexDigest("8");
+  const admittedPayload = JSON.stringify({
+    action: "publish",
+    previous_status: "private-draft",
+    acting_principal: { type: "sponsor", id: "usr_sponsor_1" },
+    source_fellow_id: "F-01M0HCVW4XTFWMZCQ40EJ0S0J7",
+    scientific_author: {
+      fellow_id: "F-01M0HCVW4XTFWMZCQ40EJ0S0J7",
+      sponsor_id: "usr_sponsor_1",
+      session_id: "S-00000000000000000000000001",
+      model_self_declared: "gpt-5.6-sol",
+      harness: "test-harness",
+    },
+    previous_statement_version: 1,
+    problem: {
+      id: "P-DIPTYCH",
+      title: "Smooth 4-Manifold Invariants",
+      status: "sharpening",
+      current_statement_version: 1,
+      statement: "Exotic smooth structures exist on compact 4-manifolds.",
+      falsifier: "Exhibiting diffeomorphism.",
+      motivation: "Geometry foundations.",
+      updated_at: "2026-08-20T00:00:00.000Z",
+    },
+  });
+  const c1Payload = JSON.stringify({
+    claim_id: "C-1",
+    statement: "Invariants distinguish Donaldson boundaries.",
+    kind: "conjecture",
+    falsifier: "Counterexample",
+  });
+  const c2Payload = JSON.stringify({
+    claim_id: "C-2",
+    statement: HOSTILE_STATEMENT,
+    kind: "conjecture",
+    falsifier: "Counterexample",
+  });
+  const payload5 = sha256Hex(c1Payload);
+  const payload8 = sha256Hex(c2Payload);
   rawDb.run(`
-    INSERT INTO problems (id, public_seq, title, status, unlisted, current_statement_version, created_at, updated_at)
+    INSERT INTO problems (id, public_seq, chain_version, chain_digest, title, status, unlisted, current_statement_version, created_at, updated_at)
     VALUES
-      ('P-DIPTYCH', 10, 'Smooth 4-Manifold Invariants', 'active', 0, 1, '2026-08-20T00:00:00.000Z', '2026-08-20T00:00:00.000Z'),
-      ('P-UNLISTED', 5, 'Unlisted Internal Probe', 'active', 1, 1, '2026-08-20T00:00:00.000Z', '2026-08-20T00:00:00.000Z'),
-      ('P-PRIVATE', 1, 'Private Draft Problem', 'private-draft', 0, 1, '2026-08-20T00:00:00.000Z', '2026-08-20T00:00:00.000Z');
+      ('P-DIPTYCH', 0, 2, '${chain1}', 'Smooth 4-Manifold Invariants', 'active', 0, 1, '2026-08-20T00:00:00.000Z', '2026-08-20T00:00:00.000Z'),
+      ('P-UNLISTED', 0, 2, '${chain1}', 'Unlisted Internal Probe', 'active', 1, 1, '2026-08-20T00:00:00.000Z', '2026-08-20T00:00:00.000Z'),
+      ('P-PRIVATE', 0, 2, '${chain1}', 'Private Draft Problem', 'private-draft', 0, 1, '2026-08-20T00:00:00.000Z', '2026-08-20T00:00:00.000Z');
+
+    INSERT INTO krater_integrity_backfill (problem_id, state, legacy_event_count, completed_at, chain_version)
+    VALUES
+      ('P-DIPTYCH', 'complete', 0, '2026-08-20T00:00:00.000Z', 2),
+      ('P-UNLISTED', 'complete', 0, '2026-08-20T00:00:00.000Z', 2),
+      ('P-PRIVATE', 'complete', 0, '2026-08-20T00:00:00.000Z', 2);
 
     INSERT INTO problem_statement_versions (problem_id, version, statement, norm_hash, falsifier, motivation, created_at)
     VALUES
       ('P-DIPTYCH', 1, 'Exotic smooth structures exist on compact 4-manifolds.', 'sha256:norm1', 'Exhibiting diffeomorphism.', 'Geometry foundations.', '2026-08-20T00:00:00.000Z'),
       ('P-UNLISTED', 1, 'Unlisted statement', 'sha256:normu', 'Unlisted falsifier', 'Unlisted motivation', '2026-08-20T00:00:00.000Z'),
       ('P-PRIVATE', 1, 'Private statement', 'sha256:normp', 'Private falsifier', 'Private motivation', '2026-08-20T00:00:00.000Z');
+  `);
 
+  // Seed contiguous v2 event chain (seq 1..8) with verified raw-hex payload_sha256 digests
+  const makeQuestionPayload = (text: string) => JSON.stringify({ question: text });
+  const seedEvents: ReadonlyArray<{
+    seq: number;
+    id: string;
+    objectId: string;
+    objectKind: string;
+    type: string;
+    payloadJson: string;
+    model: string | null;
+    fellowId: string | null;
+    sessionId: string | null;
+    harness: string | null;
+  }> = [
+    {
+      seq: 1,
+      id: "E-1",
+      objectId: "P-DIPTYCH",
+      objectKind: "problem",
+      type: "problem.admitted",
+      payloadJson: admittedPayload,
+      model: null,
+      fellowId: null,
+      sessionId: null,
+      harness: null,
+    },
+    {
+      seq: 2,
+      id: "E-2",
+      objectId: "Q-1",
+      objectKind: "question",
+      type: "question.created",
+      payloadJson: makeQuestionPayload("Baseline smooth invariant check 1"),
+      model: "gpt-5.6-sol",
+      fellowId: "fel_1",
+      sessionId: "ses_1",
+      harness: "test-harness",
+    },
+    {
+      seq: 3,
+      id: "E-3",
+      objectId: "Q-2",
+      objectKind: "question",
+      type: "question.created",
+      payloadJson: makeQuestionPayload("Baseline smooth invariant check 2"),
+      model: "gpt-5.6-sol",
+      fellowId: "fel_1",
+      sessionId: "ses_1",
+      harness: "test-harness",
+    },
+    {
+      seq: 4,
+      id: "E-4",
+      objectId: "Q-3",
+      objectKind: "question",
+      type: "question.created",
+      payloadJson: makeQuestionPayload("Baseline smooth invariant check 3"),
+      model: "gpt-5.6-sol",
+      fellowId: "fel_1",
+      sessionId: "ses_1",
+      harness: "test-harness",
+    },
+    {
+      seq: 5,
+      id: "E-5",
+      objectId: "C-1",
+      objectKind: "claim",
+      type: "claim.created",
+      payloadJson: c1Payload,
+      model: "gpt-5.6-sol",
+      fellowId: "fel_1",
+      sessionId: "ses_1",
+      harness: "test-harness",
+    },
+    {
+      seq: 6,
+      id: "E-6",
+      objectId: "Q-4",
+      objectKind: "question",
+      type: "question.created",
+      payloadJson: makeQuestionPayload("Follow-up invariant check 4"),
+      model: "gpt-5.6-sol",
+      fellowId: "fel_1",
+      sessionId: "ses_1",
+      harness: "test-harness",
+    },
+    {
+      seq: 7,
+      id: "E-7",
+      objectId: "Q-5",
+      objectKind: "question",
+      type: "question.created",
+      payloadJson: makeQuestionPayload("Follow-up invariant check 5"),
+      model: "gpt-5.6-sol",
+      fellowId: "fel_1",
+      sessionId: "ses_1",
+      harness: "test-harness",
+    },
+    {
+      seq: 8,
+      id: "E-8",
+      objectId: "C-2",
+      objectKind: "claim",
+      type: "claim.created",
+      payloadJson: c2Payload,
+      model: "claude-3-7-sonnet",
+      fellowId: "fel_1",
+      sessionId: "ses_1",
+      harness: "test-harness",
+    },
+  ];
+  for (const ev of seedEvents) {
+    const payloadSha = sha256Hex(ev.payloadJson);
+    const chain = ev.seq === 8 ? chain8 : hexDigest(String(ev.seq));
+    const row = hexDigest((ev.seq + 7).toString(16));
+    rawDb.run(`UPDATE problems SET public_seq = ?, chain_digest = ? WHERE id = 'P-DIPTYCH'`, [
+      ev.seq,
+      chain,
+    ]);
+    rawDb.run(
+      `INSERT INTO events (id, problem_id, seq, object_id, object_kind, object_version, type, payload_sha256, row_digest, chain_digest, actor_fellow_id, actor_sponsor_id, actor_session_id, model_string_self_declared, harness, created_at)
+       VALUES (?, 'P-DIPTYCH', ?, ?, ?, 1, ?, ?, ?, ?, ?, 'spo_1', ?, ?, ?, '2026-08-20T00:00:00.000Z')`,
+      [
+        ev.id,
+        ev.seq,
+        ev.objectId,
+        ev.objectKind,
+        ev.type,
+        payloadSha,
+        row,
+        chain,
+        ev.fellowId,
+        ev.sessionId,
+        ev.model,
+        ev.harness,
+      ],
+    );
+    rawDb.run(
+      `INSERT INTO event_content (event_id, payload_sha256, payload_json) VALUES (?, ?, ?)`,
+      [ev.id, payloadSha, ev.payloadJson],
+    );
+  }
+
+  rawDb.run(`
     INSERT INTO claims (id, problem_id, statement, source_seq, payload_sha256, created_at)
     VALUES
-      ('C-1', 'P-DIPTYCH', 'Invariants distinguish Donaldson boundaries.', 5, 'sha256:claim1', '2026-08-20T00:00:00.000Z'),
-      ('C-2', 'P-DIPTYCH', '${HOSTILE_STATEMENT.replace(/'/g, "''")}', 8, 'sha256:claim2', '2026-08-20T00:00:00.000Z');
+      ('C-1', 'P-DIPTYCH', 'Invariants distinguish Donaldson boundaries.', 5, '${payload5}', '2026-08-20T00:00:00.000Z'),
+      ('C-2', 'P-DIPTYCH', '${HOSTILE_STATEMENT.replace(/'/g, "''")}', 8, '${payload8}', '2026-08-20T00:00:00.000Z');
 
     INSERT INTO claim_projections (claim_id, problem_id, source_seq, projection_version, build_digest, stale, updated_at)
     VALUES
@@ -150,18 +355,8 @@ async function runDiptychE2E() {
 
     INSERT INTO claim_versions (problem_id, claim_id, version, kind, statement, falsifier, content_digest, editor_fellow_id, created_at)
     VALUES
-      ('P-DIPTYCH', 'C-1', 1, 'conjecture', 'Invariants distinguish Donaldson boundaries.', 'Counterexample', 'sha256:1111111111111111111111111111111111111111111111111111111111111111', 'fel_1', '2026-08-20T00:00:00.000Z'),
-      ('P-DIPTYCH', 'C-2', 1, 'conjecture', '${HOSTILE_STATEMENT.replace(/'/g, "''")}', 'Counterexample', 'sha256:2222222222222222222222222222222222222222222222222222222222222222', 'fel_1', '2026-08-20T00:00:00.000Z');
-
-    INSERT INTO events (id, problem_id, seq, object_id, object_kind, object_version, type, payload_sha256, actor_fellow_id, actor_sponsor_id, actor_session_id, model_string_self_declared, harness, created_at)
-    VALUES
-      ('E-5', 'P-DIPTYCH', 5, 'C-1', 'claim', 1, 'claim.created', 'sha256:claim1', 'fel_1', 'spo_1', 'ses_1', 'gpt-5.6-sol', 'test-harness', '2026-08-20T00:00:00.000Z'),
-      ('E-8', 'P-DIPTYCH', 8, 'C-2', 'claim', 1, 'claim.created', 'sha256:claim2', 'fel_1', 'spo_1', 'ses_1', 'claude-3-7-sonnet', 'test-harness', '2026-08-20T00:00:00.000Z');
-
-    INSERT INTO event_content (event_id, payload_sha256, payload_json)
-    VALUES
-      ('E-5', 'sha256:claim1', '{"statement":"Invariants distinguish Donaldson boundaries."}'),
-      ('E-8', 'sha256:claim2', '{"statement":"${HOSTILE_STATEMENT.replace(/'/g, "''")}"}');
+      ('P-DIPTYCH', 'C-1', 1, 'conjecture', 'Invariants distinguish Donaldson boundaries.', 'Counterexample', 'sha256:${payload5}', 'fel_1', '2026-08-20T00:00:00.000Z'),
+      ('P-DIPTYCH', 'C-2', 1, 'conjecture', '${HOSTILE_STATEMENT.replace(/'/g, "''")}', 'Counterexample', 'sha256:${payload8}', 'fel_1', '2026-08-20T00:00:00.000Z');
   `);
 
   // Insert a private workshop row with canary to ensure private work cannot leak
@@ -273,17 +468,13 @@ async function runDiptychE2E() {
     "GET /problems.toon",
     new Request("https://a.asimposium.org/problems.toon"),
     200,
-    "text/plain",
+    TOON_MEDIA_TYPE,
   );
   assert(
-    problemsToon.body.includes("id|public_seq|status|created_at|updated_at|title"),
-    "TOON body must contain pipe-delimited header row",
+    !problemsToon.body.includes("id|public_seq|status|created_at|updated_at|title"),
+    "Legacy pipe-delimited TOON format must not be served",
   );
-  assert(problemsToon.body.includes("P-DIPTYCH|"), "TOON body must contain P-DIPTYCH row");
-  assert(
-    problemsToon.body.includes("[control:page_end|"),
-    "TOON body must contain control record footer",
-  );
+  assert(problemsToon.body.includes("P-DIPTYCH"), "TOON body must contain P-DIPTYCH row");
 
   // Lossless TOON parse round-trip
   const parsedToon = parseProblemsIndexToon(problemsToon.body);
@@ -295,20 +486,23 @@ async function runDiptychE2E() {
 
   // Content negotiation on /problems
   const negoToon = await testEndpoint(
-    "GET /problems (Accept: text/vnd.toon)",
+    "GET /problems (Accept: text/toon)",
     new Request("https://a.asimposium.org/problems", {
-      headers: { accept: "text/vnd.toon" },
+      headers: { accept: "text/toon" },
     }),
     200,
-    "text/plain",
+    TOON_MEDIA_TYPE,
   );
-  assert(negoToon.body.includes("[control:page_end|"), "Negotiated TOON must have control footer");
+  assert(
+    parseProblemsIndexToon(negoToon.body).problems.some((p) => p.id === "P-DIPTYCH"),
+    "Negotiated TOON must decode canonically",
+  );
 
   const negoQueryToon = await testEndpoint(
     "GET /problems?format=toon",
     new Request("https://a.asimposium.org/problems?format=toon"),
     200,
-    "text/plain",
+    TOON_MEDIA_TYPE,
   );
   assert(negoQueryToon.body === problemsToon.body, "Query format=toon must match /problems.toon");
 

@@ -3380,6 +3380,12 @@ async function main() {
       );
       await offerRow.getByRole("checkbox").check();
       await offerRow.getByRole("button", { name: "Accept transfer" }).click({ timeout: 20_000 });
+      // Wait for the browser's transfer action to settle and clear its tab recovery lock
+      // before navigating back to /console, avoiding aborting the in-flight response.
+      await acceptPage
+        .locator('section[aria-labelledby="transfers-title"] p[role="status"]')
+        .filter({ hasText: "was accepted." })
+        .waitFor({ timeout: 20_000 });
       let moved = false;
       for (let i = 0; i < 20 && !moved; i++) {
         moved = (await bearerStatus(transferToken)) === 401;
@@ -3632,14 +3638,16 @@ async function main() {
 
     const context = await browser.newContext({ reducedMotion: "reduce" });
     const page = await context.newPage();
-    for (const path of [
+    const axePaths = [
       "/",
       "/problems",
       "/results",
       `/reviews?problem=${encodeURIComponent(problemId)}`,
       `/p/${problemId}`,
+      `/p/${problemId}/claims`,
       `/p/${problemId}/claims/${claimId}`,
-    ]) {
+    ];
+    for (const path of axePaths) {
       await page.goto(`${agora.origin}${path}`, { waitUntil: "load" });
       await page.addScriptTag({ path: AXE });
       const violations = await page.evaluate(async () => {
@@ -3672,7 +3680,109 @@ async function main() {
         blocking.length === 0,
         violations,
       );
+      if (path === `/p/${problemId}/claims`) {
+        record(
+          `axe ${path} has no heading-order violation`,
+          !violations.some((v) => v.id === "heading-order"),
+          violations,
+        );
+      }
+      const chromeAudit = await page.evaluate(() => ({
+        skipLinks: document.querySelectorAll('a[href="#content"]').length,
+        bodyMeanders: document.querySelectorAll("body > .meander").length,
+        mainThemeToggles: document.querySelectorAll("main .theme-toggle, main .theme-toggle-row")
+          .length,
+      }));
+      record(
+        `y23e ${path} has no duplicate per-page chrome in DOM`,
+        chromeAudit.skipLinks === 1 &&
+          chromeAudit.bodyMeanders === 0 &&
+          chromeAudit.mainThemeToggles === 0,
+        chromeAudit,
+      );
     }
+    // Dark-mode axe audit and narrow-viewport overflow check (y23e).
+    const darkContext = await browser.newContext({
+      reducedMotion: "reduce",
+      colorScheme: "dark",
+    });
+    const darkPage = await darkContext.newPage();
+    for (const path of ["/", "/problems", `/p/${problemId}/claims`]) {
+      await darkPage.goto(`${agora.origin}${path}`, { waitUntil: "load" });
+      await darkPage.evaluate(() => {
+        document.documentElement.dataset.theme = "dark";
+      });
+      await darkPage.addScriptTag({ path: AXE });
+      const darkViolations = await darkPage.evaluate(async () => {
+        const result = await window.axe.run(document, { resultTypes: ["violations"] });
+        return result.violations
+          .filter((v) => v.impact === "critical" || v.impact === "serious")
+          .map((v) => ({
+            id: v.id,
+            impact: v.impact,
+            nodes: v.nodes.length,
+            targets: v.nodes.slice(0, 3).map((n) => String(n.target[0])),
+            ...(v.id === "color-contrast"
+              ? {
+                  pairs: [
+                    ...new Set(
+                      v.nodes.map((n) => {
+                        const d = n.any[0]?.data ?? {};
+                        return `${d.fgColor} on ${d.bgColor} (${d.contrastRatio}) ${n.target[0]}`;
+                      }),
+                    ),
+                  ].slice(0, 8),
+                }
+              : {}),
+          }));
+      });
+      record(
+        `axe dark ${path} has no critical or serious violations`,
+        darkViolations.length === 0,
+        darkViolations,
+      );
+    }
+    await darkPage.setViewportSize({ width: 390, height: 844 });
+    await darkPage.goto(`${agora.origin}/`, { waitUntil: "load" });
+    const homeOverflow = await darkPage.evaluate(
+      () => document.documentElement.scrollWidth <= window.innerWidth + 1,
+    );
+    record("y23e home fits 390px viewport without horizontal overflow", homeOverflow, homeOverflow);
+    await darkContext.close();
+
+    // /apple-icon renders a valid 180x180 PNG (y23e kylix icon alignment).
+    const appleIconResp = await fetch(`${agora.origin}/apple-icon`);
+    const appleIconBuf = Buffer.from(await appleIconResp.arrayBuffer());
+    const applePngValid =
+      appleIconBuf.length >= 24 &&
+      appleIconBuf.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+    const applePng = applePngValid
+      ? { width: appleIconBuf.readUInt32BE(16), height: appleIconBuf.readUInt32BE(20) }
+      : null;
+    record(
+      "y23e /apple-icon serves a 180x180 PNG",
+      appleIconResp.status === 200 &&
+        (appleIconResp.headers.get("content-type") ?? "").includes("image/png") &&
+        applePng?.width === 180 &&
+        applePng?.height === 180,
+      { status: appleIconResp.status, dimensions: applePng },
+    );
+
+    // /console with JavaScript disabled never duplicates <main> or skip link (y23e).
+    const noJsConsoleContext = await browser.newContext({ javaScriptEnabled: false });
+    const noJsConsolePage = await noJsConsoleContext.newPage();
+    await noJsConsolePage.goto(`${agora.origin}/console`, { waitUntil: "load" });
+    const noJsConsoleAudit = await noJsConsolePage.evaluate(() => ({
+      mains: document.querySelectorAll("main").length,
+      skipLinks: document.querySelectorAll('a[href="#content"]').length,
+    }));
+    record(
+      "y23e no-JS /console renders one main landmark and one skip link",
+      noJsConsoleAudit.mains === 1 && noJsConsoleAudit.skipLinks === 1,
+      noJsConsoleAudit,
+    );
+    await noJsConsoleContext.close();
+
     await page.goto(`${agora.origin}/problems`, { waitUntil: "load" });
     await page.keyboard.press("Tab");
     const focused = await page.evaluate(() => document.activeElement?.textContent?.trim() ?? "");

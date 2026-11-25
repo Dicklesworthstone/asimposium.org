@@ -64,12 +64,18 @@ if [[ "$TARGET" == "local" ]]; then
       e2e_emit_and_optionally_record 0 "$RUN_ID" "$SUITE" "$STARTED_MS" "blocked" "GENUINE_NODE_UNAVAILABLE" "$REPRODUCE --target local --with-browser"
       exit 78
     }
-    if ! (cd "$REPO_ROOT" && "$NODE_BIN" -e 'const fs = require("node:fs"); const { chromium } = require("./e2e/node_modules/@playwright/test"); const exe = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || chromium.executablePath(); process.exit(exe && fs.existsSync(exe) ? 0 : 1);') 2>/dev/null; then
+    CHROMIUM_EXE="${ASIMPOSIUM_CHROMIUM_EXECUTABLE:-${PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH:-}}"
+    if ! (cd "$REPO_ROOT" && CHROMIUM_EXE="$CHROMIUM_EXE" "$NODE_BIN" -e 'const fs = require("node:fs"); const { chromium } = require("./e2e/node_modules/@playwright/test"); const exe = process.env.CHROMIUM_EXE || chromium.executablePath(); process.exit(exe && fs.existsSync(exe) ? 0 : 1);') 2>/dev/null; then
       e2e_emit_and_optionally_record 0 "$RUN_ID" "$SUITE" "$STARTED_MS" "blocked" "PLAYWRIGHT_CHROMIUM_UNAVAILABLE" "$REPRODUCE --target local --with-browser"
       exit 78
     fi
-    (cd "${REPO_ROOT}/e2e" && bun test /dev/null --timeout=240000 playwright/target-surfaces.test.ts)
-    (cd "$REPO_ROOT" && "$NODE_BIN" e2e/playwright/agora-local-lane.mjs)
+    if [[ -n "$CHROMIUM_EXE" ]]; then
+      (cd "${REPO_ROOT}/e2e" && ASIMPOSIUM_CHROMIUM_EXECUTABLE="$CHROMIUM_EXE" bun test /dev/null --timeout=360000 playwright/target-surfaces.test.ts)
+      (cd "$REPO_ROOT" && ASIMPOSIUM_CHROMIUM_EXECUTABLE="$CHROMIUM_EXE" "$NODE_BIN" e2e/playwright/agora-local-lane.mjs)
+    else
+      (cd "${REPO_ROOT}/e2e" && bun test /dev/null --timeout=360000 playwright/target-surfaces.test.ts)
+      (cd "$REPO_ROOT" && "$NODE_BIN" e2e/playwright/agora-local-lane.mjs)
+    fi
   fi
   e2e_emit_and_optionally_record 0 "$RUN_ID" "$SUITE" "$STARTED_MS" "pass" "HUMAN_PLANE_LOCAL_GUARDS_PASS" "$REPRODUCE --target local"
   exit 0

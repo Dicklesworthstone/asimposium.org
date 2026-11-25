@@ -131,24 +131,37 @@ if [[ "$target" == "local" ]]; then
   exit "$local_status"
 fi
 
-# The staging product flow still needs provisioned join URLs and a staging
-# deployment; the local runner above is not a staging result. Refuse a provisioned
-# run before any staging probe so this entry cannot launch work or turn a
-# transcript/transport observation into an acceptance pass.
-if [[ -n "${GAUNTLET_JOIN_URLS_FILE:-}" ]]; then
-  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "blocked" "GAUNTLET_PRODUCT_FLOW_NOT_IMPLEMENTED" "$reproduce"
-  exit 70
-fi
-
+# Validate staging target origin BEFORE probing or invoking any harness.
+# Canonical production origins are always refused fail-closed.
 if e2e_validate_staging_origin "ASIMPOSIUM_STAGING_AGENT_BASE_URL"; then
   :
 else
   origin_status=$?
   case "$origin_status" in
-    2) code="STAGING_AGENT_BASE_URL_MISSING" ;;
-    *) code="STAGING_AGENT_BASE_URL_INVALID" ;;
+    2)
+      e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "blocked" "STAGING_AGENT_BASE_URL_MISSING" "$reproduce"
+      exit 78
+      ;;
+    *)
+      e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "STAGING_AGENT_BASE_URL_INVALID" "$reproduce"
+      exit 64
+      ;;
   esac
-  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "blocked" "$code" "$reproduce"
+fi
+
+if [[ -z "${GAUNTLET_JOIN_URLS_FILE:-}" ]]; then
+  if ! e2e_probe_public_path "$ASIMPOSIUM_STAGING_AGENT_BASE_URL" "/"; then
+    e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "AGENT_HANDBOOK_UNAVAILABLE" "$reproduce"
+    exit 69
+  fi
+  # No join URLs were provisioned. The runner reports that prerequisite
+  # cleanly and never creates a synthetic score.
+  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "blocked" "GAUNTLET_JOIN_URLS_UNPROVISIONED" "$reproduce"
+  exit 78
+fi
+
+if [[ ! -r "$GAUNTLET_JOIN_URLS_FILE" ]]; then
+  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "blocked" "GAUNTLET_JOIN_URLS_UNREADABLE" "$reproduce"
   exit 78
 fi
 
@@ -157,7 +170,20 @@ if ! e2e_probe_public_path "$ASIMPOSIUM_STAGING_AGENT_BASE_URL" "/"; then
   exit 69
 fi
 
-# No join URLs were provisioned. The runner reports that prerequisite separately
-# from the product-flow blocker above and never creates a synthetic score.
-e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "blocked" "GAUNTLET_JOIN_URLS_UNPROVISIONED" "$reproduce"
-exit 78
+staging_status=0
+bun "$repository_root/e2e/gauntlet/run-gauntlet.ts" || staging_status=$?
+case "$staging_status" in
+  0)
+    e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "pass" "GAUNTLET_STAGING_PASS" "$reproduce"
+    ;;
+  78)
+    e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "blocked" "GAUNTLET_STAGING_HARNESS_UNAVAILABLE" "$reproduce"
+    ;;
+  64)
+    e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "GAUNTLET_STAGING_CONFIG_INVALID" "$reproduce"
+    ;;
+  *)
+    e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "GAUNTLET_STAGING_FAILED" "$reproduce"
+    ;;
+esac
+exit "$staging_status"

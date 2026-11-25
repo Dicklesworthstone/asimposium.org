@@ -318,15 +318,50 @@ export async function runNamingLawE2e(): Promise<{
       requireCondition(takenName, "Missing claimed name");
       const collisionSponsor = "usr_naming_collision";
       const collision = await mint(collisionSponsor);
-      const pending = EnrollmentClaimResponseSchema.safeParse(await propose(collision, takenName));
+      // Commit 61c26109: already-approved names are refused at registration (422 NAME_TAKEN)
+      // without consuming the join secret so the agent can immediately recover.
+      const regAlternatives = await suggestions(
+        await propose(collision, takenName, 422),
+        "NAME_TAKEN",
+      );
+      requireCondition(
+        !regAlternatives.includes(takenName),
+        "Registration collision guidance reoffered a taken name",
+      );
+      const unconsumed = await env.DB.prepare(
+        "SELECT secret_consumed_at FROM enrollment_records WHERE enrollment_id = ?",
+      )
+        .bind(collision.enrollment_id)
+        .first<{ secret_consumed_at: number | null }>();
+      requireCondition(
+        unconsumed?.secret_consumed_at === null,
+        "Registration-time NAME_TAKEN consumed the join secret",
+      );
+
+      // Decision-time race: two pending enrollments claim the same available name concurrently;
+      // approving the first succeeds, and approving the second fails closed with 422 NAME_TAKEN.
+      const raceName = regAlternatives[0];
+      requireCondition(raceName, "Missing registration collision alternative");
+      const raceWinnerSponsor = "usr_naming_race_winner";
+      const raceWinner = await mint(raceWinnerSponsor);
+      const raceWinnerClaim = EnrollmentClaimResponseSchema.safeParse(
+        await propose(raceWinner, raceName),
+      );
+      requireCondition(raceWinnerClaim.success, "Race winner proposal was not admitted");
+      privateValues.push(raceWinnerClaim.data.flow_handle);
+      const pending = EnrollmentClaimResponseSchema.safeParse(await propose(collision, raceName));
       requireCondition(pending.success, "Collision proposal was not admitted for sponsor decision");
       privateValues.push(pending.data.flow_handle);
+      const winnerApproved = SponsorEnrollmentDecisionResponseSchema.safeParse(
+        await decide(raceWinnerSponsor, raceWinner.enrollment_id),
+      );
+      requireCondition(winnerApproved.success, "Race winner approval failed");
       const alternatives = await suggestions(
         await decide(collisionSponsor, collision.enrollment_id, 422),
         "NAME_TAKEN",
       );
       requireCondition(
-        !alternatives.includes(takenName),
+        !alternatives.includes(raceName),
         "Collision guidance reoffered a taken name",
       );
       const deniedToken = await env.DB.prepare(

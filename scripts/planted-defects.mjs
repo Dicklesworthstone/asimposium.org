@@ -605,11 +605,12 @@ export const PLANTS = [
   {
     id: "toon-face-disagrees-with-json",
     bead: "lu59",
-    // The renderer's own round-trip does not check the omitted count, so only
-    // the census's JSON-derived comparison can catch this.
+    // The encoder still round-trips its own input. The census must compare it
+    // independently with the canonical JSON response.
     file: "apps/wire/src/ledger-face.ts",
-    find: "|omitted:${data.omitted.length}]`;",
-    replace: "|omitted:${data.omitted.length + 1}]`;",
+    find: "      body = renderProblemsIndexToon(data);",
+    replace:
+      '      body = renderProblemsIndexToon({ ...data, omitted: [...data.omitted, "regression probe"] });',
     command: LANE("face-census"),
   },
   {
@@ -1841,8 +1842,8 @@ export const PLANTS = [
     bead: "f3v1",
     file: "apps/wire/src/ledger-face.ts",
     // The problem index lists a hidden problem's title.
-    find: '\n  AND NOT ${hiddenByContentControlSql("problems.id", "\'problem\'")}`;',
-    replace: "`;",
+    find: '\n    AND NOT ${hiddenByContentControlSql("problems.id", "\'problem\'")}\n)`;',
+    replace: "\n)`;",
     command: LANE("content-hide-sweep"),
   },
   {

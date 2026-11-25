@@ -126,7 +126,12 @@ export const LAUNCH_GATE_CRITERIA: readonly LaunchGateCriterion[] = [
     gate: "G1",
     name: "Cold-Agent Gauntlet >= 8/10 across >= 3 harnesses (median <= 25K tokens)",
     bead_id: "asimposiumorg-zai",
-    required_local_artifacts: ["e2e/gauntlet/run.sh", "scripts/ceremony-trend-check.ts"],
+    required_local_artifacts: [
+      "e2e/gauntlet/run.sh",
+      "scripts/ceremony-trend-check.ts",
+      "e2e/error-copy-audit/error-recovery.test.ts",
+      "scripts/e2e-error-recovery.sh",
+    ],
     hosted_or_human_requirement:
       "Execute 10 fresh sessions across >= 3 harnesses on reconciled staging (blocked on rs5n).",
     status: "blocked-operator-or-hosted",
@@ -140,6 +145,7 @@ export const LAUNCH_GATE_CRITERIA: readonly LaunchGateCriterion[] = [
       "e2e/protocol-table/protocol-table.test.ts",
       "e2e/epistemic-corpus/epistemic-corpus.test.ts",
       "apps/wire/test/integration/auth-race-matrix-real-bindings.mjs",
+      "scripts/e2e-auth-races.sh",
       "e2e/playwright/human-plane-guards.test.ts",
       "scripts/e2e-human-plane.sh",
     ],
@@ -165,6 +171,8 @@ export const LAUNCH_GATE_CRITERIA: readonly LaunchGateCriterion[] = [
       "scripts/ops-backup-restore-smoke.ts",
       "scripts/ops-schedules.test.ts",
       "scripts/e2e-ops-schedules.sh",
+      "scripts/ops-vpx.test.ts",
+      "scripts/e2e-ops-runbooks.sh",
       "apps/wire/src/observability/telemetry.ts",
       "scripts/e2e-observability.sh",
     ],
@@ -182,6 +190,7 @@ export const LAUNCH_GATE_CRITERIA: readonly LaunchGateCriterion[] = [
       "e2e/red-team/red-team.test.ts",
       "e2e/red-team/injection-corpus.json",
       "e2e/red-team/run-inoculation-ab.ts",
+      "scripts/e2e-red-team.sh",
     ],
     hosted_or_human_requirement:
       "Run live LLM inoculation A/B probe & live staging policy oracle checks.",
@@ -212,6 +221,8 @@ export const LAUNCH_GATE_CRITERIA: readonly LaunchGateCriterion[] = [
       "docs/legal/terms-of-service-draft.md",
       "docs/legal/data-processor-registry.json",
       "scripts/legal-claims-audit.test.ts",
+      "scripts/e2e-processor-audit.sh",
+      "scripts/e2e-transactional-email.sh",
     ],
     hosted_or_human_requirement:
       "Personal operator sign-off on all 7 served texts + qualified legal counsel review + DMCA agent.",
@@ -246,6 +257,7 @@ export const LAUNCH_GATE_CRITERIA: readonly LaunchGateCriterion[] = [
     bead_id: "asimposiumorg-oot",
     required_local_artifacts: [
       "e2e/load-degradation/cost-attribution.ts",
+      "scripts/e2e-load-degrade.sh",
       "scripts/verify-cost-model.ts",
       "scripts/ceremony-trend-check.ts",
       "docs/deferred-decisions-ledger.json",

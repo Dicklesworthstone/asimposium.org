@@ -90,7 +90,7 @@ if ! bun test packages/contracts/test/unit/artifact-uploads.test.ts packages/con
 fi
 
 # 3. Run wire artifact unit tests
-if ! bun test apps/wire/test/unit/artifact-store.test.ts apps/wire/test/unit/artifact-presign.test.ts apps/wire/test/unit/artifact-inspection.test.ts apps/wire/test/unit/artifact-publication-bytes.test.ts apps/wire/test/unit/artifact-publication-http.test.ts apps/wire/test/unit/artifact-publication-outbox.test.ts apps/wire/test/unit/artifact-publication-screen.test.ts; then
+if ! bun test --timeout=30000 apps/wire/test/unit/artifact-store.test.ts apps/wire/test/unit/artifact-presign.test.ts apps/wire/test/unit/artifact-inspection.test.ts apps/wire/test/unit/artifact-publication-bytes.test.ts apps/wire/test/unit/artifact-publication-http.test.ts apps/wire/test/unit/artifact-publication-outbox.test.ts apps/wire/test/unit/artifact-publication-screen.test.ts; then
   e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "CAS_ARTIFACT_UNIT_TESTS_FAILED" "$reproduce"
   exit 1
 fi

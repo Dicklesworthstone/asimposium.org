@@ -85,7 +85,17 @@ if ! bun run --filter @asimposium/contracts check:drift; then
   exit 1
 fi
 
-# 2. Run unit and real D1 database tests for roster, writer slots, overflow, and concurrency
+# 2. Real local Workerd/D1 concurrent roster-race lane (fail-closed if absent)
+if [[ ! -f apps/wire/test/integration/roster-race-real-bindings.mjs ]]; then
+  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "ROSTER_REAL_BINDINGS_MISSING" "$reproduce"
+  exit 1
+fi
+if ! node apps/wire/test/integration/roster-race-real-bindings.mjs; then
+  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "ROSTER_REAL_BINDINGS_FAILED" "$reproduce"
+  exit 1
+fi
+
+# 3. Run unit and real D1 database tests for roster, writer slots, overflow, and concurrency
 if ! bun test apps/wire/test/unit/roster.test.ts; then
   e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "ROSTER_UNIT_TESTS_FAILED" "$reproduce"
   exit 1

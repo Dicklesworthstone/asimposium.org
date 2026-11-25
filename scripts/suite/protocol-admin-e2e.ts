@@ -263,8 +263,8 @@ export async function runProtocolAdminE2e(): Promise<void> {
     throw new Error("/moderation HTML missing Diptych link to /moderation.md");
   }
   if (
-    !moderationHtml.includes("Science vs. Safety") &&
-    !moderationHtml.includes("Science vs Safety")
+    !moderationHtml.includes("separation of safety") ||
+    !moderationHtml.includes("Moderation never alters scientific disposition")
   ) {
     throw new Error("/moderation HTML missing separation principle");
   }

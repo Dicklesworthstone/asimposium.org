@@ -215,7 +215,11 @@ const DIRECTIVES_B: SponsorDirectiveReceipt[] = [
   },
 ];
 
+const stoaModulePath = new URL("../../apps/web/lib/stoa.ts", import.meta.url).pathname;
+const realStoa = await import(stoaModulePath);
+
 const stoaMock = () => ({
+  ...realStoa,
   configuredStoaOrigin: () => "https://a.asimposium.org",
   stoaConfigured: () => true,
   stoaEnrollmentWritesConfigured: () => true,
@@ -257,9 +261,30 @@ const stoaMock = () => ({
       next_cursor: null,
     },
   }),
+  stoaProblemBriefs: async () => ({
+    ok: true,
+    data: { briefs: [], has_more: false, next_cursor: null },
+  }),
+  stoaSponsorProblems: async () => ({
+    ok: true,
+    data: { problems: [], has_more: false, next_cursor: null },
+  }),
+  stoaSponsorRebinds: async () => ({ ok: true, data: { rebinds: [] } }),
+  stoaSponsorScreeningPosture: async () => ({
+    ok: true,
+    data: { schema: "https://a.asimposium.org/schemas/moderation.v1.json", fellows: [] },
+  }),
+  stoaSponsorTransfers: async () => ({ ok: true, data: { incoming: [], outgoing: [] } }),
+  stoaSponsorWorkshopIndex: async () => ({
+    ok: true,
+    data: { workshops: [], has_more: false, next_cursor: null },
+  }),
   sponsorWorkshopRefusalNotice: () => undefined,
   deviceLookupRefusalMessage: (_result?: unknown) => "Device lookup failed",
   operatorPrincipalIsAllowed: () => false,
+  stoaAdminContentControl: async () => ({ ok: true, data: {} }),
+  stoaHideProblem: async () => ({ ok: true, data: {} }),
+  stoaSetProblemWriterCap: async () => ({ ok: true, data: {} }),
   stoaDecideProposal: async () => ({ ok: true, data: {} }),
   stoaDeviceLookup: async () => ({ ok: true, data: {} }),
   stoaMintEnrollment: async () => ({ ok: true, data: {} }),
@@ -271,7 +296,6 @@ const stoaMock = () => ({
   stoaIssueDirective: async () => ({ ok: true, data: {} }),
 });
 
-const stoaModulePath = new URL("../../apps/web/lib/stoa.ts", import.meta.url).pathname;
 mock.module(stoaModulePath, stoaMock);
 mock.module("@/lib/stoa", stoaMock);
 

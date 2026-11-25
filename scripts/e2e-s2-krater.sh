@@ -234,7 +234,9 @@ readonly S2_MAIN_DEADLINE_AT=$((SECONDS + S2_MAIN_DEADLINE_SECONDS))
 readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/krater/krater.ts
   apps/wire/src/krater/worker.ts
+  apps/wire/src/krater/outbox-consumers.ts
   apps/wire/src/krater/outbox-do.ts
+  apps/wire/src/krater/outbox-do-testable.ts
   apps/wire/src/krater/s2-client.ts
   apps/wire/src/krater/worker.test.ts
   apps/wire/test/unit/s2-krater-harness.test.ts
@@ -394,6 +396,10 @@ readonly -a S2_SOURCE_PATHS=(
   db/migrations/0146_protocol_conflicts.sql
   db/migrations/0147_question_answer_inbox.sql
   db/migrations/0148_disposition_delivery_fairness.sql
+  db/migrations/0149_outbox_consumers_and_embeddings.sql
+  db/migrations/0150_synthesis_drafts_and_external_reviews.sql
+  db/migrations/0151_transactional_email_outbox.sql
+  db/migrations/0152_sponsor_commentary_screening.sql
   scripts/verify-cost-model.ts
 
   scripts/verify-cost-model.test.ts
@@ -692,6 +698,7 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/problems/problem-intent-authority.ts
   apps/wire/src/problems/lifecycle-ledger.ts
   apps/wire/src/problems/roster.ts
+  apps/wire/src/inbox/event-delivery.ts
   apps/wire/src/inbox/markdown.ts
   apps/wire/src/inbox/router.ts
   apps/wire/src/inbox/sponsor-inbox.ts
@@ -832,7 +839,10 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/problems/access-actions.ts
   apps/wire/src/problems/governance-read.ts
   apps/wire/src/problems/publication-preview.ts
+  apps/wire/src/problems/external-expert-reviews.ts
+  apps/wire/src/problems/nkz2-router.ts
   apps/wire/src/problems/resolution-admission.ts
+  apps/wire/src/problems/synthesis-drafts.ts
   apps/wire/src/review-requests/access.ts
   apps/wire/src/screening/publication-context.ts
   apps/wire/src/sessions/claim-graph-pack.ts
@@ -875,9 +885,17 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/directives/active-page.ts
   apps/wire/src/directives/active-source.ts
   apps/wire/src/discovery/public-scope.ts
+  apps/wire/src/email/router.ts
+  apps/wire/src/email/transactional-email.ts
   apps/wire/src/observability/telemetry.ts
+  apps/wire/src/herald/outbox.ts
   apps/wire/src/herald/public-cursor.ts
   apps/wire/src/herald/public-cursor-cache.ts
+  apps/wire/src/herald/room-sse.ts
+  apps/wire/src/herald/room-ticket.ts
+  apps/wire/src/sessions/sponsor-workshop-room-ticket.ts
+  packages/contracts/src/herald-room-model.ts
+  packages/render/src/toon.ts
   apps/wire/src/ledger/author-concession.ts
   apps/wire/src/ledger/scientific-dependencies.ts
   apps/wire/src/mega-commands/public-moves.ts
@@ -1044,6 +1062,10 @@ readonly -a S2_EXPECTED_MIGRATION_JOURNAL=(
   0146_protocol_conflicts.sql
   0147_question_answer_inbox.sql
   0148_disposition_delivery_fairness.sql
+  0149_outbox_consumers_and_embeddings.sql
+  0150_synthesis_drafts_and_external_reviews.sql
+  0151_transactional_email_outbox.sql
+  0152_sponsor_commentary_screening.sql
 )
 
 

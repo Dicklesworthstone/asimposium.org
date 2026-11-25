@@ -46,15 +46,17 @@ function localD1(sqlite: Database): Env["DB"] {
         query,
         values,
         async run() {
-          if (/^\s*SELECT\b/i.test(query)) {
+          if (/^\s*(?:SELECT|WITH|PRAGMA)\b/i.test(query)) {
             const rows = sqlite.prepare<unknown, LocalBinding[]>(query).all(...values);
             return {
+              success: true,
               results: rows,
               meta: { changes: 0, rows_read: rows.length, rows_written: 0, duration: 0 },
             };
           }
           const result = sqlite.prepare<unknown, LocalBinding[]>(query).run(...values);
           return {
+            success: true,
             results: [],
             meta: {
               changes: result.changes,
@@ -64,16 +66,25 @@ function localD1(sqlite: Database): Env["DB"] {
             },
           };
         },
-        async first<T>(): Promise<T | null> {
-          const row = sqlite.prepare<T, LocalBinding[]>(query).get(...values);
-          return (row ?? null) as T | null;
+        async first<T>(column?: string): Promise<T | null> {
+          const row = sqlite.prepare<Record<string, unknown>, LocalBinding[]>(query).get(...values);
+          if (row === null || row === undefined) return null;
+          if (column !== undefined) {
+            return ((row as Record<string, unknown>)[column] ?? null) as T | null;
+          }
+          return row as unknown as T;
         },
         async all<T>(): Promise<{
+          success: true;
           results: T[];
           meta: { rows_read: number; rows_written: number; duration: number };
         }> {
           const rows = sqlite.prepare<T, LocalBinding[]>(query).all(...values) as T[];
-          return { results: rows, meta: { rows_read: rows.length, rows_written: 0, duration: 0 } };
+          return {
+            success: true,
+            results: rows,
+            meta: { rows_read: rows.length, rows_written: 0, duration: 0 },
+          };
         },
       });
       return {
@@ -145,16 +156,80 @@ export async function createIntentTestEnvironment(): Promise<{
   const nowIso = new Date(nowMs).toISOString();
   const genesisDigest = await genesisChainDigest(problemId);
 
-  // Seed problem P-4DSP
+  // Seed problem P-4DSP with canonical v2 problem.admitted publication context
+  const authorFellowId = "F-01M0HCVW4XTFWMZCQ40EJ0S0J7";
+  const admittedPayload = JSON.stringify({
+    action: "publish",
+    previous_status: "private-draft",
+    acting_principal: { type: "sponsor", id: sponsorId },
+    source_fellow_id: authorFellowId,
+    scientific_author: {
+      fellow_id: authorFellowId,
+      sponsor_id: sponsorId,
+      session_id: "S-00000000000000000000000001",
+      model_self_declared: "gpt-5.6-sol",
+      harness: "cli-harness",
+    },
+    previous_statement_version: 1,
+    problem: {
+      id: problemId,
+      title: "Intent Classifier E2E Problem",
+      status: "sharpening",
+      current_statement_version: 1,
+      statement: "Every positive integer greater than 1 has a prime factorization.",
+      falsifier: "An integer > 1 with no prime factor.",
+      motivation: "Verify workshop intent classification and explicit claim promotion.",
+      scope: "Elementary arithmetic.",
+      out_of_scope: "Computational factorization complexity.",
+      success_criteria: "A proof or explicit counterexample above 1.",
+      updated_at: nowIso,
+    },
+  });
+  const admittedPayloadSha = sha256Hex(admittedPayload);
+  const admittedRowDigest = sha256Hex(`row:${problemId}:1:${admittedPayloadSha}`);
+  const admittedChainDigest = sha256Hex(`chain:${genesisDigest}:1:${admittedRowDigest}`);
   sqlite.run(
-    `INSERT INTO problems (id, public_seq, chain_version, chain_digest, created_at, updated_at)
-     VALUES (?, 0, 2, ?, ?, ?)`,
-    [problemId, genesisDigest, nowIso, nowIso],
+    `INSERT INTO problems (id, title, status, sponsor_id, created_by_fellow_id, public_seq, chain_version, chain_digest, current_statement_version, created_at, updated_at)
+     VALUES (?, 'Intent Classifier E2E Problem', 'active', ?, ?, 1, 2, ?, 1, ?, ?)`,
+    [problemId, sponsorId, authorFellowId, admittedChainDigest, nowIso, nowIso],
   );
   sqlite.run(
     `INSERT INTO krater_integrity_backfill (problem_id, state, legacy_event_count, completed_at, chain_version)
      VALUES (?, 'complete', 0, ?, 2)`,
     [problemId, nowIso],
+  );
+  sqlite.run(
+    `INSERT INTO problem_statement_versions (problem_id, version, statement, norm_hash, falsifier, motivation, scope, out_of_scope, success_criteria, created_at)
+     VALUES (?, 1, 'Every positive integer greater than 1 has a prime factorization.', ?, 'An integer > 1 with no prime factor.', 'Verify workshop intent classification and explicit claim promotion.', 'Elementary arithmetic.', 'Computational factorization complexity.', 'A proof or explicit counterexample above 1.', ?)`,
+    [problemId, admittedPayloadSha, nowIso],
+  );
+  sqlite.run(
+    `INSERT INTO events (id, problem_id, seq, type, object_kind, object_id, object_version, payload_sha256, row_digest, chain_digest, actor_fellow_id, actor_sponsor_id, actor_session_id, model_string_self_declared, harness, created_at)
+     VALUES ('EV-INTENT-ADMIT-1', ?, 1, 'problem.admitted', 'problem', ?, 1, ?, ?, ?, NULL, ?, NULL, NULL, NULL, ?)`,
+    [
+      problemId,
+      problemId,
+      admittedPayloadSha,
+      admittedRowDigest,
+      admittedChainDigest,
+      sponsorId,
+      nowIso,
+    ],
+  );
+  sqlite.run(
+    `INSERT INTO event_content (event_id, payload_sha256, payload_json)
+     VALUES ('EV-INTENT-ADMIT-1', ?, ?)`,
+    [admittedPayloadSha, admittedPayload],
+  );
+  sqlite.run(
+    `INSERT INTO integrity_checkpoints (problem_id, checkpoint_seq, root_chain_digest, checkpoint_digest, checkpoint_version, checkpoint_mode, created_at)
+     VALUES (?, 1, ?, ?, 1, 'unsigned-v0', ?)`,
+    [
+      problemId,
+      admittedChainDigest,
+      sha256Hex(`ckpt:${problemId}:1:${admittedChainDigest}`),
+      nowIso,
+    ],
   );
 
   // Seed sponsor
@@ -365,16 +440,19 @@ export async function runAllIntentClassifierE2EAssertions(): Promise<{
     if (doc.rule !== "§7.6") {
       throw new Error(`Expected rule §7.6, got ${doc.rule}`);
     }
-    if (!doc.fix_hint.includes("force_note: true") || !doc.fix_hint.includes("claim schema")) {
+    if (!doc.fix_hint.includes("force_note: true") || !doc.fix_hint.includes("claim-draft")) {
       throw new Error(`Unexpected fix_hint: ${doc.fix_hint}`);
     }
 
-    const example = doc.example as { statement?: string } | undefined;
-    if (!example?.statement?.startsWith("Therefore every positive integer")) {
-      throw new Error(`Missing or unexpected example statement: ${JSON.stringify(example)}`);
+    const example = doc.example as { type?: string; body_md?: string } | undefined;
+    if (
+      example?.type !== "claim-draft" ||
+      !example?.body_md?.startsWith("Therefore every positive integer")
+    ) {
+      throw new Error(`Missing or unexpected example claim-draft: ${JSON.stringify(example)}`);
     }
 
-    extractedSuggestedStatement = example.statement;
+    extractedSuggestedStatement = example.body_md;
 
     // Prove NO automatic promotion or workshop storage
     const workshopCount = raw

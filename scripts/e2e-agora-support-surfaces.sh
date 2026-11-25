@@ -77,7 +77,7 @@ fi
 cd "$repository_root" || exit 1
 
 # 1. Run W8.8a Honest Share Cards Gate
-echo "=== Step 1/4: Running W8.8a Share Cards Gate ==="
+echo "=== Step 1/5: Running W8.8a Share Cards Gate ==="
 share_cards_status=0
 bash scripts/e2e-share-cards.sh || share_cards_status=$?
 case "$share_cards_status" in
@@ -93,25 +93,45 @@ case "$share_cards_status" in
 esac
 
 # 2. Run W8.8b Review Discovery & Honors Gate
-echo "=== Step 2/4: Running W8.8b Review Discovery & Honors Gate ==="
+echo "=== Step 2/5: Running W8.8b Review Discovery & Honors Gate ==="
 if ! bash scripts/e2e-review-discovery.sh; then
   e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "REVIEW_DISCOVERY_GATE_FAILED" "$reproduce"
   exit 1
 fi
 
 # 3. Run W8.8c Protocol Pages & Audited Admin Gate
-echo "=== Step 3/4: Running W8.8c Protocol Pages & Audited Admin Gate ==="
+echo "=== Step 3/5: Running W8.8c Protocol Pages & Audited Admin Gate ==="
 if ! bash scripts/e2e-protocol-admin.sh; then
   e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "PROTOCOL_ADMIN_GATE_FAILED" "$reproduce"
   exit 1
 fi
 
 # 4. Run Unified Agora Support Surfaces Journey Integration Suite
-echo "=== Step 4/4: Running Unified Agora Support Surfaces Integration Suite ==="
+echo "=== Step 4/5: Running Unified Agora Support Surfaces Integration Suite ==="
 if ! bun scripts/suite/agora-support-surfaces-e2e.ts; then
   e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "AGORA_SUPPORT_SURFACES_INTEGRATION_SUITE_FAILED" "$reproduce"
   exit 1
 fi
+
+# 5. Exercise the real production Agora support surfaces (share cards, reviews, honors, protocol pages, admin console) in Chromium against local Workerd/D1.
+echo "=== Step 5/5: Running Real Chromium Agora Support Surfaces Browser Lane ==="
+if ! node_binary="$(e2e_select_node_runtime)"; then
+  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "blocked" "GENUINE_NODE_UNAVAILABLE" "$reproduce"
+  exit 78
+fi
+browser_status=0
+"$node_binary" e2e/playwright/agora-local-lane.mjs --build || browser_status=$?
+case "$browser_status" in
+  0) ;;
+  78)
+    e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "blocked" "AGORA_SUPPORT_SURFACES_BROWSER_UNAVAILABLE" "$reproduce"
+    exit 78
+    ;;
+  *)
+    e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "AGORA_SUPPORT_SURFACES_BROWSER_FAILED" "$reproduce"
+    exit 1
+    ;;
+esac
 
 e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "pass" "" "$reproduce"
 exit 0

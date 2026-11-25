@@ -5,7 +5,8 @@
 #   1. An unmigrated local D1 refuses a room upgrade fail-closed:
 #      503 ROOM_UNAVAILABLE, with the HERALD_ROOM_SCHEMA_MISSING warning logged.
 #   2. After the shipped migrations are applied, the same upgrade reaches the
-#      room and is refused only for its missing credential (401 UNAUTHORIZED).
+#      room (Fable §11 public human room: no bearer required) and fails only on
+#      the nonexistent problem row (404 PROBLEM_NOT_FOUND) with 0 schema warnings.
 # Local state lives in a fresh temporary directory; the repo's .wrangler state
 # is never touched. Not covered: a 101 with a live credential (herald-room
 # real-bindings lane), deployed Durable Objects.
@@ -66,9 +67,9 @@ if ! (cd "$repository_root/apps/wire" &&
 fi
 
 read -r status code warnings < <(probe "$state_root/migrated" migrated)
-if [[ "$status" != 401 || "$code" != UNAUTHORIZED || "$warnings" -ne 0 ]]; then
+if [[ "$status" != 404 || "$code" != PROBLEM_NOT_FOUND || "$warnings" -ne 0 ]]; then
   emit fail HERALD_MIGRATED_ROOM_NOT_REACHED ",\"http\":\"$status\",\"problem\":\"$code\""
   exit 1
 fi
 
-emit pass HERALD_WRANGLER_DEV_SCHEMA_GATE_PASS ",\"unmigrated\":\"503 ROOM_UNAVAILABLE\",\"migrated\":\"401 UNAUTHORIZED\""
+emit pass HERALD_WRANGLER_DEV_SCHEMA_GATE_PASS ",\"unmigrated\":\"503 ROOM_UNAVAILABLE\",\"migrated\":\"404 PROBLEM_NOT_FOUND\""

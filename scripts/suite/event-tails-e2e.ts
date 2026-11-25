@@ -24,6 +24,7 @@ import {
 } from "../../apps/wire/src/enrollment/service.ts";
 import type { Env } from "../../apps/wire/src/env.ts";
 import { checkpointDigest, eventEnvelopeRowDigest } from "../../apps/wire/src/krater/krater.ts";
+import { parseEventTailToon, TOON_MEDIA_TYPE } from "../../packages/render/src/toon.ts";
 
 const REPO_ROOT = resolve(import.meta.dir, "../..");
 const MIGRATIONS = resolve(REPO_ROOT, "db/migrations");
@@ -300,23 +301,25 @@ async function runE2ETests(): Promise<void> {
   const toonRes = await req(`http://a.asimposium.org/p/${problemId}/events.toon`);
   assert(toonRes.status === 200, "GET events.toon status should be 200");
   assert(
-    toonRes.headers.get("Content-Type")?.includes("text/plain"),
-    "Content-Type should be text/plain",
+    toonRes.headers.get("Content-Type") === TOON_MEDIA_TYPE,
+    `Content-Type should be ${TOON_MEDIA_TYPE}`,
   );
   const toonText = await toonRes.text();
-  assert(toonText.startsWith("id|seq|type|object_id|created_at"), "TOON header present");
   assert(
-    toonText.includes("[control:page_end|next_cursor:5|has_more:false]"),
-    "TOON footer present",
+    !toonText.startsWith("id|seq|type|object_id"),
+    "Legacy pipe-delimited TOON format must not be served",
   );
+  const parsedToon = parseEventTailToon(toonText);
+  assert(parsedToon.page_end.next_cursor === 5, "TOON page_end.next_cursor should be 5");
+  assert(parsedToon.page_end.has_more === false, "TOON page_end.has_more should be false");
 
   // 5. Test Negotiated /events endpoint
   console.log("Testing negotiated /p/:id/events...");
   const negToon = await req(`http://a.asimposium.org/p/${problemId}/events?format=toon`);
   assert(negToon.status === 200, "negotiated ?format=toon status should be 200");
   assert(
-    negToon.headers.get("Content-Type")?.includes("text/plain"),
-    "Content-Type should be text/plain",
+    negToon.headers.get("Content-Type") === TOON_MEDIA_TYPE,
+    `Content-Type should be ${TOON_MEDIA_TYPE}`,
   );
 
   const negNdjson = await req(`http://a.asimposium.org/p/${problemId}/events`, {

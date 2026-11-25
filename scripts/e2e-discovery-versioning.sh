@@ -75,7 +75,7 @@ if [[ ! -f apps/wire/test/integration/discovery-real-bindings.mjs ]]; then
   e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "DISCOVERY_REAL_BINDINGS_MISSING" "$reproduce"
   exit 1
 fi
-if ! node apps/wire/test/integration/discovery-real-bindings.mjs; then
+if ! node apps/wire/test/integration/discovery-real-bindings.mjs positive; then
   e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "DISCOVERY_REAL_BINDINGS_FAILED" "$reproduce"
   exit 1
 fi

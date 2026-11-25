@@ -70,7 +70,11 @@ async function verifyEndpoint(
   const expectedLinks = [`<https://a.asimposium.org${expectedCanonicalPath}>; rel="canonical"`];
   // Governance and moves are licensed public resources. Require both exact
   // relations; the other static metadata routes carry only their canonical link.
-  if (["/protocol.md", "/protocol.json", "/moves.json"].includes(expectedCanonicalPath)) {
+  if (
+    ["/protocol.md", "/protocol.json", "/moves.json", "/moves.md", "/moves.html"].includes(
+      expectedCanonicalPath,
+    )
+  ) {
     expectedLinks.push('<https://creativecommons.org/licenses/by/4.0/>; rel="license"');
   }
   const expectedLink = expectedLinks.join(", ");

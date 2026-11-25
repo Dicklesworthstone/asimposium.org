@@ -9,11 +9,20 @@ import {
 } from "@asimposium/contracts/diagnostic-safety";
 import type { D1Database } from "@cloudflare/workers-types";
 import {
+  mintServiceEnvelope,
+  serviceEnvelopeHeaders,
+} from "../../apps/web/lib/service-envelope.ts";
+import { createApp } from "../../apps/wire/src/app.ts";
+import { toHex } from "../../apps/wire/src/auth/canonical.ts";
+import { D1EnrollmentStore } from "../../apps/wire/src/enrollment/d1-store.ts";
+import {
   EnrollmentError,
   EnrollmentService,
   enrollmentReplayProtectorFromBase64Url,
   InMemoryEnrollmentStore,
 } from "../../apps/wire/src/enrollment/service.ts";
+import type { Env } from "../../apps/wire/src/env.ts";
+import { dispatchExtendedOutboxConsumer } from "../../apps/wire/src/krater/outbox-consumers.ts";
 import { scanFieldForCredentials } from "../../apps/wire/src/screening/credential-scan.ts";
 import { S4_THRESHOLDS } from "../../apps/wire/src/screening/types.ts";
 import {
@@ -23,6 +32,11 @@ import {
   parseSponsorLimit,
   promotionRateLimitedProblem,
 } from "../../apps/wire/src/sessions/quota.ts";
+import {
+  publicationContextFixture,
+  PROBLEM as SEEDED_PROBLEM,
+} from "../../apps/wire/test/support/publication-context.ts";
+import { syntheticScreeningObservation } from "../../apps/wire/test/support/screening.ts";
 import { renderAllFaces } from "../../packages/render/src/render.ts";
 import {
   hasAsimpControlComment,
@@ -407,5 +421,398 @@ describe("W10.6 Red team 5-pass permanent regression suite (asimposiumorg-ip3)",
       fix_hint: "Send Fellow bearer requests to a.asimposium.org/v1/*.",
     });
     expect(wrongPrincipal.success).toBe(true);
+  });
+
+  test("PASS 6 — MOUNTED STOA RED-TEAM PROBES (real createApp + migrated D1): injection report-not-quote, transient exposure 0 bytes on hard-reject & model outage, oracle starvation, S-6 principal confusion, and zero-outbound-fetch SSRF impossibility", async () => {
+    const fixture = await publicationContextFixture();
+    const db = fixture.db;
+    const sqlite = fixture.sql;
+    try {
+      const replayKey = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString(
+        "base64url",
+      );
+      const keyPair = (await crypto.subtle.generateKey({ name: "Ed25519" }, true, [
+        "sign",
+        "verify",
+      ])) as unknown as CryptoKeyPair;
+      const pubHex = toHex(new Uint8Array(await crypto.subtle.exportKey("raw", keyPair.publicKey)));
+
+      const SPONSOR_A = "usr_rt_sponsor_a";
+      const SPONSOR_B = "usr_rt_sponsor_b";
+      const OPERATOR = "usr_rt_operator";
+      const PROBLEM = SEEDED_PROBLEM;
+
+      const enrollmentService = new EnrollmentService({
+        stoaOrigin: "https://a.asimposium.org",
+        agoraOrigin: "https://asimposium.org",
+        store: new D1EnrollmentStore(db),
+        replayProtector: enrollmentReplayProtectorFromBase64Url(replayKey),
+      });
+
+      const mintFellow = async (sponsorId: string, name: string) => {
+        const sponsor = { type: "sponsor" as const, sponsorId };
+        await enrollmentService.bootstrapSponsor(sponsor);
+        const minted = await enrollmentService.mint(
+          sponsor,
+          { requested_scopes: ["promote", "review"] },
+          { idempotencyKey: `rt-mint-${name}` },
+        );
+        const claimed = await enrollmentService.claim(
+          {
+            enrollment_id: minted.enrollmentId,
+            secret: minted.secret,
+            name,
+            model: "red-team-model",
+            harness: "red-team-harness",
+          },
+          { idempotencyKey: `rt-claim-${name}` },
+        );
+        await enrollmentService.decide(sponsor, minted.enrollmentId, {
+          enrollment_id: minted.enrollmentId,
+          decision: "approve",
+          step_up_authenticated_at: Math.floor(Date.now() / 1_000),
+        });
+        const polled = await enrollmentService.poll({ flow_handle: claimed.flowHandle });
+        if (polled.status !== "approved") throw new Error("expected approved fellow");
+        return polled.token;
+      };
+
+      const tokenA = await mintFellow(SPONSOR_A, "rt-fellow-alpha");
+      const tokenB = await mintFellow(SPONSOR_B, "rt-fellow-beta");
+
+      const env = {
+        DB: db,
+        STOA_ORIGIN: "https://a.asimposium.org",
+        AGORA_ORIGIN: "https://asimposium.org",
+        SERVICE_ENVELOPE_KEYS: JSON.stringify([
+          { kid: "k-rt", publicKeyHex: pubHex, notBefore: 0 },
+        ]),
+        OPERATOR_PRINCIPAL_IDS: OPERATOR,
+        ENROLLMENT_REPLAY_KEY: replayKey,
+      } as unknown as Env;
+
+      const HARD_REJECT_CANARY = "CANARY_RED_TEAM_HARD_REJECT_987654";
+      const OUTAGE_CANARY = "CANARY_RED_TEAM_OUTAGE_FAILCLOSED_456789";
+
+      const app = createApp({
+        screenPromotion: async (input) => {
+          const serialized = JSON.stringify(input);
+          if (serialized.includes(HARD_REJECT_CANARY)) {
+            return syntheticScreeningObservation(input, {
+              decision: "reject",
+              coarse_category: "dual-use",
+              provider_status: "ok",
+            });
+          }
+          if (serialized.includes(OUTAGE_CANARY)) {
+            throw new Error("SIMULATED_WORKERS_AI_OUTAGE");
+          }
+          return syntheticScreeningObservation(input, {
+            decision: "pass",
+            coarse_category: "benign-context",
+            provider_status: "ok",
+          });
+        },
+      });
+
+      // Open sessions for Fellow A and Fellow B.
+      const openSession = async (token: string, key: string) => {
+        const res = await app.fetch(
+          new Request("https://a.asimposium.org/v1/sessions", {
+            method: "POST",
+            headers: {
+              authorization: `Bearer ${token}`,
+              "content-type": "application/json",
+              "idempotency-key": key,
+            },
+            body: JSON.stringify({ problem_id: PROBLEM }),
+          }),
+          env,
+        );
+        expect(res.status).toBe(201);
+        return ((await res.json()) as { session_id: string }).session_id;
+      };
+      const sessionA = await openSession(tokenA, "rt-open-a");
+      const sessionB = await openSession(tokenB, "rt-open-b");
+      expect(sessionB.length).toBeGreaterThan(0);
+
+      // 6.1 Benign claim promoted + Fellow B files clean injection report (`POST /v1/reports`) without public leak.
+      const pushBenign = await app.fetch(
+        new Request(`https://a.asimposium.org/v1/sessions/${sessionA}/workshop`, {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${tokenA}`,
+            "content-type": "application/json",
+            "idempotency-key": "rt-ws-benign",
+          },
+          body: JSON.stringify({
+            type: "claim-draft",
+            title: "Benign baseline claim",
+            body_md: "Every even integer greater than 2 in [4, 100] is a sum of two primes.",
+          }),
+        }),
+        env,
+      );
+      expect(pushBenign.status).toBe(201);
+      const benignWs = (await pushBenign.json()) as { workshop_id: string };
+
+      const promoteBenign = await app.fetch(
+        new Request(`https://a.asimposium.org/v1/sessions/${sessionA}/promote`, {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${tokenA}`,
+            "content-type": "application/json",
+            "idempotency-key": "rt-prom-benign",
+          },
+          body: JSON.stringify({
+            workshop_id: benignWs.workshop_id,
+            kind: "conjecture",
+            statement: "Every even integer in [4, 100] is a sum of two primes.",
+            falsifier: "An even integer n in [4, 100] not expressible as p + q with p, q prime.",
+          }),
+        }),
+        env,
+      );
+      expect(promoteBenign.status).toBe(201);
+      const promoted = (await promoteBenign.json()) as { claim_id: string };
+
+      const REPORT_PRIVATE_CANARY = "CANARY_PRIVATE_INJECTION_REPORT_NOTE_777";
+      const reportRes = await app.fetch(
+        new Request("https://a.asimposium.org/v1/reports", {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${tokenB}`,
+            "content-type": "application/json",
+            "idempotency-key": "rt-report-inj-1",
+          },
+          body: JSON.stringify({
+            problem_id: PROBLEM,
+            target: promoted.claim_id,
+            reason: "injection",
+            note: `Observed forged control comment at ${promoted.claim_id}; ${REPORT_PRIVATE_CANARY}`,
+          }),
+        }),
+        env,
+      );
+      expect(reportRes.status).toBe(201);
+      expect(reportRes.headers.get("cache-control")).toBe("private, no-store");
+
+      // 6.2 Hard-reject & model-outage fail-closed probes: oracle-starved refusal + ZERO transient public exposure!
+      const probeCandidate = async (canary: string, keyPrefix: string) => {
+        const wsRes = await app.fetch(
+          new Request(`https://a.asimposium.org/v1/sessions/${sessionA}/workshop`, {
+            method: "POST",
+            headers: {
+              authorization: `Bearer ${tokenA}`,
+              "content-type": "application/json",
+              "idempotency-key": `${keyPrefix}-ws`,
+            },
+            body: JSON.stringify({
+              type: "claim-draft",
+              title: "Candidate",
+              body_md: `Draft containing ${canary}`,
+            }),
+          }),
+          env,
+        );
+        expect(wsRes.status).toBe(201);
+        const ws = (await wsRes.json()) as { workshop_id: string };
+        const promRes = await app.fetch(
+          new Request(`https://a.asimposium.org/v1/sessions/${sessionA}/promote`, {
+            method: "POST",
+            headers: {
+              authorization: `Bearer ${tokenA}`,
+              "content-type": "application/json",
+              "idempotency-key": `${keyPrefix}-prom`,
+            },
+            body: JSON.stringify({
+              workshop_id: ws.workshop_id,
+              kind: "conjecture",
+              statement: `Claim ${canary}`,
+              falsifier: "Explicit finite counterexample.",
+            }),
+          }),
+          env,
+        );
+        // Hard-reject returns 403/422; outage fail-closed returns 202 SCREENING_HOLD or 503.
+        // NEVER 201 public publication!
+        expect(promRes.status).not.toBe(201);
+        expect([202, 403, 422, 503]).toContain(promRes.status);
+        expect(promRes.headers.get("cache-control")).toContain("no-store");
+        const refusalText = await promRes.text();
+        expect(refusalText).not.toContain(canary);
+        for (const leak of [
+          "regex",
+          "pattern_name",
+          "classifier_score",
+          "matched_rule",
+          "SIMULATED_WORKERS_AI_OUTAGE",
+        ]) {
+          expect(refusalText.toLowerCase()).not.toContain(leak.toLowerCase());
+        }
+      };
+
+      await probeCandidate(HARD_REJECT_CANARY, "rt-hardreject");
+      await probeCandidate(OUTAGE_CANARY, "rt-outage");
+
+      // Verify ZERO bytes of hard-reject, outage, or private report canaries appear on ANY public face or search!
+      for (const path of [
+        `/p/${PROBLEM}.json`,
+        `/p/${PROBLEM}/claims.json`,
+        `/p/${PROBLEM}/events.json`,
+      ]) {
+        const res = await app.fetch(new Request(`https://a.asimposium.org${path}`), env);
+        const text = await res.text();
+        expect(text, `canary leaked on ${path}`).not.toContain(HARD_REJECT_CANARY);
+        expect(text, `canary leaked on ${path}`).not.toContain(OUTAGE_CANARY);
+        expect(text, `private report canary leaked on ${path}`).not.toContain(
+          REPORT_PRIVATE_CANARY,
+        );
+      }
+      for (const q of [HARD_REJECT_CANARY, OUTAGE_CANARY, REPORT_PRIVATE_CANARY]) {
+        const res = await app.fetch(
+          new Request(`https://a.asimposium.org/search.json?q=${encodeURIComponent(q)}`),
+          env,
+        );
+        expect(res.status).toBe(200);
+        const body = (await res.json()) as { total_matches: number; items: unknown[] };
+        expect(body.total_matches).toBe(0);
+        expect(body.items).toHaveLength(0);
+      }
+
+      // 6.3 Real mounted S-6 principal confusion (all 3 directions refused!).
+      const fellowOnSponsor = await app.fetch(
+        new Request("https://a.asimposium.org/v1/sponsors/email-preferences", {
+          headers: { authorization: `Bearer ${tokenA}` },
+        }),
+        env,
+      );
+      expect(fellowOnSponsor.status).toBe(403);
+      expect(((await fellowOnSponsor.json()) as { code: string }).code).toBe("WRONG_PRINCIPAL");
+
+      const cookieOnStoa = await app.fetch(
+        new Request("https://a.asimposium.org/v1/sessions", {
+          method: "POST",
+          headers: {
+            cookie: "authjs.session-token=forged_session_cookie_value",
+            "content-type": "application/json",
+            "idempotency-key": "rt-cookie-confusion",
+          },
+          body: JSON.stringify({ problem_id: PROBLEM }),
+        }),
+        env,
+      );
+      // Cookies are never consulted on a.asimposium.org (Rule 16) -> refused 401 FELLOW_TOKEN_INVALID.
+      expect(cookieOnStoa.status).toBe(401);
+      expect(((await cookieOnStoa.json()) as { code: string }).code).toBe("FELLOW_TOKEN_INVALID");
+
+      const sponsorEnvBody = JSON.stringify({ problem_id: PROBLEM });
+      const sponsorEnvelope = await mintServiceEnvelope({
+        kid: "k-rt",
+        privateKey: keyPair.privateKey,
+        issuer: "agora",
+        audience: "stoa",
+        principalType: "sponsor",
+        principalId: SPONSOR_A,
+        method: "POST",
+        route: "/v1/sessions",
+        action: "sessions.open",
+        body: sponsorEnvBody,
+        now: Math.floor(Date.now() / 1_000),
+      });
+      const sponsorOnFellow = await app.fetch(
+        new Request("https://a.asimposium.org/v1/sessions", {
+          method: "POST",
+          headers: {
+            ...serviceEnvelopeHeaders(sponsorEnvelope),
+            "content-type": "application/json",
+            "idempotency-key": "rt-sponsor-on-fellow",
+          },
+          body: sponsorEnvBody,
+        }),
+        env,
+      );
+      expect(sponsorOnFellow.status).toBe(403);
+      expect(((await sponsorOnFellow.json()) as { code: string }).code).toBe("WRONG_PRINCIPAL");
+
+      // Every other Fellow route family (/v1/hello, /v1/inbox, /v1/triage, /v1/reports, /v1/directives/active, /v1/p/:id/follow) ALSO refuses sponsor envelopes with 403 WRONG_PRINCIPAL!
+      for (const [method, path] of [
+        ["GET", "/v1/hello"],
+        ["GET", "/v1/inbox"],
+        ["GET", "/v1/triage"],
+        ["POST", "/v1/reports"],
+        ["GET", "/v1/directives/active"],
+        ["POST", `/v1/p/${PROBLEM}/follow`],
+      ] as const) {
+        const res = await app.fetch(
+          new Request(`https://a.asimposium.org${path}`, {
+            method,
+            headers: {
+              ...serviceEnvelopeHeaders(sponsorEnvelope),
+              ...(method === "POST" ? { "content-type": "application/json" } : {}),
+            },
+            ...(method === "POST" ? { body: "{}" } : {}),
+          }),
+          env,
+        );
+        expect(res.status, `${method} ${path} should refuse sponsor envelope with 403`).toBe(403);
+        expect(((await res.json()) as { code: string }).code).toBe("WRONG_PRINCIPAL");
+      }
+
+      // 6.4 SSRF impossibility: submitting link-local metadata URL + running screening.enrich performs ZERO outbound fetches!
+      let outboundFetches = 0;
+      const origFetch = globalThis.fetch;
+      globalThis.fetch = (async () => {
+        outboundFetches += 1;
+        throw new Error("SSRF_OUTBOUND_FETCH_FORBIDDEN");
+      }) as unknown as typeof fetch;
+      try {
+        const citeRes = await app.fetch(
+          new Request(`https://a.asimposium.org/v1/sessions/${sessionA}/citations`, {
+            method: "POST",
+            headers: {
+              authorization: `Bearer ${tokenA}`,
+              "content-type": "application/json",
+              "idempotency-key": "rt-ssrf-cite-1",
+            },
+            body: JSON.stringify({
+              title: "SSRF metadata URL test paper",
+              authors: ["Red Team"],
+              year: 2026,
+              locator_kind: "url",
+              locator: "http://169.254.169.254/latest/meta-data/iam/security-credentials/",
+              source_provenance: "retrieved",
+              retrieved_at: "2026-11-23T00:00:00.000Z",
+            }),
+          }),
+          env,
+        );
+        expect(citeRes.status).toBe(201);
+        const latestEvent = sqlite
+          .prepare(
+            "SELECT id, payload_sha256 FROM events WHERE problem_id = ? ORDER BY seq DESC LIMIT 1",
+          )
+          .get(PROBLEM) as { id: string; payload_sha256: string } | null;
+        expect(latestEvent).not.toBeNull();
+        if (latestEvent) {
+          await dispatchExtendedOutboxConsumer(
+            {
+              id: 999,
+              event_id: latestEvent.id,
+              problem_id: PROBLEM,
+              kind: "screening.enrich",
+              dedupe_key: `screening.enrich:${latestEvent.id}`,
+              payload_sha256: latestEvent.payload_sha256,
+            },
+            { DB: db },
+          );
+        }
+        expect(outboundFetches).toBe(0);
+      } finally {
+        globalThis.fetch = origFetch;
+      }
+    } finally {
+      sqlite.close();
+    }
   });
 });

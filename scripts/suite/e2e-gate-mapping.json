@@ -12,8 +12,8 @@
       "suite_proof_level": "in-process",
       "entrypoint": "scripts/e2e-agora-support-surfaces.sh",
       "authoritative_real_lane": "e2e/playwright/agora-local-lane.mjs",
-      "wired_in_entrypoint": false,
-      "honest_classification": "unit-only-browser-proof-in-agora-local-lane"
+      "wired_in_entrypoint": true,
+      "honest_classification": "wired-to-browser-lane"
     },
     "calibration-honors-e2e.ts": {
       "suite_proof_level": "in-process",

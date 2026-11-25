@@ -320,6 +320,12 @@ async function startLoopbackPair(options: LoopbackFixtureOptions): Promise<{
         "asimp.session=valid-loopback-sponsor",
       );
 
+      if (path === "/favicon.ico") {
+        return new Response(null, {
+          status: 204,
+          headers: { "cache-control": "public, max-age=60" },
+        });
+      }
       if (path === "/og.jpg") {
         return new Response(new Uint8Array(HOME_OG_JPEG), {
           status: 200,

@@ -303,13 +303,20 @@ describe("W10.8 Human-plane Playwright E2E guards, redaction & planted negatives
     expect(refusedStorageCot.ok).toBe(false);
     expect(refusedStorageCot.reason).toBe("FORBIDDEN_HIDDEN_REASONING_FIELD:raw_transcript");
 
-    // Empty privateWorkshopCanaries fails closed (anti-vacuity).
+    // Empty or whitespace-only privateWorkshopCanaries fails closed (anti-vacuity).
     const vacuous = evaluateHumanPlaneCacheAndPrivacyPair({
       ...cleanPrivacySnapshot(),
       privateWorkshopCanaries: [],
     });
     expect(vacuous.ok).toBe(false);
     expect(vacuous.violations).toContain("NO_PRIVATE_WORKSHOP_CANARY_CONFIGURED");
+
+    const blankCanary = evaluateHumanPlaneCacheAndPrivacyPair({
+      ...cleanPrivacySnapshot(),
+      privateWorkshopCanaries: ["   "],
+    });
+    expect(blankCanary.ok).toBe(false);
+    expect(blankCanary.violations).toContain("EMPTY_PRIVATE_CANARY_CONFIGURED");
 
     // Non-finite duration_ms in OPS.2a record fails closed.
     expect(() =>

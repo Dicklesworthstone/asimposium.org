@@ -5,6 +5,7 @@
  * without needing changes to `package.json`.
  */
 
+import "../acceptance-command-map.test.ts";
 import "../archive-e2e-artifacts.test.ts";
 import "../asimp-installer-e2e.test.ts";
 import "../deferred-decisions-audit.test.ts";

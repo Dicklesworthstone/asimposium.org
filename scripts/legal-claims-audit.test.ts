@@ -13,8 +13,8 @@
 
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { join, relative, resolve } from "node:path";
 
 const REPO_ROOT = resolve(import.meta.dir, "..");
 
@@ -198,5 +198,106 @@ describe("W12.4c & W12.4d Legal Claims-vs-Behavior & Data-Processor Audit", () =
 
     // Verify processor change-management runbook exists
     expect(existsSync(join(REPO_ROOT, "docs/runbooks/processor-change-management.md"))).toBe(true);
+  });
+
+  test("W12.4d static runtime egress & third-party asset audit: zero remote <script>/<link> CDN loads and closed external egress host allowlist", () => {
+    const runtimeRoots = ["apps/wire/src", "apps/web/app", "apps/web/lib", "apps/web/components"];
+    const runtimeFiles: string[] = [];
+    const walk = (dir: string): void => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const full = join(dir, entry.name);
+        if (entry.isDirectory()) {
+          walk(full);
+          continue;
+        }
+        if (!/\.(ts|tsx|js|mjs)$/.test(entry.name)) continue;
+        if (/\.test\.(ts|tsx|js|mjs)$/.test(entry.name)) continue;
+        runtimeFiles.push(full);
+      }
+    };
+    for (const root of runtimeRoots) {
+      walk(join(REPO_ROOT, root));
+    }
+    expect(runtimeFiles.length).toBeGreaterThan(50);
+
+    // Closed set of external HTTP(S) hosts allowed anywhere in runtime source
+    // (ASImposium origins, local loopback, registered native-fetch Resend endpoint,
+    // and static schema/XMLNS/license/spec/example URIs — never unregistered SaaS or CDN hosts).
+    const allowedRuntimeHosts = new Set([
+      "asimposium.org",
+      "a.asimposium.org",
+      "artifacts.asimposium.org",
+      "staging.asimposium.org",
+      "a-staging.asimposium.org",
+      "artifacts-staging.asimposium.org",
+      "api.resend.com",
+      "127.0.0.1",
+      "localhost",
+      "herald.internal",
+      "krater-outbox.internal",
+      "event-history.invalid",
+      "creativecommons.org",
+      "schema.org",
+      "jsonfeed.org",
+      "www.w3.org",
+      "www.rfc-editor.org",
+      "arxiv.org",
+      "doi.org",
+      "github.com",
+      "developers.cloudflare.com",
+      "docs.aws.amazon.com",
+      "example.com",
+      "example.org",
+    ]);
+
+    const scanText = (rel: string, text: string) => {
+      const scripts: string[] = [];
+      const unknown: string[] = [];
+      if (/<script\b[^>]*\bsrc\s*=\s*["']https?:\/\//i.test(text)) {
+        scripts.push(rel);
+      }
+      if (
+        /<link\b[^>]*\bhref\s*=\s*["']https?:\/\/[^"']*(?:cdn\.|unpkg|jsdelivr|googleapis)/i.test(
+          text,
+        )
+      ) {
+        scripts.push(rel);
+      }
+      for (const match of text.matchAll(/https?:\/\/([a-zA-Z0-9.-]+)/g)) {
+        const host = match[1]?.toLowerCase() ?? "";
+        if (host && !allowedRuntimeHosts.has(host)) {
+          unknown.push(`${rel} -> ${host}`);
+        }
+      }
+      return { scripts, unknown };
+    };
+
+    // Planted negative controls: prove the scanner actually fails closed on
+    // third-party CDN scripts and unregistered external HTTP(S) egress hosts.
+    const cdnControl = scanText(
+      "planted-cdn.ts",
+      '<script src="https://cdn.tailwindcss.com"></script>',
+    );
+    expect(cdnControl.scripts).toEqual(["planted-cdn.ts"]);
+    expect(cdnControl.unknown).toEqual(["planted-cdn.ts -> cdn.tailwindcss.com"]);
+    const trackerControl = scanText(
+      "planted-egress.ts",
+      'await fetch("http://tracker.evil.net/p");',
+    );
+    expect(trackerControl.unknown).toEqual(["planted-egress.ts -> tracker.evil.net"]);
+
+    const remoteScriptHits: string[] = [];
+    const unknownHostHits: string[] = [];
+
+    for (const file of runtimeFiles) {
+      const text = readFileSync(file, "utf8");
+      const rel = relative(REPO_ROOT, file);
+      const { scripts, unknown } = scanText(rel, text);
+      remoteScriptHits.push(...scripts);
+      unknownHostHits.push(...unknown);
+    }
+
+    expect(remoteScriptHits).toEqual([]);
+    expect(unknownHostHits).toEqual([]);
   });
 });

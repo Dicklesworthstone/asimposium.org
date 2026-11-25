@@ -81,6 +81,7 @@ mock.module("@/auth", () => ({
 
 mock.module("@/lib/stoa", () => ({
   configuredStoaOrigin: () => "https://a.asimposium.org",
+  stoaSponsorWorkshopMutation: async () => ({ ok: false, reason: "unconfigured" }),
   stoaSponsorWorkshop: async (
     _sponsorId: string,
     problemId: string,
