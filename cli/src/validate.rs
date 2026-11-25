@@ -71,6 +71,16 @@ pub struct ValidateArgs {
     /// Emit deterministic structured JSON output (never echoes input bytes or rejected keys).
     #[arg(long)]
     pub json: bool,
+
+    /// Bundled selector, `/schemas/...json` path, or canonical published schema URL.
+    /// Structural checks only; does not apply Worker refinements or the P7 scrub.
+    #[arg(
+        long,
+        value_name = "SCHEMA",
+        required_unless_present_any = ["list_schemas", "kind", "schema_file", "stdin"],
+        conflicts_with_all = ["list_schemas", "kind", "schema_file", "stdin", "scrub", "check_origin", "slice"]
+    )]
+    pub schema: Option<String>,
 }
 
 struct BundledSchema {
@@ -1064,6 +1074,14 @@ pub fn run_with_io(
     let Command::Validate(args) = &cli.command else {
         return input_error("Expected the validate command.");
     };
+    if let Some(schema) = &args.schema {
+        return crate::validation::run(&crate::validation::ValidateArgs {
+            file: args.file.clone(),
+            schema: Some(schema.clone()),
+            list_schemas: false,
+            json: args.json,
+        });
+    }
     if args.list_schemas {
         return format_schema_catalog(args.json);
     }
