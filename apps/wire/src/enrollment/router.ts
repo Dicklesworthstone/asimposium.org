@@ -1421,6 +1421,7 @@ export async function buildHelloResponse(input: {
   }
 
   let assignments: HelloAssignment[] | undefined;
+  let soleActiveAssignment: string | undefined;
   let openSessions: HelloOpenSession[] | undefined;
   let protocolDigest: string | undefined;
   let protocolAcknowledged: boolean | undefined;
@@ -1438,10 +1439,10 @@ export async function buildHelloResponse(input: {
       const assignmentRows = await db
         .prepare(
           `SELECT pm.problem_id, pm.role, pm.joined_at,
-             CASE WHEN p.id IS NOT NULL
-               AND NOT ${hiddenByContentControlSql("p.id", "'problem'")} THEN p.title END AS title
+             p.title, p.status IN ('active', 'sharpening', 'under-result-review') AS active
            FROM problem_memberships pm
            LEFT JOIN problems p ON pm.problem_id = p.id
+             AND NOT ${hiddenByContentControlSql("p.id", "'problem'")}
            WHERE pm.fellow_id = ?
            ORDER BY pm.joined_at ASC`,
         )
@@ -1451,9 +1452,14 @@ export async function buildHelloResponse(input: {
           role: "observer" | "contributor" | "steward" | "founding-steward";
           joined_at: string;
           title: string | null;
+          active: number | null;
         }>();
 
       if (assignmentRows.results) {
+        const [only] = assignmentRows.results;
+        if (assignmentRows.results.length === 1 && only?.active === 1) {
+          soleActiveAssignment = only.problem_id;
+        }
         assignments = assignmentRows.results.map((r) => ({
           problem_id: r.problem_id,
           role: r.role,
@@ -1515,6 +1521,10 @@ export async function buildHelloResponse(input: {
   }
 
   const boundProblem = binding.grantedResources.problemBinding;
+  // A single visible active assignment provides a concrete starting point for
+  // an unbound first session. It is a suggestion; the grant remains unbound.
+  const sessionProblem =
+    boundProblem ?? (openSessions?.length === 0 ? soleActiveAssignment : undefined);
   // Fable §5.5 and the session admission path allow two open sessions.
   const canOfferSessionOpen =
     binding.fellowStatus === "active" &&
@@ -1542,9 +1552,11 @@ export async function buildHelloResponse(input: {
   }
   const protocolUrl = `${service.stoaOrigin}/protocol.md`;
   const directiveReason =
-    boundProblem === undefined
+    sessionProblem === undefined
       ? "Before acting, read global sponsor instructions and follow every next_url while has_more is true. After choosing a problem, read again with problem_id; global instructions alone are incomplete for it. ACK does not withdraw instructions."
-      : "Before acting, read your current sponsor's instructions for this problem and follow every next_url while has_more is true. Acknowledgment confirms receipt; it does not withdraw instructions.";
+      : boundProblem === undefined
+        ? "Read sponsor instructions for your suggested assignment. If you choose different work, read again with that problem_id. Follow every next_url while has_more is true."
+        : "Before acting, read your current sponsor's instructions for this problem and follow every next_url while has_more is true. Acknowledgment confirms receipt; it does not withdraw instructions.";
   const nextActions = [
     ...(protocolAcknowledged === true
       ? []
@@ -1558,7 +1570,7 @@ export async function buildHelloResponse(input: {
         ]),
     {
       action: directiveReadRequired ? ("read" as const) : ("reference" as const),
-      url: service.stoaOrigin + activeDirectivesUrl(boundProblem),
+      url: service.stoaOrigin + activeDirectivesUrl(sessionProblem),
       reason: directiveReadRequired
         ? directiveReason
         : "No active sponsor instructions for this problem at hello. Your working pack checks again.",
@@ -1593,11 +1605,18 @@ export async function buildHelloResponse(input: {
           },
         ]
       : []),
-    ...(openSessions ?? []).slice(0, 2).map(({ session_id, problem_id }) => ({
-      action: "read" as const,
-      url: `${service.stoaOrigin}/v1/sessions/${session_id}`,
-      reason: `Resume your session on ${problem_id}. Its status links to your working pack.`,
-    })),
+    ...(openSessions ?? []).slice(0, 2).map(({ session_id, problem_id, idle_close_at }) => {
+      const statusUrl = `${service.stoaOrigin}/v1/sessions/${session_id}`;
+      const resumable = Date.parse(idle_close_at) > Date.now() &&
+        (boundProblem === undefined || boundProblem === problem_id);
+      return {
+        action: "read" as const,
+        url: resumable ? `${statusUrl}/pack?profile=working` : statusUrl,
+        reason: resumable
+          ? `Resume your session on ${problem_id} with its current working pack.`
+          : `Check the status of your session on ${problem_id} before resuming work.`,
+      };
+    }),
     ...(canOfferSessionOpen
       ? [
           {
@@ -1608,11 +1627,11 @@ export async function buildHelloResponse(input: {
             request: {
               method: "POST" as const,
               schema: `${service.stoaOrigin}/schemas/sessions.v1/session_open_request.json`,
-              ...(boundProblem === undefined
+              ...(sessionProblem === undefined
                 ? {}
                 : {
                     body_prefill: SessionOpenRequestSchema.parse({
-                      problem_id: boundProblem,
+                      problem_id: sessionProblem,
                     }),
                   }),
             },
@@ -1712,14 +1731,21 @@ export async function completeHelloInboxFeedback(
   return EnrollmentHelloResponseSchema.parse({
     ...base,
     ...feedback,
-    next_actions: response.next_actions.map((action) =>
-      feedback !== undefined && action.url.endsWith("/v1/inbox?unread_only=true")
-        ? {
-            ...action,
-            reason: `${feedback.inbox.unacknowledged_count} unacknowledged notices. Read feedback before acting; page with next_cursor while has_more, then acknowledge received notice IDs. Reading alone does not acknowledge them.`,
-          }
-        : action,
-    ),
+    next_actions: response.next_actions.map((action) => {
+      if (!feedback || !action.url.endsWith("/v1/inbox?unread_only=true")) return action;
+      if (feedback.inbox.unacknowledged_count === 0) {
+        return {
+          ...action,
+          action: "reference" as const,
+          reason: "No notices await acknowledgment at this read. Check here for later feedback.",
+        };
+      }
+      return {
+        ...action,
+        action: "read" as const,
+        reason: `${feedback.inbox.unacknowledged_count} unacknowledged notices. Read feedback before acting; page with next_cursor while has_more, then acknowledge received notice IDs. Reading alone does not acknowledge them.`,
+      };
+    }),
   });
 }
 

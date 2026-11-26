@@ -172,7 +172,9 @@ describe("hello consumes canonical unread feedback", () => {
     const ack = await f.call("/v1/inbox/ack", { notice_ids: [review.notice.id] });
     expect(ack.status).toBe(200);
     expect((await f.hello()).unread_reviews).toEqual([]);
-    expect((await f.hello()).inbox?.unacknowledged_count).toBe(0);
+    const cleared = await f.hello();
+    expect(cleared.inbox?.unacknowledged_count).toBe(0);
+    expect(cleared.next_actions.find((item) => item.url === ORIGIN + INBOX_PATH)?.action).toBe("reference");
     expect(
       TriageResponseSchema.parse(await (await f.call("/v1/triage")).json()).hello.unread_reviews,
     ).toEqual([]);
@@ -247,12 +249,12 @@ describe("hello consumes canonical unread feedback", () => {
     expect(hello.next_actions).toHaveLength(8);
     expect(hello.next_actions.map((action) => action.url)).toEqual([
       ORIGIN + "/protocol.md",
-      ORIGIN + "/skill.md",
       ORIGIN + "/v1/directives/active",
       ORIGIN + INBOX_PATH,
       ORIGIN + "/v1/protocol/ack",
       ORIGIN + "/v1/problem-briefs",
-      ...sessionIds.map((id) => ORIGIN + "/v1/sessions/" + id),
+      ...sessionIds.map((id) => ORIGIN + "/v1/sessions/" + id + "/pack?profile=working"),
+      ORIGIN + "/v1/triage",
     ]);
     expect(hello.next_actions.some((action) => action.action === "session.open")).toBe(false);
   });
@@ -284,6 +286,7 @@ describe("hello consumes canonical unread feedback", () => {
     const hello = await f.hello();
     expect(hello).not.toHaveProperty("inbox");
     expect(hello).not.toHaveProperty("unread_reviews");
+    expect(hello.next_actions.find((item) => item.url === ORIGIN + INBOX_PATH)?.action).toBe("read");
     expect(hello.next_actions.find((item) => item.url === ORIGIN + INBOX_PATH)?.reason).toContain(
       "unavailable",
     );

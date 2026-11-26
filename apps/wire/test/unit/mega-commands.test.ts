@@ -592,6 +592,54 @@ describe("W6.2 Mega-Commands (hello, triage, next)", () => {
     expect(bodyBadToken.code).toBe("FELLOW_TOKEN_INVALID");
   });
 
+  test("unbound Fellow can open its sole assigned problem from hello and resume directly into the working pack", async () => {
+    const { app, env, db, enrollFellow, seedPublishedProblem, seedProblem, seedMembership } =
+      await createTestHarness();
+    const fellow = await enrollFellow();
+    const origin = "https://a.asimposium.org";
+    const headers = { authorization: `Bearer ${fellow.token}` };
+    const hello = async () => EnrollmentHelloResponseSchema.parse(await (
+      await app.fetch(new Request(origin + "/v1/hello", { headers }), env)
+    ).json());
+    await seedPublishedProblem("P-ASSIGNED", "Assigned problem", fellow);
+    await seedMembership("P-ASSIGNED", fellow.fellowId, "contributor");
+    const first = await hello();
+    expect(first.granted_resources.problem_binding).toBeUndefined();
+    expect(first.next_actions.find((a) => a.url.includes("/v1/directives/active"))?.url)
+      .toBe(origin + "/v1/directives/active?problem_id=P-ASSIGNED");
+    const open = first.next_actions.find((a) => a.action === "session.open");
+    expect(open?.request?.body_prefill).toEqual({ problem_id: "P-ASSIGNED" });
+    if (!open?.request) throw new Error("Missing session-open continuation");
+    const opened = await app.fetch(new Request(open.url, {
+      method: open.request.method,
+      headers: { ...headers, "content-type": "application/json", "idempotency-key": "assigned-from-hello" },
+      body: JSON.stringify(open.request.body_prefill),
+    }), env);
+    expect(opened.status, await opened.clone().text()).toBe(201);
+    const { session_id: sessionId } = await opened.json() as { session_id: string };
+    const resume = (await hello()).next_actions.find(a => a.url.includes(sessionId));
+    expect(resume?.url).toBe(origin + "/v1/sessions/" + sessionId + "/pack?profile=working");
+    if (!resume) throw new Error("Missing working pack continuation");
+    const pack = await app.fetch(new Request(resume.url, { headers }), env);
+    expect(pack.status, await pack.clone().text()).toBe(200);
+    await db.prepare("UPDATE sessions SET idle_close_at=? WHERE session_id=?")
+      .bind(new Date(Date.now() - 1_000).toISOString(), sessionId).run();
+    const inactive = (await hello()).next_actions.find(a => a.url.includes(sessionId));
+    expect(inactive?.url).toBe(origin + "/v1/sessions/" + sessionId);
+
+    const other = await enrollFellow();
+    await seedProblem("P-OTHER");
+    await seedMembership("P-ASSIGNED", other.fellowId, "observer");
+    await seedMembership("P-OTHER", other.fellowId, "contributor");
+    const multiple = EnrollmentHelloResponseSchema.parse(await (await app.fetch(
+      new Request(origin + "/v1/hello", { headers: { authorization: `Bearer ${other.token}` } }), env,
+    )).json());
+    expect(multiple.next_actions.find(a => a.action === "session.open")?.request)
+      .not.toHaveProperty("body_prefill");
+    expect(multiple.next_actions.find(a => a.url.includes("/v1/directives/active"))?.url)
+      .toBe(origin + "/v1/directives/active");
+  });
+
   test("GET /v1/hello returns identity, assignments, sessions, and protocol ACK status", async () => {
     const { app, env, enrollFellow, seedProblem, seedMembership, db } = await createTestHarness();
     const fellow = await enrollFellow();
