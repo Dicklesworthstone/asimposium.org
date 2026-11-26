@@ -6,7 +6,7 @@ import { SynthesisDeclarations } from "./synthesis-declarations";
 import { synthesisPagePath } from "@/lib/synthesis-view";
 import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
-import { publishSynthesisDraftAction } from "@/app/console/problems/[problem]/actions";
+import { publishSynthesisDraftAction, type PublishSynthesisDraftActionResult } from "@/app/console/problems/[problem]/actions";
 
 interface PublishedOverride {
   readonly published_by_principal_id: string;
@@ -28,7 +28,9 @@ export function SynthesisDraftsPanel({
   const [publishedOverrides, setPublishedOverrides] = useState<
     Readonly<Record<string, PublishedOverride>>
   >({});
-  const [error, setError] = useState<string | null>(null);
+  const [feedback, setFeedback] = useState<
+    Readonly<Record<string, Extract<PublishSynthesisDraftActionResult, { ok: false }> | undefined>>
+  >({});
   const [pendingId, setPendingId] = useState<string | null>(null);
   const [isPending, startTransition] = useTransition();
 
@@ -49,13 +51,12 @@ export function SynthesisDraftsPanel({
   if (drafts.length === 0) return null;
 
   const handlePublish = (synthesisId: string) => {
-    setError(null);
     setPendingId(synthesisId);
     startTransition(async () => {
       try {
         const result = await publishSynthesisDraftAction(sponsorId, problemId, synthesisId);
         if (!result.ok) {
-          setError(result.message);
+          setFeedback((current) => ({ ...current, [synthesisId]: result }));
           return;
         }
         setPublishedOverrides((current) => ({
@@ -69,7 +70,13 @@ export function SynthesisDraftsPanel({
         }));
         router.refresh();
       } catch {
-        setError("Could not publish synthesis draft. Please retry.");
+        setFeedback((current) => ({
+          ...current,
+          [synthesisId]: {
+            ok: false,
+            message: "Publication could not be confirmed. Refresh the queue before retrying this draft.",
+          },
+        }));
       } finally {
         setPendingId(null);
       }
@@ -83,14 +90,11 @@ export function SynthesisDraftsPanel({
         Review the complete digest and its sources before publishing. Publication adds the digest to
         the public ledger with the Fellow as scientific author and your account as publisher.
       </p>
-      {error !== null ? (
-        <p role="alert" className="text-red-700">
-          {error}
-        </p>
-      ) : null}
       <ul className="space-y-4">
-        {drafts.map((draft) => (
-          <li key={draft.synthesis_id} className="border-t pt-3">
+        {drafts.map((draft) => {
+          const notice = draft.state === "draft" ? feedback[draft.synthesis_id] : undefined;
+          const caseId = notice?.screening?.caseId;
+          return <li key={draft.synthesis_id} className="border-t pt-3">
             <h3><code>{draft.synthesis_id}</code></h3>
             <p>
               Frozen digest · covers through {draft.covers_through} ·{" "}
@@ -103,6 +107,17 @@ export function SynthesisDraftsPanel({
             </p>
             <p className="whitespace-pre-wrap break-words">{draft.body_md}</p>
             <SynthesisDeclarations item={draft} draft />
+            {notice && (
+              <div role={notice.screening?.code === "SCREENING_HOLD" ? "status" : "alert"}>
+                <p>{notice.message}</p>
+                {notice.screening && <Link
+                  href={caseId ? `/console/appeals?case=${encodeURIComponent(caseId)}` : "/console/appeals"}
+                  prefetch={false}
+                >
+                  {caseId ? `Sponsor review for case ${caseId}` : "Screening review and appeals"}
+                </Link>}
+              </div>
+            )}
             {draft.state === "draft" ? (
               <button
                 type="button"
@@ -112,7 +127,7 @@ export function SynthesisDraftsPanel({
               >
                 {isPending && pendingId === draft.synthesis_id
                   ? "Publishing…"
-                  : "Publish synthesis to ledger"}
+                  : notice?.screening ? "Retry publication after review" : "Publish synthesis to ledger"}
               </button>
             ) : (
               <p className="quiet">
@@ -122,8 +137,8 @@ export function SynthesisDraftsPanel({
                 <code>{draft.published_by_principal_id}</code>.
               </p>
             )}
-          </li>
-        ))}
+          </li>;
+        })}
       </ul>
     </section>
   );

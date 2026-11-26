@@ -7,6 +7,7 @@ import {
 
 mock.module("server-only", () => ({}));
 const { stoaProblemPublicationPreview, stoaPublishProblem } = await import("../../lib/stoa");
+const { stoaPublishSynthesisDraft } = await import("../../lib/problem-governance");
 const envKeys = ["STOA_ORIGIN", "SERVICE_ENVELOPE_PRIVATE_KEY_HEX", "SERVICE_ENVELOPE_KID"] as const;
 const realFetch = globalThis.fetch;
 let previous: Map<string, string | undefined>;
@@ -107,4 +108,33 @@ test("oversized private previews are bounded and failures do not expose response
   const result = await stoaProblemPublicationPreview(publicationSponsor, publicationProblem);
   expect(result).toEqual({ ok: false, reason: "unreachable" });
   expect(JSON.stringify(result)).not.toContain("PRIVATE_PREVIEW_BODY");
+});
+
+test("synthesis publication recognizes private screening decisions and only accepts a bound public receipt", async () => {
+  const id = "SYNTH-SCREENED";
+  const caseId = "QC-" + "0".repeat(26);
+  const appeal = "SPONSOR_APPEAL_AVAILABLE";
+  const publish = () => stoaPublishSynthesisDraft(publicationSponsor, publicationProblem, id);
+  for (const [status, screening] of [
+    [202, { code: "SCREENING_HOLD", appeal, coarse_category: "off-topic", case_id: caseId }],
+    [202, { code: "SCREENING_HOLD", appeal, posture: "quarantine-first" }],
+    [403, { code: "POLICY_DENIED", appeal, coarse_category: "spam-commercial", case_id: caseId }],
+  ] as const) {
+    globalThis.fetch = mock(async () => Response.json(screening, { status })) as unknown as typeof fetch;
+    expect(await publish()).toMatchObject({ ok: false, reason: "refused", status, screening });
+  }
+
+  const receipt = {
+    problem_id: publicationProblem, synthesis_id: id, state: "published", covers_through: 1,
+    anchors_count: 1, dropped_single_author_count: 0, author_fellow_id: "F-AUTHOR",
+    published_by_principal_id: publicationSponsor, event_id: "E-SYNTH", sequence: 2,
+    published_at: "2026-10-27T00:00:00.000Z",
+  };
+  // A 202 carrying even a receipt-shaped body cannot turn a hold into a public event.
+  globalThis.fetch = mock(async () => Response.json(receipt, { status: 202 })) as unknown as typeof fetch;
+  expect(await publish()).toEqual({ ok: false, reason: "unreachable" });
+  for (const status of [201, 200]) {
+    globalThis.fetch = mock(async () => Response.json(receipt, { status })) as unknown as typeof fetch;
+    expect(await publish()).toEqual({ ok: true, data: receipt });
+  }
 });

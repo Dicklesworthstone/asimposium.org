@@ -4,6 +4,7 @@ import type {
   SponsorProblemGovernanceResponse,
   SynthesisDraftListResponse,
   SynthesisDraftRecord,
+  SynthesisDraftPublishResponse,
 } from "@asimposium/contracts";
 import { SYNTHESES_SCHEMA_ID, type SynthesesListResponse } from "@asimposium/contracts/syntheses";
 import { CLAIMS_LIST_SCHEMA_ID, type ClaimsListResponse } from "@asimposium/contracts/claims-list";
@@ -25,6 +26,7 @@ let failRead: boolean;
 let draftResult: StoaCall<SynthesisDraftListResponse>;
 const draftReads: unknown[][] = [];
 const publishCalls: unknown[][] = [];
+let publishResult: StoaCall<SynthesisDraftPublishResponse>;
 const reads: unknown[][] = [];
 let governanceResult: StoaCall<SponsorProblemGovernanceResponse>;
 const governanceReads: unknown[][] = [];
@@ -70,7 +72,7 @@ beforeAll(async () => {
     },
     stoaPublishSynthesisDraft: async (...args: unknown[]) => {
       publishCalls.push(args);
-      return { ok: false, reason: "refused", status: 403 };
+      return publishResult;
     },
     stoaProblemGovernance: async (...args: unknown[]) => {
       governanceReads.push(args);
@@ -105,6 +107,7 @@ beforeEach(() => {
   reads.length = 0;
   draftReads.length = 0;
   publishCalls.length = 0;
+  publishResult = { ok: false, reason: "refused", status: 403 };
   draftResult = { ok: false, reason: "unreachable" };
   governanceResult = { ok: false, reason: "refused", status: 404 };
   governanceReads.length = 0;
@@ -571,4 +574,32 @@ test("publication checks the current account again before submitting the private
   const refused = await publishSynthesisDraftAction(original, problem_id, synthesis_id);
   expect(publishCalls).toEqual([[original, problem_id, synthesis_id]]);
   expect(refused.ok).toBe(false);
+});
+
+test("a synthesis screening decision gives the accountable sponsor coarse case guidance before a retry", async () => {
+  const { publishSynthesisDraftAction } = await import("../../app/console/problems/[problem]/actions");
+  identity = "usr_steward";
+  const caseId = "QC-" + "0".repeat(26);
+  for (const screening of [
+    { code: "SCREENING_HOLD", appeal: "SPONSOR_APPEAL_AVAILABLE", posture: "quarantine-first" },
+    { code: "SCREENING_HOLD", appeal: "SPONSOR_APPEAL_AVAILABLE", coarse_category: "off-topic", case_id: caseId },
+    { code: "POLICY_DENIED", appeal: "SPONSOR_APPEAL_AVAILABLE", coarse_category: "spam-commercial", case_id: caseId },
+  ] as const) {
+    publishResult = {
+      ok: false, reason: "refused", status: screening.code === "POLICY_DENIED" ? 403 : 202, screening,
+    };
+    const result = await publishSynthesisDraftAction(identity, researchSynthesis.problem_id, researchSynthesis.synthesis_id);
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("Screening decision became a publication receipt");
+    expect(result.screening?.code).toBe(screening.code);
+    expect(result.message).toContain("did not publish");
+    if ("case_id" in screening) {
+      expect(result.screening?.caseId).toBe(caseId);
+      expect(result.message).toContain("accountable sponsor");
+      expect(result.message).toContain(screening.coarse_category);
+    } else {
+      expect(result.screening?.caseId).toBeUndefined();
+      expect(result.message).toContain("Check with a moderator");
+    }
+  }
 });

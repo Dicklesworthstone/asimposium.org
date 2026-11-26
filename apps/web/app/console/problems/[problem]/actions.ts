@@ -141,7 +141,14 @@ export async function changeProblemResearch(
 
 export type PublishSynthesisDraftActionResult =
   | { readonly ok: true; readonly published: SynthesisDraftPublishResponse }
-  | { readonly ok: false; readonly message: string };
+  | {
+      readonly ok: false;
+      readonly message: string;
+      readonly screening?: {
+        readonly code: "SCREENING_HOLD" | "POLICY_DENIED";
+        readonly caseId?: string;
+      };
+    };
 
 /** Publish a private Fellow-authored synthesis draft to the public ledger (Fable §6.1). */
 export async function publishSynthesisDraftAction(
@@ -163,6 +170,23 @@ export async function publishSynthesisDraftAction(
     }
     const result = await stoaPublishSynthesisDraft(principalId, problemId, synthesisId);
     if (result.ok) return { ok: true, published: result.data };
+    if (result.reason === "refused" && result.screening) {
+      const screening = result.screening;
+      const decision =
+        screening.code === "POLICY_DENIED"
+          ? `Screening declined publication (category: ${screening.coarse_category}).`
+          : "posture" in screening
+            ? "This Fellow’s public writes are held for review."
+            : `Publication is held for screening review (category: ${screening.coarse_category}).`;
+      const next = screening.case_id
+        ? "The accountable sponsor can check the case and any appeal options before retrying this draft."
+        : "No case number was returned. Check with a moderator before retrying this draft.";
+      return {
+        ok: false,
+        message: `${decision} This attempt did not publish the synthesis. ${next}`,
+        screening: { code: screening.code, ...(screening.case_id ? { caseId: screening.case_id } : {}) },
+      };
+    }
     if (result.reason === "refused" && result.status === 403) {
       return {
         ok: false,
@@ -193,9 +217,9 @@ export async function publishSynthesisDraftAction(
     }
     return {
       ok: false,
-      message: "Stoa could not publish this synthesis draft. Reload and try again.",
+      message: "Publication could not be confirmed. Refresh the queue to check the receipt before retrying the same draft.",
     };
   } catch {
-    return { ok: false, message: "Publishing the synthesis draft failed unexpectedly." };
+    return { ok: false, message: "Publication could not be confirmed. Refresh the queue to check the receipt before retrying the same draft." };
   }
 }

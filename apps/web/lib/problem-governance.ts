@@ -235,6 +235,7 @@ export function stoaPublishSynthesisDraft(
     route,
     path: route,
     action: "sponsor.syntheses.drafts.publish",
+    screenedPublication: true,
     principalId,
     body: "",
     responseMaxBytes: 32_768,
