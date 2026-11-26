@@ -37,6 +37,20 @@ export function wrongPrincipalResponse(policy: string): NextResponse {
 }
 
 /**
+ * True when a request path carries a backslash, raw or percent-encoded. No
+ * Agora route contains one. On Vercel such a path fell through to the page
+ * loader (`Cannot find module './.next/server/pages/results%5C.js'`) and
+ * answered 500 instead of 404 (asimposiumorg-q22o). Only the path is tested:
+ * a query such as a LaTeX search may legitimately carry backslashes.
+ */
+export function pathHasBackslash(pathname: string): boolean {
+  return /\\|%5c/i.test(pathname);
+}
+
+/** An unrouted, clean path: rewriting to it renders the themed 404. */
+export const UNROUTED_PATH = "/__unrouted";
+
+/**
  * A fresh script nonce per request (Fable §14 strict CSP). Next reads the
  * nonce from the request's policy and stamps it on its own inline scripts;
  * the root layout stamps it on the theme script. Any other inline script,
@@ -51,7 +65,11 @@ export function proxy(request: NextRequest) {
   const requestHeaders = new Headers(request.headers);
   requestHeaders.set("x-nonce", nonce);
   requestHeaders.set("content-security-policy", policy);
-  const response = NextResponse.next({ request: { headers: requestHeaders } });
+  const response = pathHasBackslash(request.nextUrl.pathname)
+    ? NextResponse.rewrite(new URL(UNROUTED_PATH, request.url), {
+        request: { headers: requestHeaders },
+      })
+    : NextResponse.next({ request: { headers: requestHeaders } });
   response.headers.set("content-security-policy", policy);
   return response;
 }

@@ -2,7 +2,38 @@ import { describe, expect, test } from "bun:test";
 import { REPORT_TARGET_PATTERN } from "@asimposium/contracts";
 import { NextRequest } from "next/server";
 
-import { isFellowBearerAuthorization, proxy } from "../../proxy.ts";
+import {
+  isFellowBearerAuthorization,
+  pathHasBackslash,
+  proxy,
+  UNROUTED_PATH,
+} from "../../proxy.ts";
+
+describe("paths carrying a backslash (asimposiumorg-q22o)", () => {
+  test("detects raw and percent-encoded backslashes in the path only", () => {
+    for (const path of ["/results%5C", "/results%5c", "/%5C", "/problems%5Cx", "/a\\b"]) {
+      expect(pathHasBackslash(path)).toBe(true);
+    }
+    for (const path of ["/", "/results", "/search", "/p/P-4DSP/claims/C-1@2", "/a%5Bb%5D"]) {
+      expect(pathHasBackslash(path)).toBe(false);
+    }
+  });
+
+  test("rewrites a backslash path to the unrouted 404 with the same CSP nonce policy", () => {
+    for (const path of ["/results%5C", "/%5c", "/problems%5C"]) {
+      const response = proxy(new NextRequest(`https://asimposium.org${path}`));
+      const rewrite = response.headers.get("x-middleware-rewrite") ?? "";
+      expect(new URL(rewrite).pathname).toBe(UNROUTED_PATH);
+      expect(response.headers.get("content-security-policy")).toContain("nonce-");
+    }
+  });
+
+  test("a backslash in the query (a LaTeX search) is not rewritten", () => {
+    const response = proxy(new NextRequest("https://asimposium.org/search?q=%5Cfrac%7B1%7D%7B2%7D"));
+    expect(response.headers.get("x-middleware-rewrite")).toBeNull();
+    expect(response.status).toBe(200);
+  });
+});
 
 describe("Agora WRONG_PRINCIPAL guard for Fellow bearer tokens", () => {
   test("detects asimp_ag_ bearer tokens case-insensitively and ignores unrelated headers", () => {
