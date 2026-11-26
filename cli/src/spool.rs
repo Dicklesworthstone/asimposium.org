@@ -10,8 +10,10 @@
 //! - `in_flight`: attempted at least once with an ambiguous transport outcome.
 //!   Retains its EXACT original `idempotency_key` and canonical payload bytes.
 //!   Replayed safely ONLY while the 24h server replay window is live (measured
-//!   against server `Date` headers where available).
-//! - `unknown_commit`: an `in_flight` item whose 24h window expired without
+//!   against comparable server `Date` headers). A temporary missing current
+//!   clock leaves a valid server-timed attempt unchanged until the next sync.
+//! - `unknown_commit`: an `in_flight` item whose replay window expired or cannot
+//!   be established from comparable server timestamps, without
 //!   authoritative server confirmation. `sync` stops it here, preserves ALL
 //!   evidence, prints read-only reconciliation commands, and NEVER rotates its
 //!   key, resubmits, marks success, or deletes it.
@@ -43,7 +45,7 @@ use std::{
     io::{Read, Write},
     path::{Component, Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
 static ATOMIC_TMP_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -52,6 +54,12 @@ static ATOMIC_TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 pub const REPLAY_WINDOW_SECONDS: u64 = 24 * 60 * 60;
 /// Maximum JSON request body size accepted into the spool (same 512 KiB bound as Worker).
 pub const MAX_SPOOL_BODY_BYTES: u64 = 512 * 1024;
+// JSON string escaping can expand the original body sixfold on disk.
+const MAX_SPOOL_ITEM_BYTES: u64 = MAX_SPOOL_BODY_BYTES * 6 + 32 * 1024;
+const MAX_SPOOL_EPOCH_SECONDS: u64 = 253_402_300_799;
+// Reserve the complete clock probe and POST deadlines plus two seconds for
+// HTTP Date/Age granularity and elapsed-time rounding.
+const REPLAY_SEND_MARGIN_SECONDS: u64 = READ_TIMEOUT.as_secs() * 2 + 2;
 /// Provenance header carrying `client_occurred_at` without mutating strict JSON schemas.
 pub const CLIENT_OCCURRED_AT_HEADER: &str = "asimp-client-occurred-at";
 
@@ -278,6 +286,9 @@ impl SpoolItem {
     }
 
     pub fn from_disk_json(raw: &str) -> Result<Self, &'static str> {
+        if raw.len() as u64 > MAX_SPOOL_ITEM_BYTES {
+            return Err("Spool item exceeds the storage bound; preserve it for recovery.");
+        }
         let v: Value = serde_json::from_str(raw).map_err(|_| "Spool item is not valid JSON.")?;
         let obj = v.as_object().ok_or("Spool item is not a JSON object.")?;
         if obj.get("schema").and_then(Value::as_str) != Some("asimp.spool-item.v1") {
@@ -289,17 +300,30 @@ impl SpoolItem {
                 .map(str::to_owned)
                 .ok_or("Spool item missing required string field.")
         };
-        let opt_str =
-            |k: &str| -> Option<String> { obj.get(k).and_then(Value::as_str).map(str::to_owned) };
-        let state = SpoolState::parse(&req_str("state")?).ok_or("Invalid spool item state.")?;
-        Ok(Self {
+        let opt_str = |k: &str| -> Result<Option<String>, &'static str> {
+            match obj.get(k) {
+                None | Some(Value::Null) => Ok(None),
+                Some(Value::String(value)) => Ok(Some(value.clone())),
+                _ => Err("Spool item contains invalid optional text metadata."),
+            }
+        };
+        let opt_u64 = |k: &str| -> Result<Option<u64>, &'static str> {
+            match obj.get(k) {
+                None | Some(Value::Null) => Ok(None),
+                Some(value) => value
+                    .as_u64()
+                    .map(Some)
+                    .ok_or("Spool item contains invalid numeric metadata."),
+            }
+        };
+        let item = Self {
             id: req_str("id")?,
             origin: req_str("origin")?,
             path: req_str("path")?,
-            session_id: opt_str("session_id"),
-            problem_id: opt_str("problem_id"),
-            state,
-            idempotency_key: opt_str("idempotency_key"),
+            session_id: opt_str("session_id")?,
+            problem_id: opt_str("problem_id")?,
+            state: SpoolState::parse(&req_str("state")?).ok_or("Invalid spool item state.")?,
+            idempotency_key: opt_str("idempotency_key")?,
             body_json: req_str("body_json")?,
             body_sha256: req_str("body_sha256")?,
             client_occurred_at: req_str("client_occurred_at")?,
@@ -307,19 +331,94 @@ impl SpoolItem {
                 .get("created_epoch_s")
                 .and_then(Value::as_u64)
                 .ok_or("Spool item missing created_epoch_s.")?,
-            first_attempted_epoch_s: obj.get("first_attempted_epoch_s").and_then(Value::as_u64),
-            first_attempted_clock: opt_str("first_attempted_clock"),
-            attempts: obj.get("attempts").and_then(Value::as_u64).unwrap_or(0) as u32,
-            last_http_status: obj
-                .get("last_http_status")
+            first_attempted_epoch_s: opt_u64("first_attempted_epoch_s")?,
+            first_attempted_clock: opt_str("first_attempted_clock")?,
+            attempts: obj
+                .get("attempts")
                 .and_then(Value::as_u64)
-                .and_then(|n| u16::try_from(n).ok()),
-            last_error_code: opt_str("last_error_code"),
-            receipt_sha256: opt_str("receipt_sha256"),
-            server_event_id: opt_str("server_event_id"),
-            server_object_id: opt_str("server_object_id"),
-            resolution_note: opt_str("resolution_note"),
-        })
+                .and_then(|value| u32::try_from(value).ok())
+                .ok_or("Spool item contains an invalid attempt count.")?,
+            last_http_status: opt_u64("last_http_status")?
+                .map(|value| {
+                    u16::try_from(value)
+                        .ok()
+                        .filter(|status| (100..=599).contains(status))
+                        .ok_or("Spool item contains an invalid HTTP status.")
+                })
+                .transpose()?,
+            last_error_code: opt_str("last_error_code")?,
+            receipt_sha256: opt_str("receipt_sha256")?,
+            server_event_id: opt_str("server_event_id")?,
+            server_object_id: opt_str("server_object_id")?,
+            resolution_note: opt_str("resolution_note")?,
+        };
+        item.validate()?;
+        Ok(item)
+    }
+
+    fn validate(&self) -> Result<(), &'static str> {
+        if !is_safe_spool_id(&self.id)
+            || self.origin.len() > 2048
+            || self.path.len() > 2048
+            || build_url(&self.origin, &self.path).is_err()
+            || self
+                .session_id
+                .as_deref()
+                .is_some_and(|id| !safe_session_segment(id))
+            || self
+                .problem_id
+                .as_deref()
+                .is_some_and(|id| !is_valid_problem_id(id))
+        {
+            return Err("Spool item has invalid identity or request metadata.");
+        }
+        if self.body_json.len() as u64 > MAX_SPOOL_BODY_BYTES {
+            return Err("Spool item request exceeds the 512 KiB Worker bound.");
+        }
+        let body: Value = serde_json::from_str(&self.body_json)
+            .map_err(|_| "Spool item request is not valid JSON.")?;
+        if !body.is_object() {
+            return Err("Spool item request is not a JSON object.");
+        }
+        let canonical = canonical_json(&body).map_err(|_| "Cannot verify the spool request.")?;
+        if self.body_sha256 != sha256_hex(canonical.as_bytes()) {
+            return Err("Spool request digest changed; preserve it and reconcile before retrying.");
+        }
+        if self.created_epoch_s > MAX_SPOOL_EPOCH_SECONDS
+            || self.client_occurred_at != format_utc_rfc3339(self.created_epoch_s)
+            || self
+                .first_attempted_epoch_s
+                .is_some_and(|value| value > MAX_SPOOL_EPOCH_SECONDS)
+            || self
+                .idempotency_key
+                .as_deref()
+                .is_some_and(|key| !is_safe_idempotency_key(key))
+        {
+            return Err("Spool item has invalid timestamp or idempotency metadata.");
+        }
+        let attempted = self.attempts > 0;
+        let clock = self.first_attempted_clock.as_deref();
+        let pending = matches!(self.state, SpoolState::InFlight | SpoolState::UnknownCommit);
+        if attempted != self.first_attempted_epoch_s.is_some()
+            || attempted != self.first_attempted_clock.is_some()
+            || (attempted
+                && (self.idempotency_key.is_none()
+                    || !matches!(clock, Some("server" | "local"))))
+            || (self.state == SpoolState::Unsent
+                && (attempted
+                    || self.last_http_status.is_some()
+                    || self.last_error_code.is_some()
+                    || self.receipt_sha256.is_some()
+                    || self.server_event_id.is_some()
+                    || self.server_object_id.is_some()
+                    || self.resolution_note.is_some()))
+            || (pending && !attempted)
+        {
+            return Err(
+                "Spool item has contradictory attempt history; preserve its original key and reconcile before retrying.",
+            );
+        }
+        Ok(())
     }
 
     /// Safe metadata projection — NEVER includes raw request body bytes.
@@ -479,6 +578,31 @@ fn ensure_private_dir(dir: &Path) -> Result<(), &'static str> {
     Ok(())
 }
 
+// Keep the lock file: the OS releases the advisory lock on close or process
+// death. Removing it would let another process lock a different inode.
+fn lock_spool_mutation(dir: &Path) -> Result<fs::File, &'static str> {
+    ensure_private_dir(dir)?;
+    let path = dir.join("write.lock");
+    match fs::symlink_metadata(&path) {
+        Ok(meta) if !meta.is_file() => return Err("Spool lock is not a regular file."),
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err("Cannot inspect the spool lock."),
+    }
+    let mut options = fs::OpenOptions::new();
+    options.create(true).read(true).write(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options.open(&path).map_err(|_| "Cannot open the spool lock.")?;
+    file.try_lock().map_err(|_| {
+        "Another spool writer is active or locking is unavailable; retry after it finishes."
+    })?;
+    Ok(file)
+}
+
 fn write_private_atomic(target: &Path, bytes: &[u8]) -> Result<(), &'static str> {
     let parent = target.parent().ok_or("Invalid spool target path.")?;
     ensure_private_dir(parent)?;
@@ -548,7 +672,17 @@ pub fn format_utc_rfc3339(epoch_secs: u64) -> String {
 /// into Unix epoch seconds without external crates.
 pub fn parse_http_date(header: &str) -> Option<u64> {
     let parts: Vec<&str> = header.split_whitespace().collect();
-    if parts.len() != 6 || parts[5] != "GMT" {
+    if parts.len() != 6
+        || !matches!(
+            parts[0],
+            "Mon," | "Tue," | "Wed," | "Thu," | "Fri," | "Sat," | "Sun,"
+        )
+        || parts[5] != "GMT"
+        || parts[1].len() != 2
+        || !parts[1].bytes().all(|b| b.is_ascii_digit())
+        || parts[3].len() != 4
+        || !parts[3].bytes().all(|b| b.is_ascii_digit())
+    {
         return None;
     }
     let day: i64 = parts[1].parse().ok()?;
@@ -568,14 +702,28 @@ pub fn parse_http_date(header: &str) -> Option<u64> {
         _ => return None,
     };
     let year: i64 = parts[3].parse().ok()?;
+    if !(1970..=9999).contains(&year) {
+        return None;
+    }
+    let leap_year = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let month_days = match month {
+        2 if leap_year => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    };
     let time: Vec<&str> = parts[4].split(':').collect();
-    if time.len() != 3 {
+    if time.len() != 3
+        || time
+            .iter()
+            .any(|part| part.len() != 2 || !part.bytes().all(|b| b.is_ascii_digit()))
+    {
         return None;
     }
     let hour: u64 = time[0].parse().ok()?;
     let min: u64 = time[1].parse().ok()?;
     let sec: u64 = time[2].parse().ok()?;
-    if !(1..=31).contains(&day) || hour > 23 || min > 59 || sec > 59 || year < 1970 {
+    if !(1..=month_days).contains(&day) || hour > 23 || min > 59 || sec > 59 {
         return None;
     }
     // Howard Hinnant days_from_civil
@@ -665,24 +813,52 @@ pub fn append_audit_log(spool_dir: &Path, entry: Value) {
     }
 }
 
+fn read_item_file(path: &Path, expected_id: &str) -> Result<SpoolItem, String> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|_| "Cannot inspect a spool item; preserve the spool for recovery.".to_owned())?;
+    if !metadata.is_file() || metadata.len() > MAX_SPOOL_ITEM_BYTES {
+        return Err("Spool item is not a bounded regular file; preserve it.".to_owned());
+    }
+    let file = fs::File::open(path)
+        .map_err(|_| "Cannot read a spool item; preserve the spool for recovery.".to_owned())?;
+    let mut raw = String::new();
+    file.take(MAX_SPOOL_ITEM_BYTES + 1)
+        .read_to_string(&mut raw)
+        .map_err(|_| "Cannot read a complete spool item; preserve it for recovery.".to_owned())?;
+    let item = SpoolItem::from_disk_json(&raw).map_err(str::to_owned)?;
+    if item.id != expected_id {
+        return Err("Spool item ID does not match its filename; no writes were sent.".to_owned());
+    }
+    Ok(item)
+}
+
 pub fn load_all_items(spool_dir: &Path) -> Result<Vec<SpoolItem>, String> {
     let items_dir = spool_dir.join("items");
-    if !items_dir.exists() {
-        return Ok(Vec::new());
+    match fs::symlink_metadata(&items_dir) {
+        Ok(meta) if !meta.is_dir() => {
+            return Err("Spool items must be stored in a regular directory.".to_owned());
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(_) => return Err("Cannot inspect the spool items directory.".to_owned()),
     }
     let entries = fs::read_dir(&items_dir)
         .map_err(|_| "Cannot read spool items directory; check permissions.".to_owned())?;
     let mut items = Vec::new();
-    for entry in entries.flatten() {
+    for entry in entries {
+        let entry = entry.map_err(|_| "Cannot enumerate every spool item.".to_owned())?;
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some("json") {
             continue;
         }
-        if let Ok(raw) = fs::read_to_string(&path)
-            && let Ok(item) = SpoolItem::from_disk_json(&raw)
-        {
-            items.push(item);
-        }
+        let id = path
+            .file_stem()
+            .and_then(|name| name.to_str())
+            .filter(|id| is_safe_spool_id(id))
+            .ok_or_else(|| "Spool item filename is invalid; preserve it for recovery.".to_owned())?;
+        // Never turn malformed or unreadable work into an apparently empty
+        // successful sync. Validate the whole queue before sending any write.
+        items.push(read_item_file(&path, id)?);
     }
     items.sort_by(|a, b| {
         a.created_epoch_s
@@ -693,6 +869,9 @@ pub fn load_all_items(spool_dir: &Path) -> Result<Vec<SpoolItem>, String> {
 }
 
 pub fn save_item(spool_dir: &Path, item: &SpoolItem) -> Result<(), &'static str> {
+    if !is_safe_spool_id(&item.id) {
+        return Err("Invalid spool item ID; no file was written.");
+    }
     let target = spool_dir.join("items").join(format!("{}.json", item.id));
     let body = serde_json::to_string_pretty(&item.to_disk_json())
         .map_err(|_| "Cannot serialize spool item.")?;
@@ -735,9 +914,29 @@ fn probe_server_clock_http(origin: &str, protocol_version: &str) -> Option<u64> 
     let resp = agent
         .get(&url)
         .set(PROTOCOL_VERSION_HEADER, protocol_version)
+        .set("cache-control", "no-cache, max-age=0")
         .call()
         .ok()?;
-    resp.header("date").and_then(parse_http_date)
+    if resp.status() != 200 {
+        return None;
+    }
+    fresh_server_clock(resp.header("date"), resp.header("age"))
+}
+
+/// A cached Date is not a current clock sample. Revalidation is requested above;
+/// if an intermediary still supplies an aged response, retain fresh-write support
+/// without using that response to authorize an ambiguous retry.
+pub(crate) fn fresh_server_clock(date: Option<&str>, age: Option<&str>) -> Option<u64> {
+    if let Some(age) = age {
+        let age = age.trim();
+        if age.is_empty()
+            || !age.bytes().all(|b| b.is_ascii_digit())
+            || age.parse::<u64>().ok()? != 0
+        {
+            return None;
+        }
+    }
+    date.and_then(parse_http_date)
 }
 
 fn post_spool_item_http(
@@ -780,6 +979,9 @@ fn post_spool_item_http(
                 .take(crate::MAX_BODY_BYTES.saturating_add(1))
                 .read_to_end(&mut bytes)
                 .map_err(|_| SyncPostError::Network { server_epoch_s })?;
+            if bytes.len() as u64 > crate::MAX_BODY_BYTES {
+                return Err(SyncPostError::Network { server_epoch_s });
+            }
             let body =
                 String::from_utf8(bytes).map_err(|_| SyncPostError::Network { server_epoch_s })?;
             Ok(SyncPostResponse {
@@ -851,21 +1053,49 @@ fn extract_safe_receipt_ids(body: &str) -> (Option<String>, Option<String>) {
 pub enum ReplayDecision {
     SendFresh,
     ReplayInWindow,
+    AwaitServerClock,
     FreezeUnknownCommit,
     SkipCommitted,
     SkipRejected,
     SkipUnknownCommit,
 }
 
-pub fn decide_replay(item: &SpoolItem, effective_now_s: u64) -> ReplayDecision {
+pub fn decide_replay(
+    item: &SpoolItem,
+    effective_now_s: u64,
+    server_time_available: bool,
+) -> ReplayDecision {
     match item.state {
         SpoolState::Unsent => ReplayDecision::SendFresh,
         SpoolState::InFlight => {
-            let started = item.first_attempted_epoch_s.unwrap_or(item.created_epoch_s);
-            if effective_now_s.saturating_sub(started) >= REPLAY_WINDOW_SECONDS {
-                ReplayDecision::FreezeUnknownCommit
-            } else {
+            // A persisted local wall clock can jump during sleep, correction or
+            // restart. Comparing it with a later server clock is also unsafe:
+            // saturating a negative age to zero can reopen an expired write.
+            // V1 has no durable monotonic anchor or clock-offset evidence.
+            let has_server_attempt = item.first_attempted_clock.as_deref() == Some("server")
+                && item.attempts > 0
+                && item
+                    .first_attempted_epoch_s
+                    .is_some_and(|started| started <= MAX_SPOOL_EPOCH_SECONDS)
+                && item
+                    .idempotency_key
+                    .as_deref()
+                    .is_some_and(is_safe_idempotency_key);
+            if !has_server_attempt {
+                return ReplayDecision::FreezeUnknownCommit;
+            }
+            if !server_time_available {
+                // A temporary probe failure is recoverable. Do not compare a
+                // retained server timestamp with the local fallback or freeze it.
+                return ReplayDecision::AwaitServerClock;
+            }
+            let age = item
+                .first_attempted_epoch_s
+                .and_then(|started| effective_now_s.checked_sub(started));
+            if age.is_some_and(|age| age < REPLAY_WINDOW_SECONDS - REPLAY_SEND_MARGIN_SECONDS) {
                 ReplayDecision::ReplayInWindow
+            } else {
+                ReplayDecision::FreezeUnknownCommit
             }
         }
         SpoolState::Committed => ReplayDecision::SkipCommitted,
@@ -1138,13 +1368,9 @@ pub fn run_spool(cli: &Cli) -> CliOutput {
                 Err(msg) => return input_error(&msg),
             };
             let path = dir.join("items").join(format!("{id}.json"));
-            let raw = match fs::read_to_string(&path) {
-                Ok(r) => r,
-                Err(_) => return input_error("Spool item not found."),
-            };
-            let item = match SpoolItem::from_disk_json(&raw) {
-                Ok(i) => i,
-                Err(msg) => return input_error(msg),
+            let item = match read_item_file(&path, id) {
+                Ok(item) => item,
+                Err(msg) => return input_error(&msg),
             };
             CliOutput {
                 exit_code: 0,
@@ -1209,14 +1435,14 @@ pub fn run_spool(cli: &Cli) -> CliOutput {
                 Ok(d) => d,
                 Err(msg) => return input_error(&msg),
             };
-            let path = dir.join("items").join(format!("{id}.json"));
-            let raw = match fs::read_to_string(&path) {
-                Ok(r) => r,
-                Err(_) => return input_error("Spool item not found."),
-            };
-            let mut item = match SpoolItem::from_disk_json(&raw) {
-                Ok(i) => i,
+            let _lock = match lock_spool_mutation(&dir) {
+                Ok(lock) => lock,
                 Err(msg) => return input_error(msg),
+            };
+            let path = dir.join("items").join(format!("{id}.json"));
+            let mut item = match read_item_file(&path, id) {
+                Ok(item) => item,
+                Err(msg) => return input_error(&msg),
             };
             if item.state == SpoolState::Committed {
                 return input_error("Spool item is already committed.");
@@ -1541,10 +1767,26 @@ pub fn run_sync_with_io(
     {
         return input_error("Invalid --item spool ID.");
     }
+    let clock_started = Instant::now();
+    let _lock = if args.dry_run {
+        None
+    } else {
+        match lock_spool_mutation(&dir) {
+            Ok(lock) => Some(lock),
+            Err(msg) => return input_error(msg),
+        }
+    };
     let mut items = match load_all_items(&dir) {
         Ok(list) => list,
         Err(msg) => return input_error(&msg),
     };
+    if args
+        .item
+        .as_ref()
+        .is_some_and(|id| !items.iter().any(|item| &item.id == id && item.origin == origin))
+    {
+        return input_error("Selected spool item is absent for this origin; no writes were sent.");
+    }
 
     let effective_now = server_epoch_s.unwrap_or(local_epoch_s);
     let clock_source = if server_epoch_s.is_some() {
@@ -1556,6 +1798,7 @@ pub fn run_sync_with_io(
     let mut committed = 0usize;
     let mut rejected = 0usize;
     let mut in_flight = 0usize;
+    let mut awaiting_server_clock = 0usize;
     let mut unknown_commit = 0usize;
     let mut skipped = 0usize;
     let mut outcomes: Vec<Value> = Vec::new();
@@ -1563,6 +1806,9 @@ pub fn run_sync_with_io(
     let mut fatal_protocol: Option<ProtocolMismatch> = None;
 
     for item in &mut items {
+        // The server sample predates queue loading and earlier network writes.
+        // Account for that elapsed time before each replay decision.
+        let effective_now = effective_now.saturating_add(clock_started.elapsed().as_secs());
         if let Some(target_id) = &args.item
             && &item.id != target_id
         {
@@ -1578,7 +1824,9 @@ pub fn run_sync_with_io(
             if !args.dry_run {
                 item.state = SpoolState::Rejected;
                 item.last_error_code = Some("NON_REPLAYABLE_PATH".to_owned());
-                let _ = save_item(&dir, item);
+                if let Err(msg) = save_item(&dir, item) {
+                    return input_error(msg);
+                }
             }
             rejected += 1;
             outcomes.push(json!({
@@ -1589,7 +1837,7 @@ pub fn run_sync_with_io(
             continue;
         }
 
-        let decision = decide_replay(item, effective_now);
+        let decision = decide_replay(item, effective_now, server_epoch_s.is_some());
         match decision {
             ReplayDecision::SkipCommitted
             | ReplayDecision::SkipRejected
@@ -1600,10 +1848,23 @@ pub fn run_sync_with_io(
                 }
                 continue;
             }
+            ReplayDecision::AwaitServerClock => {
+                in_flight += 1;
+                awaiting_server_clock += 1;
+                outcomes.push(json!({
+                    "id": item.id,
+                    "action": "awaiting_server_clock",
+                    "state": "in_flight",
+                    "remediation": "Retry asimp sync when a fresh server clock is available; the original body, key and attempt history are unchanged.",
+                }));
+                continue;
+            }
             ReplayDecision::FreezeUnknownCommit => {
                 if !args.dry_run {
                     item.state = SpoolState::UnknownCommit;
-                    let _ = save_item(&dir, item);
+                    if let Err(msg) = save_item(&dir, item) {
+                        return input_error(msg);
+                    }
                     append_audit_log(
                         &dir,
                         json!({
@@ -1641,16 +1902,19 @@ pub fn run_sync_with_io(
                 if item.state == SpoolState::Unsent && item.idempotency_key.is_none() {
                     item.idempotency_key = Some(mint_idempotency_key(item));
                 }
-                let key = item
-                    .idempotency_key
-                    .clone()
-                    .unwrap_or_else(|| mint_idempotency_key(item));
+                let Some(key) = item.idempotency_key.clone() else {
+                    return input_error(
+                        "Attempted spool write has no retained key; preserve it and reconcile without resubmitting.",
+                    );
+                };
                 let url = match build_url(origin, &item.path) {
                     Ok(u) => u,
                     Err(_) => {
                         item.state = SpoolState::Rejected;
                         item.last_error_code = Some("INVALID_URL".to_owned());
-                        let _ = save_item(&dir, item);
+                        if let Err(msg) = save_item(&dir, item) {
+                            return input_error(msg);
+                        }
                         rejected += 1;
                         continue;
                     }
@@ -1659,7 +1923,9 @@ pub fn run_sync_with_io(
                 // DURABILITY BARRIER: persist `in_flight` + exact key + `first_attempted_epoch_s`
                 // BEFORE sending bytes over the wire so a mid-flight kill NEVER loses the key!
                 if item.first_attempted_epoch_s.is_none() {
-                    item.first_attempted_epoch_s = Some(effective_now);
+                    // Keep the original lower-bound sample: advancing it could
+                    // extend a later replay window beyond the server's expiry.
+                    item.first_attempted_epoch_s = Some(server_epoch_s.unwrap_or(local_epoch_s));
                     item.first_attempted_clock = Some(clock_source.to_owned());
                 }
                 item.state = SpoolState::InFlight;
@@ -1677,6 +1943,32 @@ pub fn run_sync_with_io(
                     &item.body_json,
                 ) {
                     Ok(resp) => {
+                        let valid_receipt = (200..=299).contains(&resp.status)
+                            && resp.body.len() as u64 <= crate::MAX_BODY_BYTES
+                            && serde_json::from_str::<Value>(&resp.body)
+                                .ok()
+                                .is_some_and(|value| {
+                                    value.is_object()
+                                        && value.get("ok").and_then(Value::as_bool) != Some(false)
+                                });
+                        if !valid_receipt {
+                            // The write may have committed despite a truncated,
+                            // malformed or contradictory success response.
+                            item.last_http_status = (100..=599)
+                                .contains(&resp.status)
+                                .then_some(resp.status);
+                            item.last_error_code = Some("RECEIPT_UNAVAILABLE".to_owned());
+                            if let Err(msg) = save_item(&dir, item) {
+                                return input_error(msg);
+                            }
+                            in_flight += 1;
+                            outcomes.push(json!({
+                                "id": item.id,
+                                "action": "ambiguous_receipt_retained_key",
+                                "state": "in_flight",
+                            }));
+                            continue;
+                        }
                         if let Some(notice) = resp.deprecation {
                             stderr_notices.push_str(&notice.render_stderr());
                         }
@@ -1687,7 +1979,9 @@ pub fn run_sync_with_io(
                         item.receipt_sha256 = Some(sha256_hex(resp.body.as_bytes()));
                         item.server_event_id = ev_id;
                         item.server_object_id = obj_id;
-                        let _ = save_item(&dir, item);
+                        if let Err(msg) = save_item(&dir, item) {
+                            return input_error(msg);
+                        }
                         append_audit_log(
                             &dir,
                             json!({
@@ -1733,7 +2027,9 @@ pub fn run_sync_with_io(
                             item.state = SpoolState::InFlight;
                             in_flight += 1;
                         }
-                        let _ = save_item(&dir, item);
+                        if let Err(msg) = save_item(&dir, item) {
+                            return input_error(msg);
+                        }
                         append_audit_log(
                             &dir,
                             json!({
@@ -1758,7 +2054,9 @@ pub fn run_sync_with_io(
                     }) => {
                         item.state = SpoolState::InFlight;
                         item.last_error_code = Some("NETWORK_AMBIGUOUS".to_owned());
-                        let _ = save_item(&dir, item);
+                        if let Err(msg) = save_item(&dir, item) {
+                            return input_error(msg);
+                        }
                         append_audit_log(
                             &dir,
                             json!({
@@ -1799,6 +2097,7 @@ pub fn run_sync_with_io(
         "effective_time": format_utc_rfc3339(effective_now),
         "committed": committed,
         "in_flight": in_flight,
+        "awaiting_server_clock": awaiting_server_clock,
         "rejected": rejected,
         "unknown_commit": unknown_commit,
         "skipped": skipped,
@@ -1819,9 +2118,14 @@ pub fn run_sync_with_io(
     let mut out = format!(
         "asimp sync ({origin}, clock={clock_source}): committed={committed} in_flight={in_flight} rejected={rejected} unknown_commit={unknown_commit} skipped={skipped}\n"
     );
+    if awaiting_server_clock > 0 {
+        out.push_str(
+            "  WAITING: a fresh server clock is unavailable. Retry `asimp sync` when connectivity returns; attempted writes retain their original body, key and history.\n",
+        );
+    }
     if unknown_commit > 0 {
         out.push_str(
-            "  ACTION REQUIRED: one or more items passed the 24h server replay window without confirmation (state=unknown_commit). Run `asimp spool show <ID>` for read-only reconciliation commands; never rotate keys blindly.\n",
+            "  ACTION REQUIRED: one or more attempted writes have an expired or unverifiable server replay window (state=unknown_commit). Run `asimp spool show <ID>` for read-only reconciliation commands; never rotate keys blindly.\n",
         );
     }
     CliOutput {
@@ -1834,6 +2138,341 @@ pub fn run_sync_with_io(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_dir(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "asimp-spool-{label}-{}-{}-{}",
+            std::process::id(),
+            now_epoch_s(),
+            ATOMIC_TMP_SEQ.fetch_add(1, Ordering::Relaxed),
+        ))
+    }
+
+    fn test_item() -> SpoolItem {
+        SpoolItem {
+            id: "SP-1000-recovery".into(),
+            origin: "https://example.test".into(),
+            path: "/v1/sessions/S-1/promote".into(),
+            session_id: Some("S-1".into()),
+            problem_id: Some("P-4DSP".into()),
+            state: SpoolState::Unsent,
+            idempotency_key: None,
+            body_json: " { \"workshop_id\" : \"W-1\" }\n".into(),
+            body_sha256: sha256_hex(br#"{"workshop_id":"W-1"}"#),
+            client_occurred_at: format_utc_rfc3339(1_000),
+            created_epoch_s: 1_000,
+            first_attempted_epoch_s: None,
+            first_attempted_clock: None,
+            attempts: 0,
+            last_http_status: None,
+            last_error_code: None,
+            receipt_sha256: None,
+            server_event_id: None,
+            server_object_id: None,
+            resolution_note: None,
+        }
+    }
+
+    fn test_sync_cli(dir: &Path) -> Cli {
+        Cli {
+            origin: Some("https://example.test".into()),
+            identity: "default".into(),
+            protocol_version: None,
+            pop_key: None,
+            command: Command::Sync(Box::new(SyncArgs {
+                spool_dir: Some(dir.to_owned()),
+                item: None,
+                dry_run: false,
+                json: true,
+            })),
+        }
+    }
+
+    #[test]
+    fn persisted_items_require_exact_digest_key_and_attempt_history() {
+        let mut item = test_item();
+        item.state = SpoolState::InFlight;
+        item.idempotency_key = Some("original-key".into());
+        item.first_attempted_epoch_s = Some(2_000);
+        item.first_attempted_clock = Some("server".into());
+        item.attempts = 1;
+        let valid = item.to_disk_json();
+        assert!(SpoolItem::from_disk_json(&valid.to_string()).is_ok());
+        for (field, value) in [
+            ("id", json!("../escape")),
+            ("body_json", json!("{\"workshop_id\":\"W-changed\"}")),
+            ("body_sha256", json!("0".repeat(64))),
+            ("attempts", json!(u64::MAX)),
+            ("attempts", json!(0)),
+            ("idempotency_key", Value::Null),
+            ("idempotency_key", json!("bad\nheader")),
+            ("first_attempted_epoch_s", Value::Null),
+            ("first_attempted_clock", Value::Null),
+            ("first_attempted_clock", json!("invented")),
+            ("state", json!("unsent")),
+        ] {
+            let mut corrupt = valid.clone();
+            corrupt[field] = value;
+            assert!(
+                SpoolItem::from_disk_json(&corrupt.to_string()).is_err(),
+                "must refuse contradictory {field}"
+            );
+        }
+        let mut unsent_with_history = test_item().to_disk_json();
+        unsent_with_history["last_http_status"] = json!(422);
+        assert!(SpoolItem::from_disk_json(&unsent_with_history.to_string()).is_err());
+    }
+
+    #[test]
+    fn sync_preserves_corrupt_queue_and_refuses_before_any_post() {
+        let mut missing_key = test_item();
+        missing_key.id = "SP-2000-corrupt".into();
+        missing_key.state = SpoolState::InFlight;
+        missing_key.attempts = 1;
+        missing_key.first_attempted_epoch_s = Some(2_000);
+        missing_key.first_attempted_clock = Some("server".into());
+        for (label, raw) in [
+            ("truncated", "{\"schema\":".to_owned()),
+            ("mismatched-id", test_item().to_disk_json().to_string()),
+            ("lost-key", missing_key.to_disk_json().to_string()),
+        ] {
+            let dir = test_dir(label);
+            save_item(&dir, &test_item()).unwrap();
+            let corrupt_path = dir.join("items/SP-2000-corrupt.json");
+            fs::write(&corrupt_path, &raw).unwrap();
+            let before = fs::read(&corrupt_path).unwrap();
+            let out = run_sync_with_io(
+                &test_sync_cli(&dir),
+                "https://example.test",
+                "0.2.0-draft",
+                Some("token-placeholder"),
+                Some(2_000),
+                2_000,
+                |_, _, _, _, _, _| panic!("corrupt queue must not send even valid items"),
+            );
+            assert_eq!(out.exit_code, 2);
+            assert_eq!(fs::read(&corrupt_path).unwrap(), before);
+            assert!(!out.stdout.contains("workshop_id"));
+        }
+    }
+
+    #[test]
+    fn replay_requires_comparable_server_time_and_request_margin() {
+        let mut item = test_item();
+        item.state = SpoolState::InFlight;
+        item.idempotency_key = Some("original-key".into());
+        item.first_attempted_epoch_s = Some(2_000);
+        item.first_attempted_clock = Some("server".into());
+        item.attempts = 1;
+        assert_eq!(decide_replay(&item, 2_001, true), ReplayDecision::ReplayInWindow);
+        for now in [1_999, 2_001, 2_000 + REPLAY_WINDOW_SECONDS] {
+            assert_eq!(
+                decide_replay(&item, now, false),
+                ReplayDecision::AwaitServerClock
+            );
+        }
+        for (now, server) in [
+            (1_999, true),
+            (2_000 + REPLAY_WINDOW_SECONDS - REPLAY_SEND_MARGIN_SECONDS, true),
+            // A POST-only margin misses a delayed clock probe.
+            (2_000 + REPLAY_WINDOW_SECONDS - READ_TIMEOUT.as_secs() - 2, true),
+            (2_000 + REPLAY_WINDOW_SECONDS, true),
+        ] {
+            assert_eq!(
+                decide_replay(&item, now, server),
+                ReplayDecision::FreezeUnknownCommit
+            );
+        }
+        item.first_attempted_clock = Some("local".into());
+        for server in [false, true] {
+            assert_eq!(
+                decide_replay(&item, 2_001, server),
+                ReplayDecision::FreezeUnknownCommit
+            );
+        }
+    }
+
+    #[test]
+    fn missing_current_server_clock_defers_without_mutation_then_recovers() {
+        for (server_now, should_replay) in [
+            (2_100, true),
+            (2_000 + REPLAY_WINDOW_SECONDS, false),
+        ] {
+            let dir = test_dir("deferred-clock");
+            let mut item = test_item();
+            item.state = SpoolState::InFlight;
+            item.idempotency_key = Some("original-key".into());
+            item.first_attempted_epoch_s = Some(2_000);
+            item.first_attempted_clock = Some("server".into());
+            item.attempts = 1;
+            save_item(&dir, &item).unwrap();
+            let path = dir.join("items").join(format!("{}.json", item.id));
+            let before = fs::read(&path).unwrap();
+            let cli = test_sync_cli(&dir);
+            let deferred = run_sync_with_io(
+                &cli,
+                "https://example.test",
+                "0.2.0-draft",
+                Some("token-placeholder"),
+                None,
+                2_000 + REPLAY_WINDOW_SECONDS + 1,
+                |_, _, _, _, _, _| panic!("missing current clock must not send"),
+            );
+            assert_eq!(deferred.exit_code, 1);
+            let summary: Value = serde_json::from_str(&deferred.stdout).unwrap();
+            assert_eq!(summary["awaiting_server_clock"], 1);
+            assert_eq!(summary["unknown_commit"], 0);
+            assert_eq!(fs::read(&path).unwrap(), before);
+
+            let recovered = run_sync_with_io(
+                &cli,
+                "https://example.test",
+                "0.2.0-draft",
+                Some("token-placeholder"),
+                Some(server_now),
+                1,
+                |_, _, _, key, _, body| {
+                    assert!(should_replay, "expired write must not send");
+                    assert_eq!(Some(key), item.idempotency_key.as_deref());
+                    assert_eq!(body, item.body_json);
+                    Ok(SyncPostResponse {
+                        status: 201,
+                        body: "{\"ok\":true,\"event_id\":\"EV-recorded\"}".into(),
+                        server_epoch_s: Some(server_now),
+                        deprecation: None,
+                    })
+                },
+            );
+            let retained = load_all_items(&dir).unwrap().remove(0);
+            assert_eq!(retained.first_attempted_epoch_s, item.first_attempted_epoch_s);
+            assert_eq!(retained.first_attempted_clock, item.first_attempted_clock);
+            assert_eq!(retained.idempotency_key, item.idempotency_key);
+            assert_eq!(retained.body_json, item.body_json);
+            if should_replay {
+                assert_eq!(recovered.exit_code, 0);
+                assert_eq!(retained.state, SpoolState::Committed);
+                assert_eq!(retained.attempts, 2);
+            } else {
+                assert_eq!(recovered.exit_code, 1);
+                assert_eq!(retained.state, SpoolState::UnknownCommit);
+                assert_eq!(retained.attempts, 1);
+            }
+        }
+    }
+
+    #[test]
+    fn ambiguous_local_attempt_freezes_without_replacing_clock_key_or_body() {
+        let dir = test_dir("clock-source");
+        let item = test_item();
+        save_item(&dir, &item).unwrap();
+        let cli = test_sync_cli(&dir);
+        let first = run_sync_with_io(
+            &cli,
+            "https://example.test",
+            "0.2.0-draft",
+            Some("token-placeholder"),
+            None,
+            200_000,
+            |_, _, _, _, _, body| {
+                assert_eq!(body, item.body_json);
+                Err(SyncPostError::Network { server_epoch_s: None })
+            },
+        );
+        assert_eq!(first.exit_code, 1);
+        let attempted = load_all_items(&dir).unwrap().remove(0);
+        assert_eq!(attempted.first_attempted_clock.as_deref(), Some("local"));
+        let second = run_sync_with_io(
+            &cli,
+            "https://example.test",
+            "0.2.0-draft",
+            Some("token-placeholder"),
+            Some(2_000),
+            200_001,
+            |_, _, _, _, _, _| panic!("clock switch must not reopen an ambiguous write"),
+        );
+        assert_eq!(second.exit_code, 1);
+        let frozen = load_all_items(&dir).unwrap().remove(0);
+        assert_eq!(frozen.state, SpoolState::UnknownCommit);
+        assert_eq!(frozen.idempotency_key, attempted.idempotency_key);
+        assert_eq!(frozen.body_json, item.body_json);
+        assert_eq!(frozen.first_attempted_epoch_s, attempted.first_attempted_epoch_s);
+        assert_eq!(frozen.first_attempted_clock, attempted.first_attempted_clock);
+        assert_eq!(frozen.attempts, 1);
+    }
+
+    #[test]
+    fn in_window_replay_keeps_exact_payload_and_key_and_requires_complete_receipt() {
+        for receipt in ["{\"event_id\":", "[]", "{\"ok\":false}"] {
+            let dir = test_dir("receipt");
+            let item = test_item();
+            save_item(&dir, &item).unwrap();
+            let cli = test_sync_cli(&dir);
+            let first = run_sync_with_io(
+                &cli,
+                "https://example.test",
+                "0.2.0-draft",
+                Some("token-placeholder"),
+                Some(2_000),
+                2_000,
+                |_, _, _, _, _, _| {
+                    Ok(SyncPostResponse {
+                        status: 201,
+                        body: receipt.into(),
+                        server_epoch_s: Some(2_000),
+                        deprecation: None,
+                    })
+                },
+            );
+            assert_eq!(first.exit_code, 1);
+            let attempted = load_all_items(&dir).unwrap().remove(0);
+            assert_eq!(attempted.state, SpoolState::InFlight);
+            assert_eq!(attempted.receipt_sha256, None);
+            let second = run_sync_with_io(
+                &cli,
+                "https://example.test",
+                "0.2.0-draft",
+                Some("token-placeholder"),
+                Some(2_100),
+                10,
+                |_, _, _, key, _, body| {
+                    assert_eq!(Some(key), attempted.idempotency_key.as_deref());
+                    assert_eq!(body, item.body_json);
+                    Ok(SyncPostResponse {
+                        status: 201,
+                        body: "{\"ok\":true,\"event_id\":\"EV-recorded\"}".into(),
+                        server_epoch_s: Some(2_100),
+                        deprecation: None,
+                    })
+                },
+            );
+            assert_eq!(second.exit_code, 0);
+            let committed = load_all_items(&dir).unwrap().remove(0);
+            assert_eq!(committed.state, SpoolState::Committed);
+            assert_eq!(committed.first_attempted_epoch_s, attempted.first_attempted_epoch_s);
+            assert_eq!(committed.idempotency_key, attempted.idempotency_key);
+            assert_eq!(committed.attempts, 2);
+        }
+    }
+
+    #[test]
+    fn concurrent_sync_cannot_replace_first_attempt_history() {
+        let dir = test_dir("single-writer");
+        save_item(&dir, &test_item()).unwrap();
+        let lock = lock_spool_mutation(&dir).unwrap();
+        let out = run_sync_with_io(
+            &test_sync_cli(&dir),
+            "https://example.test",
+            "0.2.0-draft",
+            Some("token-placeholder"),
+            Some(2_000),
+            2_000,
+            |_, _, _, _, _, _| panic!("second writer must not send"),
+        );
+        assert_eq!(out.exit_code, 2);
+        assert_eq!(load_all_items(&dir).unwrap()[0].attempts, 0);
+        drop(lock);
+        assert!(lock_spool_mutation(&dir).is_ok());
+    }
 
     #[test]
     fn allowlist_permits_session_writes_and_blocks_one_time_exchanges() {
@@ -1873,7 +2512,53 @@ mod tests {
         assert_eq!(format_utc_rfc3339(epoch), "2026-11-21T01:45:00Z");
         let leap = parse_http_date("Thu, 29 Feb 2024 12:00:00 GMT").expect("leap day");
         assert_eq!(format_utc_rfc3339(leap), "2024-02-29T12:00:00Z");
-        assert!(parse_http_date("not-a-date").is_none());
+        assert_eq!(parse_http_date("Thu, 01 Jan 1970 00:00:00 GMT"), Some(0));
+        assert_eq!(
+            parse_http_date("Fri, 31 Dec 9999 23:59:59 GMT"),
+            Some(MAX_SPOOL_EPOCH_SECONDS)
+        );
+        for invalid in [
+            "not-a-date",
+            "Sat, 21 Nov 9223372036854775807 01:45:00 GMT",
+            "Sat, 21 Nov 10000 01:45:00 GMT",
+            "Wed, 31 Dec 1969 23:59:59 GMT",
+            "Fri, 29 Feb 2100 12:00:00 GMT",
+            "Fri, 29 Feb 2025 12:00:00 GMT",
+            "Mon, 31 Nov 2026 01:45:00 GMT",
+            "Sat, 00 Nov 2026 01:45:00 GMT",
+            "Sat, 21 Nov 2026 24:00:00 GMT",
+            "Sat, 21 Nov 2026 01:60:00 GMT",
+            "Sat, 21 Nov 2026 01:45:60 GMT",
+            "Bad, 21 Nov 2026 01:45:00 GMT",
+            "Sat, 21 Nov 2026 1:45:00 GMT",
+            "Sat, 21 Nov 2026 01:45:00 UTC",
+        ] {
+            assert!(parse_http_date(invalid).is_none(), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn clock_probe_requires_an_unaged_valid_server_date() {
+        let date = Some("Sat, 21 Nov 2026 01:45:00 GMT");
+        let expected = date.and_then(parse_http_date);
+        assert!(expected.is_some());
+        assert_eq!(fresh_server_clock(date, None), expected);
+        assert_eq!(fresh_server_clock(date, Some("0")), expected);
+        for age in [
+            "1",
+            "15",
+            "86400",
+            "",
+            "-1",
+            "+0",
+            "0, 15",
+            "invalid",
+            "18446744073709551616",
+        ] {
+            assert_eq!(fresh_server_clock(date, Some(age)), None, "{age}");
+        }
+        assert_eq!(fresh_server_clock(None, None), None);
+        assert_eq!(fresh_server_clock(Some("invalid"), Some("0")), None);
     }
 
     #[test]
@@ -1887,8 +2572,8 @@ mod tests {
             state: SpoolState::Unsent,
             idempotency_key: None,
             body_json: "{}".into(),
-            body_sha256: "0".repeat(64),
-            client_occurred_at: "2026-09-01T00:00:00Z".into(),
+            body_sha256: sha256_hex(b"{}"),
+            client_occurred_at: format_utc_rfc3339(1_000),
             created_epoch_s: 1_000,
             first_attempted_epoch_s: None,
             first_attempted_clock: None,
@@ -1903,7 +2588,7 @@ mod tests {
 
         // 1. Drafted 48h ago, never attempted -> SendFresh (key assigned at first send).
         assert_eq!(
-            decide_replay(&base_item, 1_000 + 48 * 3600),
+            decide_replay(&base_item, 1_000 + 48 * 3600, true),
             ReplayDecision::SendFresh
         );
 
@@ -1912,14 +2597,16 @@ mod tests {
         in_flight.state = SpoolState::InFlight;
         in_flight.idempotency_key = Some("orig-key-1".into());
         in_flight.first_attempted_epoch_s = Some(10_000);
+        in_flight.first_attempted_clock = Some("server".into());
+        in_flight.attempts = 1;
         assert_eq!(
-            decide_replay(&in_flight, 10_000 + 23 * 3600),
+            decide_replay(&in_flight, 10_000 + 23 * 3600, true),
             ReplayDecision::ReplayInWindow
         );
 
         // 3. Attempted 24h+1s ago -> FreezeUnknownCommit (NEVER resubmits or rotates key).
         assert_eq!(
-            decide_replay(&in_flight, 10_000 + REPLAY_WINDOW_SECONDS + 1),
+            decide_replay(&in_flight, 10_000 + REPLAY_WINDOW_SECONDS + 1, true),
             ReplayDecision::FreezeUnknownCommit
         );
 
@@ -1927,7 +2614,7 @@ mod tests {
         let mut rejected = base_item.clone();
         rejected.state = SpoolState::Rejected;
         assert_eq!(
-            decide_replay(&rejected, 20_000),
+            decide_replay(&rejected, 20_000, true),
             ReplayDecision::SkipRejected
         );
     }
@@ -1952,8 +2639,8 @@ mod tests {
             state: SpoolState::Unsent,
             idempotency_key: Some("idem-408-stable".into()),
             body_json: r#"{"statement":"x"}"#.into(),
-            body_sha256: "a".repeat(64),
-            client_occurred_at: "2026-11-21T00:00:00Z".into(),
+            body_sha256: sha256_hex(br#"{"statement":"x"}"#),
+            client_occurred_at: format_utc_rfc3339(2_000),
             created_epoch_s: 2_000,
             first_attempted_epoch_s: None,
             first_attempted_clock: None,

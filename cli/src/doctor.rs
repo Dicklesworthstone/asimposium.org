@@ -19,8 +19,8 @@ use crate::{
     },
     resolve_origin, scrub,
     spool::{
-        REPLAY_WINDOW_SECONDS, SpoolState, format_utc_rfc3339, load_all_items, now_epoch_s,
-        parse_http_date, resolve_spool_dir,
+        ReplayDecision, SpoolState, decide_replay, format_utc_rfc3339, fresh_server_clock,
+        load_all_items, now_epoch_s, resolve_spool_dir,
     },
 };
 use serde_json::{Value, json};
@@ -28,6 +28,7 @@ use std::{
     fs,
     io::Read,
     path::{Component, Path, PathBuf},
+    time::Instant,
 };
 
 #[derive(Debug, clap::Args)]
@@ -128,7 +129,8 @@ fn http_probe_get(
         .build();
     let mut req = agent
         .get(url)
-        .set(PROTOCOL_VERSION_HEADER, protocol_version);
+        .set(PROTOCOL_VERSION_HEADER, protocol_version)
+        .set("cache-control", "no-cache, max-age=0");
     if let Some(tok) = token {
         req = req.set("authorization", &format!("Bearer {tok}"));
     }
@@ -142,7 +144,7 @@ fn http_probe_get(
     let deprecation = resp.header("deprecation").map(str::to_owned);
     let sunset = resp.header("sunset").map(str::to_owned);
     let link = resp.header("link").map(str::to_owned);
-    let server_epoch_s = resp.header("date").and_then(parse_http_date);
+    let server_epoch_s = fresh_server_clock(resp.header("date"), resp.header("age"));
     let mut buf = Vec::new();
     let _ = resp.into_reader().take(256 * 1024).read_to_end(&mut buf);
     let body = String::from_utf8_lossy(&buf).into_owned();
@@ -248,6 +250,7 @@ pub fn run_with_io(
     };
 
     // 3. Connectivity + server protocol match + server clock skew
+    let clock_started = Instant::now();
     let mut server_epoch_s: Option<u64> = None;
     let mut server_global_cursor: Option<u64> = None;
 
@@ -274,7 +277,6 @@ pub fn run_with_io(
                 });
             }
             Some(resp) => {
-                server_epoch_s = resp.server_epoch_s;
                 if resp.status == 400
                     && let Some(mismatch) =
                         parse_unsupported_version_problem(proto, resp.status, Some(&resp.body))
@@ -306,6 +308,7 @@ pub fn run_with_io(
                         meta: json!({ "http_status": resp.status }),
                     });
                 } else {
+                    server_epoch_s = resp.server_epoch_s;
                     findings.push(DoctorFinding {
                         check: "connectivity",
                         status: CheckStatus::Ok,
@@ -391,7 +394,7 @@ pub fn run_with_io(
                                 check: "clock_skew",
                                 status: CheckStatus::Warn,
                                 detail: format!(
-                                    "Local clock differs from server Date by {skew_s}s; `asimp sync` uses server timestamps for the 24h replay window."
+                                    "Local clock differs from server Date by {skew_s}s; `asimp sync` requires comparable server timestamps for attempted-write replay."
                                 ),
                                 remediation: Some(
                                     "Synchronize system clock (NTP/chrony) so offline `client_occurred_at` provenance stamps remain accurate."
@@ -604,9 +607,13 @@ pub fn run_with_io(
     );
 
     // 6. Spool health (permissions, secret-free logs, exact 5-state classification)
-    let effective_now = server_epoch_s.unwrap_or(local_epoch_s);
+    // Cursor and identity probes may have taken substantial time since Date.
+    // Include all elapsed time so diagnostics cannot reopen an expired retry.
+    let effective_now = server_epoch_s
+        .unwrap_or(local_epoch_s)
+        .saturating_add(clock_started.elapsed().as_secs());
     if let Some(dir) = &spool_dir {
-        check_spool_health(dir, effective_now, &mut findings);
+        check_spool_health(dir, effective_now, server_epoch_s.is_some(), &mut findings);
     } else {
         findings.push(DoctorFinding {
             check: "spool",
@@ -801,7 +808,12 @@ fn check_cursors(
     }
 }
 
-fn check_spool_health(spool_dir: &Path, effective_now: u64, findings: &mut Vec<DoctorFinding>) {
+fn check_spool_health(
+    spool_dir: &Path,
+    effective_now: u64,
+    server_time_available: bool,
+    findings: &mut Vec<DoctorFinding>,
+) {
     // 1. Check Unix permissions if spool dir exists
     #[cfg(unix)]
     if spool_dir.exists() {
@@ -863,7 +875,7 @@ fn check_spool_health(spool_dir: &Path, effective_now: u64, findings: &mut Vec<D
                 status: CheckStatus::Fail,
                 detail: msg,
                 remediation: Some(
-                    "Check filesystem permissions on the spool directory.".to_owned(),
+                    "Preserve the spool, inspect its file permissions and invalid entries, and reconcile uncertain writes before changing their keys or attempt history.".to_owned(),
                 ),
                 meta: json!({}),
             });
@@ -873,7 +885,9 @@ fn check_spool_health(spool_dir: &Path, effective_now: u64, findings: &mut Vec<D
 
     let mut unsent = 0usize;
     let mut retryable = 0usize;
+    let mut awaiting_server_clock = 0usize;
     let mut expired_in_flight = 0usize;
+    let mut unverifiable_in_flight = 0usize;
     let mut committed = 0usize;
     let mut rejected = 0usize;
     let mut unknown_commit = 0usize;
@@ -882,11 +896,20 @@ fn check_spool_health(spool_dir: &Path, effective_now: u64, findings: &mut Vec<D
         match item.state {
             SpoolState::Unsent => unsent += 1,
             SpoolState::InFlight => {
-                let started = item.first_attempted_epoch_s.unwrap_or(item.created_epoch_s);
-                if effective_now.saturating_sub(started) >= REPLAY_WINDOW_SECONDS {
+                let decision = decide_replay(item, effective_now, server_time_available);
+                if decision == ReplayDecision::ReplayInWindow {
+                    retryable += 1;
+                } else if decision == ReplayDecision::AwaitServerClock {
+                    awaiting_server_clock += 1;
+                } else if server_time_available
+                    && item.first_attempted_clock.as_deref() == Some("server")
+                    && item
+                        .first_attempted_epoch_s
+                        .is_some_and(|started| effective_now >= started)
+                {
                     expired_in_flight += 1;
                 } else {
-                    retryable += 1;
+                    unverifiable_in_flight += 1;
                 }
             }
             SpoolState::Committed => committed += 1,
@@ -895,10 +918,10 @@ fn check_spool_health(spool_dir: &Path, effective_now: u64, findings: &mut Vec<D
         }
     }
 
-    let total_unknown = unknown_commit + expired_in_flight;
+    let total_unknown = unknown_commit + expired_in_flight + unverifiable_in_flight;
     let status = if total_unknown > 0 {
         CheckStatus::Fail
-    } else if retryable > 0 || rejected > 0 || unsent > 0 {
+    } else if retryable > 0 || awaiting_server_clock > 0 || rejected > 0 || unsent > 0 {
         CheckStatus::Warn
     } else {
         CheckStatus::Ok
@@ -906,7 +929,12 @@ fn check_spool_health(spool_dir: &Path, effective_now: u64, findings: &mut Vec<D
 
     let remediation = if total_unknown > 0 {
         Some(
-            "One or more writes passed the 24h replay window without confirmation (`unknown_commit`). Run `asimp spool list --state unknown_commit` and `asimp spool show <ID>` to inspect read-only server state (session status / workshop list / watch), then run `asimp spool resolve <ID> --as committed --event-id <EV-ID>` or `--as abandoned`. Never rotate keys blindly."
+            "One or more writes have an expired or unverifiable 24h replay window (`unknown_commit`). Run `asimp spool list` and `asimp spool show <ID>` to inspect read-only server state (session status / workshop list / watch), then run `asimp spool resolve <ID> --as committed --event-id <EV-ID>` or `--as abandoned`. Never rotate keys blindly."
+                .to_owned(),
+        )
+    } else if awaiting_server_clock > 0 {
+        Some(
+            "Retry `asimp sync` when a fresh server clock is available. Existing attempts remain in flight with their original body, key and history; unsent items can still be sent."
                 .to_owned(),
         )
     } else if retryable > 0 || unsent > 0 {
@@ -926,25 +954,28 @@ fn check_spool_health(spool_dir: &Path, effective_now: u64, findings: &mut Vec<D
     let evidence_guide = json!({
         "unsent": "Never attempted; resolved by running `asimp sync` (idempotency key assigned on first send even if drafted > 24h ago).",
         "retryable": "Attempted within 24h replay window; resolved by `asimp sync` replaying the exact original idempotency key or matching receipt/event/cursor/object digest.",
+        "awaiting_server_clock": "Retained server attempt time is valid but a fresh current server clock is unavailable; no retry or mutation occurs until a later sync can verify the replay window.",
         "committed": "Authoritatively confirmed by server 2xx receipt or recorded server_event_id; no action needed.",
         "rejected": "Definitively refused by server (4xx); resolved only by editing into a new logical write with a new idempotency key.",
-        "unknown_commit": "24h replay window expired without authoritative match; resolved ONLY by checking read-only server state (session status, workshop list, watch events) and running `asimp spool resolve <ID> --as committed --event-id <EV-ID>` or `--as abandoned`.",
+        "unknown_commit": "24h replay window expired or could not be verified using comparable server time; resolved ONLY by checking read-only server state (session status, workshop list, watch events) and running `asimp spool resolve <ID> --as committed --event-id <EV-ID>` or `--as abandoned`.",
     });
 
     findings.push(DoctorFinding {
         check: "spool",
         status,
         detail: format!(
-            "Spool state: unsent={unsent} retryable={retryable} committed={committed} rejected={rejected} unknown_commit={total_unknown}."
+            "Spool state: unsent={unsent} retryable={retryable} awaiting_server_clock={awaiting_server_clock} committed={committed} rejected={rejected} unknown_commit={total_unknown}."
         ),
         remediation,
         meta: json!({
             "unsent": unsent,
             "retryable": retryable,
+            "awaiting_server_clock": awaiting_server_clock,
             "committed": committed,
             "rejected": rejected,
             "unknown_commit": total_unknown,
             "expired_pending_freeze": expired_in_flight,
+            "unverifiable_pending_freeze": unverifiable_in_flight,
             "resolution_evidence": evidence_guide,
         }),
     });
@@ -969,6 +1000,114 @@ mod tests {
     }
 
     #[test]
+    fn doctor_marks_unverifiable_clocks_unsafe_and_reports_corrupt_items() {
+        let dir = std::env::temp_dir().join(format!(
+            "asimp-doctor-clock-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        let raw = json!({
+            "schema": "asimp.spool-item.v1",
+            "id": "SP-1000-clock",
+            "origin": "https://example.test",
+            "path": "/v1/sessions/S-1/promote",
+            "state": "in_flight",
+            "idempotency_key": "original-key",
+            "body_json": "{}",
+            "body_sha256": crate::validate::sha256_hex(b"{}"),
+            "client_occurred_at": format_utc_rfc3339(1_000),
+            "created_epoch_s": 1_000,
+            "first_attempted_epoch_s": 2_000,
+            "first_attempted_clock": "local",
+            "attempts": 1,
+        });
+        let item = SpoolItem::from_disk_json(&raw.to_string()).unwrap();
+        save_item(&dir, &item).unwrap();
+        let before = fs::read(dir.join("items/SP-1000-clock.json")).unwrap();
+        let mut findings = Vec::new();
+        check_spool_health(&dir, 2_100, true, &mut findings);
+        let result = findings.iter().find(|finding| finding.check == "spool").unwrap();
+        assert_eq!(result.status, CheckStatus::Fail);
+        assert_eq!(result.meta["retryable"], 0);
+        assert_eq!(result.meta["unverifiable_pending_freeze"], 1);
+        assert_eq!(fs::read(dir.join("items/SP-1000-clock.json")).unwrap(), before);
+
+        fs::write(dir.join("items/SP-2000-corrupt.json"), "{").unwrap();
+        let mut findings = Vec::new();
+        check_spool_health(&dir, 2_100, true, &mut findings);
+        let result = findings.iter().find(|finding| finding.check == "spool").unwrap();
+        assert_eq!(result.status, CheckStatus::Fail);
+        assert!(result.remediation.as_deref().unwrap().contains("Preserve"));
+    }
+
+    #[test]
+    fn doctor_ignores_dates_from_failed_capabilities_probes() {
+        let dir = std::env::temp_dir().join(format!(
+            "asimp-doctor-failed-clock-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        let raw = json!({
+            "schema": "asimp.spool-item.v1",
+            "id": "SP-1000-clock",
+            "origin": "https://example.test",
+            "path": "/v1/sessions/S-1/promote",
+            "state": "in_flight",
+            "idempotency_key": "original-key",
+            "body_json": "{}",
+            "body_sha256": crate::validate::sha256_hex(b"{}"),
+            "client_occurred_at": format_utc_rfc3339(1_000),
+            "created_epoch_s": 1_000,
+            "first_attempted_epoch_s": 2_000,
+            "first_attempted_clock": "server",
+            "attempts": 1,
+        });
+        let item = SpoolItem::from_disk_json(&raw.to_string()).unwrap();
+        save_item(&dir, &item).unwrap();
+        let cli = Cli::try_parse_from([
+            "asimp",
+            "--origin",
+            "https://example.test",
+            "doctor",
+            "--spool-dir",
+            dir.to_str().unwrap(),
+            "--snapshot-dir",
+            dir.to_str().unwrap(),
+            "--json",
+        ])
+        .unwrap();
+        let out = run_with_io(&cli, TokenSource::Absent, 2_100, |url, _, _| {
+            url.ends_with("/capabilities").then(|| DoctorProbeResponse {
+                status: 503,
+                body: "{}".into(),
+                server_version: None,
+                deprecation: None,
+                sunset: None,
+                link: None,
+                server_epoch_s: Some(2_100),
+            })
+        });
+        let doc: Value = serde_json::from_str(&out.stdout).unwrap();
+        let finding = doc["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|finding| finding["check"] == "spool")
+            .unwrap();
+        assert_eq!(finding["status"], "warn");
+        assert_eq!(finding["meta"]["retryable"], 0);
+        assert_eq!(finding["meta"]["awaiting_server_clock"], 1);
+        assert_eq!(finding["meta"]["unknown_commit"], 0);
+        assert_eq!(load_all_items(&dir).unwrap()[0].state, SpoolState::InFlight);
+    }
+
+    #[test]
     fn doctor_distinguishes_all_five_spool_states_and_never_echoes_tokens() {
         let base = std::env::temp_dir().join(format!("asimp-doctor-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&base);
@@ -985,8 +1124,8 @@ mod tests {
             state,
             idempotency_key: Some(format!("key-{id}")),
             body_json: "{}".into(),
-            body_sha256: "0".repeat(64),
-            client_occurred_at: "2026-09-10T00:00:00Z".into(),
+            body_sha256: crate::validate::sha256_hex(b"{}"),
+            client_occurred_at: format_utc_rfc3339(1_000),
             created_epoch_s: 1_000,
             first_attempted_epoch_s: attempted,
             first_attempted_clock: attempted.map(|_| "server".into()),

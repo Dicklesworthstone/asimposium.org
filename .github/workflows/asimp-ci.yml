@@ -34,6 +34,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install pinned Rust toolchain
+        id: toolchain
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.93.1"
@@ -43,11 +44,17 @@ jobs:
         with:
           workspaces: cli -> target
 
-      - name: Format, Clippy, and Locked Tests
-        run: |
-          cargo fmt --manifest-path cli/Cargo.toml --check
-          cargo clippy --locked --manifest-path cli/Cargo.toml --all-targets -- -D warnings
-          cargo test --locked --manifest-path cli/Cargo.toml
+      - name: Rust format
+        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
+        run: cargo fmt --manifest-path cli/Cargo.toml --check
+
+      - name: Clippy
+        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
+        run: cargo clippy --locked --manifest-path cli/Cargo.toml --all-targets -- -D warnings
+
+      - name: Locked Rust tests
+        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
+        run: cargo test --locked --manifest-path cli/Cargo.toml
 
       - name: cargo-audit
         uses: rustsec/audit-check@v2
