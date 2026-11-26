@@ -407,6 +407,7 @@ export function createSynthesisDraftsAndExternalReviewsApp(
       problemId,
       authenticated.principal.operatorId,
       bodyValue,
+      c.req.header("Idempotency-Key") ?? "",
     );
     if (!result.ok) {
       return privateResponse(
@@ -416,9 +417,13 @@ export function createSynthesisDraftsAndExternalReviewsApp(
           title: "Cannot record external expert review",
           detail: result.detail,
           fixHint:
-            result.code === "SECRET_SHAPED_CONTENT"
-              ? "Remove credential-shaped strings from all external expert review fields and retry."
-              : "Supply an existing published problem_id, active canonical claim_id@claim_version, reviewer attribution, attestation URI/SHA-256, verdict, and exact no_claim_boundary.",
+            result.code === "IDEMPOTENCY_KEY_INVALID"
+              ? "Generate one Idempotency-Key and retain it with the exact body until confirmed."
+              : result.code === "IDEMPOTENCY_CONFLICT"
+                ? "Retry the original body and key. Use a new key only for a new reviewed decision."
+                : result.code === "SECRET_SHAPED_CONTENT"
+                  ? "Remove credential-shaped strings from all external expert review fields and retry."
+                  : "Supply an existing published problem_id, active canonical claim_id@claim_version, reviewer attribution, attestation URI/SHA-256, verdict, and exact no_claim_boundary.",
           rule: result.code === "SECRET_SHAPED_CONTENT" ? "P7" : "A5",
           extensions: {
             schema: PROBLEMS_SCHEMA_URL,

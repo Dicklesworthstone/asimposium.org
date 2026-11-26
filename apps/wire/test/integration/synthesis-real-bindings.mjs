@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import {
   ClaimReanchorResponseSchema,
+  ExternalExpertReviewRecordSchema,
   PackResponseSchema,
   ScreeningPromotionDeniedResponseSchema,
   ScreeningPublicationProvenanceSchema,
@@ -25,6 +26,7 @@ await runLocalWorkerJourney(
     call,
     enroll,
     sponsorCall,
+    operatorCall,
     reviseStatement,
     env,
     fixtures,
@@ -161,6 +163,76 @@ await runLocalWorkerJourney(
         remaining_external_validation: ["Independent review is still required."],
       },
     };
+
+    // The human result workflow records external reviews through signed operator
+    // ingress. Lost responses and concurrent retries must not multiply authority.
+    const expertReviewPath = `/v1/operators/problems/${problemId}/external-expert-reviews`;
+    const expertReviewBody = {
+      claim_id: claim1Id,
+      claim_version: 1,
+      reviewer: {
+        name: "Synthetic external reviewer",
+        affiliation: "Local scientific workflow fixture",
+        identifier: "https://example.org/local-reviewer",
+      },
+      attestation_locator: "https://example.org/local-review-attestation",
+      attestation_sha256: "a".repeat(64),
+      verdict: "withheld",
+      reviewed_at: new Date().toISOString(),
+      no_claim_boundary: closing.no_claim_boundary,
+    };
+    const createExpertReview = (key, body = expertReviewBody, expected = 201) =>
+      operatorCall(
+        "POST",
+        expertReviewPath,
+        "operator.external-expert-reviews.create",
+        body,
+        expected,
+        expertReviewPath,
+        key,
+      );
+    const expertReview = ExternalExpertReviewRecordSchema.parse(
+      await createExpertReview("external-review-one"),
+    );
+    assert.equal(expertReview.claim_id, claim1Id);
+    assert.equal(expertReview.claim_version, 1);
+    assert.equal(expertReview.verdict, "withheld");
+    assert.deepEqual(await createExpertReview("external-review-one"), expertReview);
+    const repeatedReviews = await Promise.all([
+      createExpertReview("external-review-race"),
+      createExpertReview("external-review-race"),
+    ]);
+    assert.deepEqual(repeatedReviews[0], repeatedReviews[1]);
+    assert.equal(
+      (await createExpertReview(
+        "external-review-one",
+        { ...expertReviewBody, verdict: "supports-resolution" },
+        409,
+      )).code,
+      "IDEMPOTENCY_CONFLICT",
+    );
+    await sponsorCall(
+      sponsorA,
+      "POST",
+      expertReviewPath,
+      "operator.external-expert-reviews.create",
+      expertReviewBody,
+      401,
+      expertReviewPath,
+      "external-review-one",
+    );
+    assert.equal(
+      (await env.DB.prepare(
+        "SELECT COUNT(*) AS n FROM external_expert_reviews WHERE problem_id = ?",
+      ).bind(problemId).first()).n,
+      2,
+    );
+    assert.equal(
+      (await env.DB.prepare(
+        "SELECT COUNT(*) AS n FROM operator_audit WHERE action = 'external-expert-review-recorded' AND target_id = ?",
+      ).bind(`${problemId}/${claim1Id}@1`).first()).n,
+      2,
+    );
 
     // 4. Test unanchored anchor (Rule P13) with unknown claim
     const unanchoredNonexistent = await call(

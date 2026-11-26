@@ -49,6 +49,8 @@ interface ExternalReviewRow {
   verified_by_operator_id: string;
   created_at: string;
   revoked_at: string | null;
+  create_key_digest: string | null;
+  create_request_digest: string | null;
 }
 
 function rowToRecord(row: ExternalReviewRow): ExternalExpertReviewRecord {
@@ -78,12 +80,14 @@ export type RecordExternalReviewResult =
   | { readonly ok: true; readonly record: ExternalExpertReviewRecord }
   | {
       readonly ok: false;
-      readonly status: 404 | 422;
+      readonly status: 400 | 404 | 409 | 422;
       readonly code:
         | "PROBLEM_NOT_FOUND"
         | "CLAIM_NOT_FOUND"
         | "SCHEMA_INVALID"
-        | "SECRET_SHAPED_CONTENT";
+        | "SECRET_SHAPED_CONTENT"
+        | "IDEMPOTENCY_KEY_INVALID"
+        | "IDEMPOTENCY_CONFLICT";
       readonly detail: string;
     };
 
@@ -92,6 +96,7 @@ export async function recordExternalExpertReview(
   problemId: string,
   operatorId: string,
   rawInput: unknown,
+  idempotencyKey?: string,
 ): Promise<RecordExternalReviewResult> {
   const parsed = ExternalExpertReviewCreateRequestSchema.safeParse(rawInput);
   if (!parsed.success) {
@@ -103,6 +108,45 @@ export async function recordExternalExpertReview(
     };
   }
   const input: ExternalExpertReviewCreateRequest = parsed.data;
+  if (
+    idempotencyKey !== undefined &&
+    /^[A-Za-z0-9._-]{1,160}$/.exec(idempotencyKey)?.[0] !== idempotencyKey
+  ) {
+    return {
+      ok: false,
+      status: 400,
+      code: "IDEMPOTENCY_KEY_INVALID",
+      detail: "Retain one Idempotency-Key of 1–160 letters, digits, dots, underscores or hyphens.",
+    };
+  }
+  const keyDigest = idempotencyKey === undefined ? null : await sha256Hex(idempotencyKey);
+  const requestDigest = keyDigest === null ? null : await sha256Hex(canonicalJson(input));
+
+  // An authenticated retry recovers its original review even after the claim
+  // changes. It never creates another attestation or replaces the reviewed bytes.
+  // Return current revocation metadata so recovery cannot revive a revoked review.
+  const replay = async (): Promise<RecordExternalReviewResult | undefined> => {
+    if (keyDigest === null) return undefined;
+    const saved = await db
+      .prepare(
+        `SELECT * FROM external_expert_reviews
+         WHERE problem_id = ? AND verified_by_operator_id = ? AND create_key_digest = ?`,
+      )
+      .bind(problemId, operatorId, keyDigest)
+      .first<ExternalReviewRow>();
+    if (!saved) return undefined;
+    if (saved.create_request_digest !== requestDigest) {
+      return {
+        ok: false,
+        status: 409,
+        code: "IDEMPOTENCY_CONFLICT",
+        detail: "This key already identifies a different external expert review. Nothing changed.",
+      };
+    }
+    return { ok: true, record: rowToRecord(saved) };
+  };
+  const previous = await replay();
+  if (previous !== undefined) return previous;
   const boundaryJson = canonicalJson(input.no_claim_boundary);
 
   // P7 / Rule A9 hard egress wall: never store credential-shaped material in review records.
@@ -127,6 +171,8 @@ export async function recordExternalExpertReview(
     .bind(problemId)
     .first<{ id: string; status: string }>();
   if (!problem || problem.status === "private-draft") {
+    const concurrent = await replay();
+    if (concurrent !== undefined) return concurrent;
     return {
       ok: false,
       status: 404,
@@ -158,6 +204,8 @@ export async function recordExternalExpertReview(
     .bind(problemId, input.claim_id, input.claim_version)
     .first<{ content_digest: string | null }>();
   if (!claimVersion?.content_digest) {
+    const concurrent = await replay();
+    if (concurrent !== undefined) return concurrent;
     return {
       ok: false,
       status: 404,
@@ -196,81 +244,95 @@ export async function recordExternalExpertReview(
   // Atomically commit both the structured review record and its immutable
   // operator_audit row ONLY IF the published problem and active, non-retracted,
   // non-redacted claim version still hold at commit time.
-  const batchResults = await db.batch([
-    db
-      .prepare(
-        `INSERT INTO external_expert_reviews
-           (review_record_id, problem_id, claim_id, claim_version, claim_content_digest,
-            reviewer_name, reviewer_affiliation, reviewer_identifier,
-            attestation_locator, attestation_sha256, verdict, reviewed_at,
-            no_claim_boundary_json, verified_by_operator_id, created_at)
-         SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-         WHERE EXISTS (
-           SELECT 1
-           FROM problems p
-           JOIN claim_versions cv ON cv.problem_id = p.id
-           WHERE p.id = ?
-             AND p.status <> 'private-draft'
-             AND cv.claim_id = ?
-             AND cv.version = ?
-             AND cv.content_digest = ?
-             AND NOT EXISTS (
-               SELECT 1 FROM retractions r
-               WHERE r.problem_id = cv.problem_id
-                 AND r.target_object IN (cv.claim_id, cv.claim_id || '@' || cv.version)
-             )
-             AND NOT EXISTS (
-               SELECT 1 FROM events e
-               JOIN event_content ec ON ec.event_id = e.id AND ec.payload_sha256 = e.payload_sha256
-               WHERE e.problem_id = cv.problem_id
-                 AND e.object_kind = 'claim'
-                 AND e.object_id = cv.claim_id
-                 AND e.object_version = cv.version
-                 AND ec.redacted_at IS NOT NULL
-             )
-         )`,
-      )
-      .bind(
-        reviewRecordId,
-        problemId,
-        input.claim_id,
-        input.claim_version,
-        claimVersion.content_digest,
-        input.reviewer.name,
-        input.reviewer.affiliation,
-        input.reviewer.identifier,
-        input.attestation_locator,
-        input.attestation_sha256,
-        input.verdict,
-        input.reviewed_at,
-        boundaryJson,
-        operatorId,
-        createdAt,
-        problemId,
-        input.claim_id,
-        input.claim_version,
-        claimVersion.content_digest,
-      ),
-    db
-      .prepare(
-        `INSERT INTO operator_audit
-           (event_id, seq, operator_id, action, target_id, reason, before_state_digest, after_state_digest, created_at)
-         SELECT ?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM operator_audit), ?, ?, ?, ?, NULL, ?, ?
-         WHERE EXISTS (SELECT 1 FROM external_expert_reviews WHERE review_record_id = ?)`,
-      )
-      .bind(
-        auditEventId,
-        operatorId,
-        "external-expert-review-recorded",
-        auditTarget,
-        auditReason,
-        afterStateDigest,
-        createdAt,
-        reviewRecordId,
-      ),
-  ]);
+  let inserted: number;
+  try {
+    const batchResults = await db.batch([
+      db
+        .prepare(
+          `INSERT INTO external_expert_reviews
+             (review_record_id, problem_id, claim_id, claim_version, claim_content_digest,
+              reviewer_name, reviewer_affiliation, reviewer_identifier,
+              attestation_locator, attestation_sha256, verdict, reviewed_at,
+              no_claim_boundary_json, verified_by_operator_id, created_at,
+              create_key_digest, create_request_digest)
+           SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+           WHERE EXISTS (
+             SELECT 1
+             FROM problems p
+             JOIN claim_versions cv ON cv.problem_id = p.id
+             WHERE p.id = ?
+               AND p.status <> 'private-draft'
+               AND cv.claim_id = ?
+               AND cv.version = ?
+               AND cv.content_digest = ?
+               AND NOT EXISTS (
+                 SELECT 1 FROM retractions r
+                 WHERE r.problem_id = cv.problem_id
+                   AND r.target_object IN (cv.claim_id, cv.claim_id || '@' || cv.version)
+               )
+               AND NOT EXISTS (
+                 SELECT 1 FROM events e
+                 JOIN event_content ec ON ec.event_id = e.id AND ec.payload_sha256 = e.payload_sha256
+                 WHERE e.problem_id = cv.problem_id
+                   AND e.object_kind = 'claim'
+                   AND e.object_id = cv.claim_id
+                   AND e.object_version = cv.version
+                   AND ec.redacted_at IS NOT NULL
+               )
+           )`,
+        )
+        .bind(
+          reviewRecordId,
+          problemId,
+          input.claim_id,
+          input.claim_version,
+          claimVersion.content_digest,
+          input.reviewer.name,
+          input.reviewer.affiliation,
+          input.reviewer.identifier,
+          input.attestation_locator,
+          input.attestation_sha256,
+          input.verdict,
+          input.reviewed_at,
+          boundaryJson,
+          operatorId,
+          createdAt,
+          keyDigest,
+          requestDigest,
+          problemId,
+          input.claim_id,
+          input.claim_version,
+          claimVersion.content_digest,
+        ),
+      db
+        .prepare(
+          `INSERT INTO operator_audit
+             (event_id, seq, operator_id, action, target_id, reason, before_state_digest, after_state_digest, created_at)
+           SELECT ?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM operator_audit), ?, ?, ?, ?, NULL, ?, ?
+           WHERE EXISTS (SELECT 1 FROM external_expert_reviews WHERE review_record_id = ?)`,
+        )
+        .bind(
+          auditEventId,
+          operatorId,
+          "external-expert-review-recorded",
+          auditTarget,
+          auditReason,
+          afterStateDigest,
+          createdAt,
+          reviewRecordId,
+        ),
+    ]);
+    inserted = batchResults[0]?.meta?.changes ?? 0;
+  } catch (error) {
+    // The unique command index rolls back both inserts for a concurrent loser.
+    const concurrent = await replay();
+    if (concurrent !== undefined) return concurrent;
+    throw error;
+  }
 
-  if ((batchResults[0]?.meta?.changes ?? 0) !== 1) {
+  if (inserted !== 1) {
+    const concurrent = await replay();
+    if (concurrent !== undefined) return concurrent;
     return {
       ok: false,
       status: 404,

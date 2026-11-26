@@ -1181,7 +1181,10 @@ test("Fable §6.2 & 2026-11-02: famous-problem resolve requires verified operato
         `https://a.asimposium.org/v1/operators/problems/${PROBLEM}/external-expert-reviews`,
         {
           method: "POST",
-          headers: { "content-type": "application/json" },
+          headers: {
+            "content-type": "application/json",
+            "idempotency-key": crypto.randomUUID(),
+          },
           body: JSON.stringify(payload),
         },
       );
@@ -1746,6 +1749,161 @@ test("suspended stewards are refused and concurrent draft publishers share one p
         noClaimBoundary: BOUNDARY,
       });
       expect(afterRetractVerify).toBeNull();
+    }
+  } finally {
+    f.sql.close();
+  }
+});
+
+test("external review commands recover one audit and attestation across retries and races", async () => {
+  const { f } = await seedResolvedFixture({ famous: true });
+  try {
+    let authorized = true;
+    const router = createSynthesisDraftsAndExternalReviewsApp({
+      db: f.db,
+      verifiedOperator: async (request) =>
+        authorized
+          ? {
+              principal: {
+                type: "operator",
+                operatorId: "usr_review_replay",
+                serviceEnvelopeKid: "k1",
+              },
+              rawBody: new Uint8Array(await request.arrayBuffer()),
+            }
+          : new Response(null, { status: 403 }),
+    });
+    const payload = {
+      claim_id: CLAIM,
+      claim_version: 1,
+      reviewer: {
+        name: "Dr. Ada Referee",
+        affiliation: "Institute for Formal Foundations",
+        identifier: "https://orcid.org/0000-0002-1825-0097",
+      },
+      attestation_locator: "https://doi.org/10.1000/replay-referee-report",
+      attestation_sha256: "d".repeat(64),
+      verdict: "supports-resolution",
+      reviewed_at: "2026-11-21T12:00:00.000Z",
+      no_claim_boundary: BOUNDARY,
+    };
+    const post = (key?: string, body: unknown = payload) =>
+      router.request(
+        `https://a.asimposium.org/v1/operators/problems/${PROBLEM}/external-expert-reviews`,
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            ...(key === undefined ? {} : { "idempotency-key": key }),
+          },
+          body: JSON.stringify(body),
+        },
+      );
+    const counts = () =>
+      f.sql
+        .query(`SELECT
+          (SELECT COUNT(*) FROM external_expert_reviews) AS reviews,
+          (SELECT COUNT(*) FROM operator_audit
+            WHERE action = 'external-expert-review-recorded') AS audits`)
+        .get();
+
+    expect((await post()).status).toBe(400);
+    expect((await post("invalid key")).status).toBe(400);
+    expect(counts()).toEqual({ reviews: 0, audits: 0 });
+
+    const initial = await post("review-command");
+    expect(initial.status).toBe(201);
+    const accepted = ExternalExpertReviewRecordSchema.parse(await initial.json());
+    expect(initial.headers.get("cache-control")).toBe("private, no-store");
+    const retried = await post("review-command");
+    expect(retried.status).toBe(201);
+    expect(await retried.json()).toEqual(accepted);
+    const conflict = await post("review-command", { ...payload, verdict: "withheld" });
+    expect(conflict.status).toBe(409);
+    expect(await conflict.json()).toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+    expect(counts()).toEqual({ reviews: 1, audits: 1 });
+
+    const races = await Promise.all([post("concurrent-review"), post("concurrent-review")]);
+    expect(races.map((response) => response.status)).toEqual([201, 201]);
+    const [firstRace, secondRace] = await Promise.all(races.map((response) => response.json()));
+    expect(firstRace).toEqual(secondRace);
+    expect(counts()).toEqual({ reviews: 2, audits: 2 });
+
+    // Replay recovers historical acceptance; it is not fresh review authority.
+    f.sql
+      .query(`INSERT INTO retractions
+        (retraction_id, problem_id, target_object, reason, author_fellow_id, created_at)
+        VALUES ('RET-REPLAY', ?, ?, 'The reviewed claim was retracted.', ?, ?)`)
+      .run(PROBLEM, `${CLAIM}@1`, FELLOW, NOW());
+    expect(await (await post("review-command")).json()).toEqual(accepted);
+    expect((await post("new-review-after-retraction")).status).toBe(404);
+    const revokedAt = NOW();
+    f.sql
+      .query("UPDATE external_expert_reviews SET revoked_at = ? WHERE review_record_id = ?")
+      .run(revokedAt, accepted.review_record_id);
+    expect(await (await post("review-command")).json()).toEqual({
+      ...accepted,
+      revoked_at: revokedAt,
+    });
+    authorized = false;
+    expect((await post("review-command")).status).toBe(403);
+    expect(counts()).toEqual({ reviews: 2, audits: 2 });
+  } finally {
+    f.sql.close();
+  }
+});
+
+test("external review audit failure rolls back the review and leaves its retry key unused", async () => {
+  const { f } = await seedResolvedFixture({ famous: true });
+  try {
+    const { recordExternalExpertReview } = await import(
+      "../../src/problems/external-expert-reviews.ts"
+    );
+    const payload = {
+      claim_id: CLAIM,
+      claim_version: 1,
+      reviewer: {
+        name: "Dr. Ada Referee",
+        affiliation: "Institute for Formal Foundations",
+        identifier: "https://orcid.org/0000-0002-1825-0097",
+      },
+      attestation_locator: "https://doi.org/10.1000/atomic-referee-report",
+      attestation_sha256: "a".repeat(64),
+      verdict: "supports-resolution",
+      reviewed_at: "2026-11-21T12:00:00.000Z",
+      no_claim_boundary: BOUNDARY,
+    };
+    f.sql.exec(`CREATE TRIGGER fail_external_review_audit BEFORE INSERT ON operator_audit
+      WHEN NEW.action = 'external-expert-review-recorded'
+      BEGIN SELECT RAISE(ABORT, 'EXTERNAL_REVIEW_AUDIT_UNAVAILABLE'); END`);
+    await expect(
+      recordExternalExpertReview(f.db, PROBLEM, "usr_atomic_review", payload, "atomic-review"),
+    ).rejects.toThrow("EXTERNAL_REVIEW_AUDIT_UNAVAILABLE");
+    expect(f.sql.query("SELECT COUNT(*) AS n FROM external_expert_reviews").get()).toEqual({
+      n: 0,
+    });
+    f.sql.exec("DROP TRIGGER fail_external_review_audit");
+    const retry = await recordExternalExpertReview(
+      f.db,
+      PROBLEM,
+      "usr_atomic_review",
+      payload,
+      "atomic-review",
+    );
+    expect(retry.ok).toBe(true);
+    expect(f.sql.query("SELECT COUNT(*) AS n FROM external_expert_reviews").get()).toEqual({
+      n: 1,
+    });
+    const otherOperator = await recordExternalExpertReview(
+      f.db,
+      PROBLEM,
+      "usr_other_operator",
+      payload,
+      "atomic-review",
+    );
+    expect(otherOperator.ok).toBe(true);
+    if (retry.ok && otherOperator.ok) {
+      expect(otherOperator.record.review_record_id).not.toBe(retry.record.review_record_id);
     }
   } finally {
     f.sql.close();
