@@ -164,7 +164,8 @@ export async function verifyWorkshopRoomTicket(
     !Number.isSafeInteger(p.exp) ||
     p.exp <= p.iat ||
     p.exp - p.iat > ttl ||
-    nowSec > p.exp ||
+    // Expiry is exclusive, matching eviction of the durable replay record.
+    nowSec >= p.exp ||
     nowSec < p.iat - CLOCK_SKEW_SECONDS
   ) {
     return null;

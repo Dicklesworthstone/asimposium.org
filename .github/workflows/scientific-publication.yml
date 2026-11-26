@@ -18,6 +18,8 @@ on:
       - "apps/wire/src/app.ts"
       - "apps/wire/src/problems/**"
       - "apps/wire/src/sessions/**"
+      - "apps/wire/src/herald/**"
+      - "apps/wire/test/unit/herald-human-workshop-rooms.test.ts"
       - "apps/wire/src/screening/**"
       - "apps/wire/src/moderation/**"
       - "apps/wire/test/unit/synthesis*.test.ts"
@@ -67,6 +69,11 @@ jobs:
         run: |
           bun run --filter @asimposium/contracts test
           bun run --filter @asimposium/render test
+      - name: Workshop ticket expiry and replay regressions
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
+        run: |
+          bunx --no-install biome check apps/wire/src/herald/room-ticket.ts apps/wire/src/herald/room.ts apps/wire/test/unit/herald-human-workshop-rooms.test.ts
+          bun test /dev/null --timeout=120000 apps/wire/test/unit/herald-human-workshop-rooms.test.ts
       - name: Synthesis publication and screening regressions
         if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
         run: |

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { D1Database } from "@cloudflare/workers-types";
+import type { D1Database, DurableObjectStorage } from "@cloudflare/workers-types";
 import {
   HERALD_ROOM_LIMITS,
   HERALD_ROOM_PROTOCOL,
@@ -10,6 +10,7 @@ import { publicWatchPath } from "../../../../packages/contracts/src/public-watch
 import { SERVICE_ENVELOPE_HEADER } from "../../src/auth/http.ts";
 import type { Env } from "../../src/env.ts";
 import type { HeraldDatabase } from "../../src/herald/outbox.ts";
+import { consumeWorkshopTicketNonce } from "../../src/herald/room.ts";
 import {
   HeraldRoomController,
   type HeraldRoomPort,
@@ -73,6 +74,100 @@ function localD1(sqlite: ReturnType<typeof migratedSqlite>): D1Database & Herald
 }
 
 describe("Fable §11 Herald human public rooms, SSE fallback, and Ed25519 workshop rooms (kfag)", () => {
+  test("workshop tickets expire at the same exact instant as their replay records", async () => {
+    const now = 1_700_000_000_000;
+    const minted = await mintWorkshopRoomTicket(
+      { sponsorId: "usr_expiry", fellowId: "fellow-expiry", problemId: "P-EXPIRY" },
+      TEST_ED25519_KEY,
+      now,
+    );
+    expect(minted).not.toBeNull();
+    if (minted === null) throw new Error("ticket fixture was not minted");
+    const keys = { signingKey: TEST_ED25519_KEY };
+    expect(await verifyWorkshopRoomTicket(minted.ticket, keys, minted.expMs - 1)).not.toBeNull();
+    for (const at of [minted.expMs, minted.expMs + 1, minted.expMs + 999, minted.expMs + 1000]) {
+      expect(await verifyWorkshopRoomTicket(minted.ticket, keys, at)).toBeNull();
+    }
+  });
+
+  test("retiring a consumed nonce cannot revive its ticket, including verification across expiry", async () => {
+    // Storage port only; the production nonce transaction and expiry guard run
+    // unchanged. This is a unit check, not a deployed Durable Object claim.
+    const records = new Map<string, Record<string, number>>();
+    const storage = {
+      async transaction(
+        run: (tx: {
+          get(key: string): Promise<Record<string, number> | undefined>;
+          put(key: string, value: Record<string, number>): Promise<void>;
+        }) => Promise<boolean>,
+      ) {
+        return run({
+          get: async (key) => structuredClone(records.get(key)),
+          put: async (key, value) => {
+            records.set(key, structuredClone(value));
+          },
+        });
+      },
+    } as unknown as Pick<DurableObjectStorage, "transaction">;
+    const now = 1_700_000_000_000;
+    const expiry = now + HERALD_ROOM_LIMITS.workshopTicketTtlSeconds * 1000;
+    const used = "11".repeat(16);
+    const fresh = "22".repeat(16);
+    const delayed = "33".repeat(16);
+    expect(await consumeWorkshopTicketNonce(storage, used, expiry, () => now)).toBe(true);
+    expect(await consumeWorkshopTicketNonce(storage, used, expiry, () => expiry - 1)).toBe(false);
+    expect(await consumeWorkshopTicketNonce(storage, fresh, expiry + 60_000, () => expiry)).toBe(
+      true,
+    );
+    expect(Object.hasOwn([...records.values()][0]!, used)).toBe(false);
+    expect(await consumeWorkshopTicketNonce(storage, used, expiry, () => expiry)).toBe(false);
+    expect(await consumeWorkshopTicketNonce(storage, used, expiry, () => expiry + 999)).toBe(false);
+    // A previously unseen ticket verified just before expiry must also fail
+    // when asynchronous verification returns after its replay window closes.
+    expect(await consumeWorkshopTicketNonce(storage, delayed, expiry, () => expiry)).toBe(false);
+    expect(Object.hasOwn([...records.values()][0]!, delayed)).toBe(false);
+  });
+
+  test("nonce transactions recheck expiry after delayed entry, reads, and callback retries", async () => {
+    const expiry = 1_700_000_060_000;
+    const nonce = "44".repeat(16);
+    for (const delayAt of ["transaction", "read", "retry"] as const) {
+      let now = expiry - 1;
+      let puts = 0;
+      let reads = 0;
+      const storage = {
+        async transaction(
+          run: (tx: {
+            get(key: string): Promise<Record<string, number> | undefined>;
+            put(key: string, value: Record<string, number>): Promise<void>;
+          }) => Promise<boolean>,
+        ) {
+          if (delayAt === "transaction") now = expiry;
+          const tx = {
+            get: async () => {
+              reads += 1;
+              if (delayAt === "read") now = expiry;
+              // Another transaction has already retired this expired nonce.
+              return undefined;
+            },
+            put: async () => {
+              puts += 1;
+            },
+          };
+          const first = await run(tx);
+          if (delayAt !== "retry") return first;
+          expect(first).toBe(true);
+          now = expiry;
+          // Durable storage may retry the callback after a conflicting write.
+          return run(tx);
+        },
+      } as unknown as Pick<DurableObjectStorage, "transaction">;
+      expect(await consumeWorkshopTicketNonce(storage, nonce, expiry, () => now)).toBe(false);
+      expect(puts).toBe(delayAt === "retry" ? 1 : 0);
+      expect(reads).toBe(delayAt === "retry" ? 2 : 1);
+    }
+  });
+
   test("unauthenticated human WS connects to /p/:id/room without bearer, receives public_seq only, caps per-IP, and rejects cookies (S-6)", async () => {
     const sqlite = migratedSqlite({ strict: true });
     const db = localD1(sqlite);

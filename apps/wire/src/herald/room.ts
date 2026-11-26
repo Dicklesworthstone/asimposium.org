@@ -2,6 +2,7 @@ import { FellowTokenSchema } from "@asimposium/contracts";
 import type {
   WebSocketRequestResponsePair as AutoResponsePair,
   DurableObjectState,
+  DurableObjectStorage,
   WebSocket as WorkerSocket,
 } from "@cloudflare/workers-types";
 import {
@@ -25,6 +26,35 @@ const host = globalThis as unknown as {
   WebSocketPair: new () => { 0: WorkerSocket; 1: WorkerSocket };
   WebSocketRequestResponsePair: new (request: string, response: string) => AutoResponsePair;
 };
+
+/** A ticket cannot outlive its replay record. Transaction callbacks can
+ * resume or retry after expiry, so sample the clock after reading storage
+ * and before retiring any used nonces. */
+export async function consumeWorkshopTicketNonce(
+  storage: Pick<DurableObjectStorage, "transaction">,
+  nonce: string,
+  expMs: number,
+  clock: () => number,
+): Promise<boolean> {
+  if (!roomCursor(expMs)) return false;
+  return storage.transaction(async (tx) => {
+    const stored = (await tx.get<Record<string, number>>(USED_TICKETS_KEY)) ?? {};
+    const now = clock();
+    if (!roomCursor(now) || expMs <= now) return false;
+    const active: Record<string, number> = {};
+    for (const [key, expiresAt] of Object.entries(stored)) {
+      if (typeof expiresAt === "number" && expiresAt > now) active[key] = expiresAt;
+    }
+    if (Object.hasOwn(active, nonce)) return false;
+    if (Object.keys(active).length >= MAX_STORED_NONCES) {
+      // Fail closed rather than evicting unexpired nonces under flood.
+      return false;
+    }
+    active[nonce] = expMs;
+    await tx.put(USED_TICKETS_KEY, active);
+    return true;
+  });
+}
 
 /** One exported hibernating Durable Object per public problem. D1 remains the
  * only scientific authority; storage holds just an idempotent wake generation. */
@@ -87,30 +117,8 @@ export class HeraldRoom {
             if (generation > current) await tx.put(GENERATION_KEY, generation);
           });
         },
-        consumeTicketNonce: async (nonce, expMs, now) => {
-          let accepted = false;
-          await ctx.storage.transaction(async (tx) => {
-            const stored = (await tx.get<Record<string, number>>(USED_TICKETS_KEY)) ?? {};
-            const active: Record<string, number> = {};
-            for (const [key, expiresAt] of Object.entries(stored)) {
-              if (typeof expiresAt === "number" && expiresAt > now) active[key] = expiresAt;
-            }
-            if (Object.hasOwn(active, nonce)) {
-              accepted = false;
-              return;
-            }
-            const keys = Object.keys(active);
-            if (keys.length >= MAX_STORED_NONCES) {
-              // Fail closed rather than evicting unexpired nonces under flood.
-              accepted = false;
-              return;
-            }
-            active[nonce] = expMs;
-            await tx.put(USED_TICKETS_KEY, active);
-            accepted = true;
-          });
-          return accepted;
-        },
+        consumeTicketNonce: (nonce, expMs) =>
+          consumeWorkshopTicketNonce(ctx.storage, nonce, expMs, Date.now),
         pair: () => {
           const pair = new host.WebSocketPair();
           return { client: pair[0], server: pair[1] };
