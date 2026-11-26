@@ -3896,6 +3896,12 @@ describe("session protocol routes", () => {
       ).json(),
     );
     const path = `/v1/sessions/${opened.session_id}`;
+    const empty = PackResponseSchema.parse(
+      await (await f.call(`${path}/pack?profile=claim&max_tokens=8000`)).json(),
+    );
+    expect(empty.omitted.some(({ reason }) => reason === "no_published_claim")).toBe(true);
+    expect(empty.items.some(({ scope }) => scope === "workshop")).toBe(false);
+    expect(empty.next_actions.some(({ url }) => url === `/p/P-4DSP/claims.json?through=${empty.cursor}`)).toBe(true);
     const draft = WorkshopPushResponseSchema.parse(
       await (
         await post(`${path}/workshop`, {
@@ -4033,6 +4039,19 @@ describe("session protocol routes", () => {
     }
     const second = (await get("profile=claim&target=C-1@2&max_tokens=8000")).pack;
     expect(JSON.stringify(second)).toContain("VERSION-2-EVIDENCE");
+    const automatic = await get("profile=claim&max_tokens=8000");
+    expect(automatic.pack).toEqual(second);
+    const canonicalPath = automatic.response.headers.get("content-location");
+    if (canonicalPath === null) throw new Error("Missing exact claim pack location");
+    const canonicalUrl = new URL(canonicalPath, "https://a.asimposium.org");
+    expect(canonicalUrl.pathname).toBe(packPath);
+    expect(canonicalUrl.searchParams.get("target")).toBe("C-1@2");
+    expect(canonicalUrl.searchParams.get("max_tokens")).toBe("8000");
+    const conditional = await f.call(canonicalPath, {
+      headers: { "if-none-match": automatic.response.headers.get("etag") ?? "" },
+    });
+    expect(conditional.status).toBe(304);
+    expect(JSON.stringify(automatic.pack)).not.toContain("PRIVATE-TARGET");
     expect(JSON.stringify(second)).not.toContain("VERSION-ONE-REVIEW");
     expect(second.omitted).toContainEqual({
       reason: "item_too_large",
@@ -4075,6 +4094,16 @@ describe("session protocol routes", () => {
     });
     expect(JSON.stringify(evidenceRedacted)).not.toContain("VERSION-1-EVIDENCE");
     expect(JSON.stringify(evidenceRedacted)).toContain("VERSION-ONE-REVIEW");
+    // Withhold the current revision. Discovery cannot fall back to the older
+    // version or to private resume material when the head is unavailable.
+    await f.db.prepare(
+      "UPDATE event_content SET payload_json = '{}', redaction_reason = 'synthetic head redaction', redacted_at = '2026-09-07T00:00:00Z' WHERE event_id IN (SELECT id FROM events WHERE problem_id = 'P-4DSP' AND type = 'claim.revised' AND object_id = 'C-1' AND object_version = 2)",
+    ).run();
+    const unavailable = await get("profile=claim&max_tokens=8000");
+    expect(unavailable.response.headers.get("content-location")).toBeNull();
+    expect(unavailable.pack.items.some(({ kind }) => kind === "claim-detail")).toBe(false);
+    expect(unavailable.pack.omitted.some(({ reason }) => reason === "content_unavailable")).toBe(true);
+    expect(JSON.stringify(unavailable.pack)).not.toContain("PRIVATE-TARGET");
     await f.db
       .prepare(
         "UPDATE event_content SET payload_json = '{}', redaction_reason = 'synthetic targeted read test', redacted_at = '2026-09-07T00:00:00Z' WHERE event_id IN (SELECT id FROM events WHERE problem_id = 'P-4DSP' AND object_id = 'C-1' AND object_version = 1)",

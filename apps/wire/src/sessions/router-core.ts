@@ -3769,7 +3769,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       );
     }
     const profile = profileParam as PackProfile;
-    const targetParam = url.searchParams.get("target");
+    let targetParam = url.searchParams.get("target");
+    let selectedClaimLocation: string | undefined;
     if (
       targetParam !== null &&
       (url.searchParams.getAll("target").length !== 1 ||
@@ -3920,6 +3921,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         "cache-control": "private, no-store",
         "content-type": "application/json; charset=utf-8",
         etag,
+        ...(selectedClaimLocation === undefined ? {} : { "content-location": selectedClaimLocation }),
       };
       if (privatePack !== undefined) {
         let current = false;
@@ -4464,6 +4466,34 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         : { candidates: [], omitted: [], actions: [] };
     candidates.push(...sharedHandoff.candidates);
 
+    // An untargeted claim read uses the same exact-version composer as an
+    // explicit pin. Select after checking membership and private-draft scope.
+    // Eight bounded public heads cap the bytes verified just to choose a pin.
+    let claimSelectionOmission: { reason: string; detail: string } | undefined;
+    if (profile === "claim" && targetParam === null) {
+      const heads = await readPackClaimHeads(db, session.problem_id, cursor, 8);
+      for (const head of heads) {
+        if (head.statement === null) continue;
+        const pin = PackTargetQuerySchema.safeParse({ profile, target: `${head.id}@${head.version}` });
+        if (!pin.success) continue;
+        targetParam = pin.data.target;
+        url.search = new URLSearchParams({
+          profile,
+          target: targetParam,
+          max_tokens: String(requestedMaxTokens),
+        }).toString();
+        selectedClaimLocation = `${url.pathname}${url.search}`;
+        break;
+      }
+      if (targetParam === null) {
+        claimSelectionOmission = {
+          reason: heads.length === 0 ? "no_published_claim" : "content_unavailable",
+          detail: heads.length === 0
+            ? "No claim has been published at the pack cursor."
+            : "No readable current version was found among the first eight claim heads. Choose an exact target from the public claims list.",
+        };
+      }
+    }
     const targetSection =
       targetParam === null
         ? { candidates: [], omitted: [] }
@@ -4481,7 +4511,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         stable_prefix: 2,
       });
 
-    if (profile !== "hello" && profile !== "review-queue" && targetParam === null) {
+    if (profile !== "hello" && profile !== "review-queue" && profile !== "claim" && targetParam === null) {
       // Coordination can precede the first claim: hypotheses, questions and
       // proof gaps are leaseable objects too. This is current state, not a
       // historical assertion about the pack's captured scientific cursor.
@@ -4900,13 +4930,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       }
     }
 
-    // Profiles whose dedicated sections are not yet composed say so in
-    // omitted[] rather than serving a silent thin pack (§7.3's mandatory
-    // omission disclosure). Review packs already enforce P12 author-workshop
-    // isolation mechanically, and `full` packs return via readFullPack above.
-    const UNCOMPOSED: Partial<Record<PackProfile, string[]>> = {
-      claim: targetParam === null ? ["claim-detail"] : [],
-    };
     const actionPermissions = ["workshop:read"];
     const authorizationTarget = {
       kind: "existing-problem" as const,
@@ -5215,6 +5238,14 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                 : []),
             ]
           : []),
+        ...(claimSelectionOmission === undefined
+          ? []
+          : [{
+              method: "GET" as const,
+              url: `/p/${session.problem_id}/claims.json?through=${cursor}`,
+              why: "Browse the public claims at this cursor and request profile=claim with an exact target.",
+              public_read: true,
+            }]),
         ...targetSection.candidates
           .filter((item) => item.kind === "claim-dependency")
           // Actions are mandatory envelope bytes. Every premise carries its
@@ -5329,10 +5360,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         ...(profile === "working"
           ? []
           : [{ reason: "profile_excludes_workshop", detail: "workshop-heads" }]),
-        ...(UNCOMPOSED[profile] ?? []).map((key) => ({
-          reason: "profile_section_not_composed",
-          detail: key,
-        })),
+        ...(claimSelectionOmission === undefined ? [] : [claimSelectionOmission]),
       ],
     };
     const formulation = orientation.candidates.find(({ kind }) => kind === "problem-formulation");
