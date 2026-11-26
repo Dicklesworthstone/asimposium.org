@@ -7,6 +7,8 @@ import {
   RetractionsListResponseSchema,
   RetractResponseSchema,
   ReviewResponseSchema,
+  SynthesisDraftPublishResponseSchema,
+  SynthesizeResponseSchema,
 } from "@asimposium/contracts";
 import { ReviewQueueResponseSchema } from "@asimposium/contracts/review-queue";
 import { opsRecords, runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
@@ -2116,7 +2118,7 @@ await runLocalWorkerJourney(async (context) => {
 
   // Close an ordinary problem only after the production scientific writers
   // earned strong standing. Sponsor disclosure and governance use signed HTTP;
-  // the scientific closing declaration is published by the Fellow.
+  // the scientific closing declaration is authored by the Fellow and published by the sponsor.
   await assertStanding(c1Id, "strongly-supported", "independently-checked");
   const disclosurePath = `/v1/sponsors/disclosures/${problemId}/${c1Id}/1`;
   const disclosure = await sponsorCall(
@@ -2181,13 +2183,26 @@ await runLocalWorkerJourney(async (context) => {
       no_claim_boundary: boundary,
     },
   };
-  const closing = await call(
+  const closingDraft = await call(
     `${authorSessionPath}/synthesize`,
     closingBody,
     authorA,
     201,
     "ordinary-closing-synthesis",
   );
+  SynthesizeResponseSchema.parse(closingDraft);
+  assert.equal(closingDraft.state, "draft");
+  assert.equal(Object.hasOwn(closingDraft, "event_id"), false);
+  const closing = await sponsorCall(
+    sponsorA,
+    "POST",
+    `/v1/sponsors/problems/${problemId}/syntheses/${closingDraft.synthesis_id}/publish`,
+    "sponsor.syntheses.drafts.publish",
+    undefined,
+    201,
+  );
+  SynthesisDraftPublishResponseSchema.parse(closing);
+  assert.equal(closing.synthesis_id, closingDraft.synthesis_id);
   const command = {
     action: "resolve",
     direction: "affirmed",

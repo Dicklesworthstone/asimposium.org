@@ -4,6 +4,8 @@ import {
   PackResponseSchema,
   SessionCloseResponseSchema,
   SingleSynthesisResponseSchema,
+  SynthesisDraftPublishResponseSchema,
+  SynthesizeResponseSchema,
 } from "@asimposium/contracts";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 
@@ -151,8 +153,8 @@ const receipt = await runLocalWorkerJourney(
       author,
       201,
     );
-    const synthesize = async (session, body) =>
-      call(
+    const synthesize = async (session, body) => {
+      const draft = await call(
         `/v1/sessions/${session}/synthesize`,
         {
           covers_through: (await publicState()).public_seq,
@@ -164,6 +166,21 @@ const receipt = await runLocalWorkerJourney(
         author,
         201,
       );
+      SynthesizeResponseSchema.parse(draft);
+      assert.equal(draft.state, "draft");
+      assert.equal(Object.hasOwn(draft, "event_id"), false);
+      const published = await sponsorCall(
+        sponsor,
+        "POST",
+        `/v1/sponsors/problems/${problem}/syntheses/${draft.synthesis_id}/publish`,
+        "sponsor.syntheses.drafts.publish",
+        undefined,
+        201,
+      );
+      SynthesisDraftPublishResponseSchema.parse(published);
+      assert.equal(published.synthesis_id, draft.synthesis_id);
+      return published;
+    };
     const firstSynthesis = await synthesize(
       firstSession,
       "PUBLIC_HANDOFF_FIRST: reduce the odd integers to their four residue classes; independent checking remains open.",

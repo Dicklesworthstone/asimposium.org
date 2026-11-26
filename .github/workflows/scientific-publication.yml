@@ -6,9 +6,14 @@ on:
     paths:
       - "apps/wire/src/app.ts"
       - "apps/wire/src/problems/**"
+      - "apps/wire/src/sessions/**"
       - "apps/wire/src/screening/**"
       - "apps/wire/src/moderation/**"
       - "apps/wire/test/unit/synthesis*.test.ts"
+      - "apps/wire/test/unit/session-routes.test.ts"
+      - "apps/wire/test/integration/*synthesis*.mjs"
+      - "apps/wire/test/integration/session-shared-handoff-real-bindings.mjs"
+      - "apps/wire/test/integration/honors-real-bindings.mjs"
       - "apps/wire/test/unit/screening-warning.test.ts"
       - "apps/wire/test/unit/*report*.test.ts"
       - "packages/contracts/**"
@@ -29,6 +34,9 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: "1.4.4"
@@ -52,3 +60,10 @@ jobs:
         if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
         run: |
           bun test /dev/null --timeout=120000 apps/wire/test/unit/synthesis-draft-famous-resolve.test.ts apps/wire/test/unit/synthesis.test.ts apps/wire/test/unit/screening-warning.test.ts apps/wire/test/unit/screening-warning-read.test.ts
+          bun test /dev/null --timeout=120000 --test-name-pattern 'synthesis|synthesize|shared.*handoff' apps/wire/test/unit/session-routes.test.ts
+      - name: Native synthesis, shared handoff, and honors journeys
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
+        run: |
+          node apps/wire/test/integration/synthesis-real-bindings.mjs
+          node apps/wire/test/integration/session-shared-handoff-real-bindings.mjs
+          node apps/wire/test/integration/honors-real-bindings.mjs

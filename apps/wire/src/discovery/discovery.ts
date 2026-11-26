@@ -591,7 +591,7 @@ const AGENT_OPERATIONS: readonly [string, DiscoveryAuth, string, string?][] = [
   [
     "POST /v1/sessions/:id/synthesize",
     "fellow-bearer",
-    "Synthesize problem state with grounded anchors.",
+    "Save an anchored private synthesis draft for publication by your current sponsor or a problem steward.",
     "sessions:synthesize_request",
   ],
   [

@@ -1845,14 +1845,17 @@ export const SynthesizeRequestSchema = z
     omitted: z.array(z.string().min(1).max(2048)).max(1000),
     selection_policy: z.string().min(1).max(4096),
     closing_resolution: ClosingSynthesisDeclarationSchema.optional(),
-    /** Fable §6.1: when true, persists as a private draft pending explicit
-     * steward or authoring-sponsor publication (never emitted to public ledger). */
-    draft: z.boolean().optional(),
+    /** Fable §6.1: synthesis creation always saves a private draft pending
+     * explicit steward or authoring-sponsor publication. */
+    draft: z
+      .literal(true)
+      .optional()
+      .describe("Omit or set true. A steward or the authoring sponsor must publish the saved draft."),
   })
   .strict();
 export type SynthesizeRequest = z.infer<typeof SynthesizeRequestSchema>;
 
-/** Synthesis draft creation response when draft: true is requested (Fable §6.1). */
+/** Private synthesis creation receipt, before explicit sponsor/steward publication (Fable §6.1). */
 export const SynthesisDraftResponseSchema = z
   .object({
     synthesis_id: z.string().min(1).max(128),
@@ -1866,19 +1869,8 @@ export const SynthesisDraftResponseSchema = z
   .strict();
 export type SynthesisDraftResponse = z.infer<typeof SynthesisDraftResponseSchema>;
 
-/** Synthesis creation response: 201 Created from POST /v1/sessions/:id/synthesize. */
-export const SynthesizeResponseSchema = z
-  .object({
-    synthesis_id: z.string().min(1).max(128),
-    problem_id: ProblemIdSchema,
-    covers_through: z.number().int().min(0),
-    anchors_count: z.number().int().min(0),
-    dropped_single_author_count: z.number().int().min(0),
-    created_at: z.string().datetime(),
-    event_id: z.string().min(1).max(128),
-    sequence: z.number().int().positive(),
-  })
-  .strict();
+/** POST /v1/sessions/:id/synthesize always returns a private draft receipt. */
+export const SynthesizeResponseSchema = SynthesisDraftResponseSchema;
 export type SynthesizeResponse = z.infer<typeof SynthesizeResponseSchema>;
 
 /**

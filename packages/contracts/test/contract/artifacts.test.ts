@@ -35,7 +35,12 @@ import {
   S2CostMeasurementReceiptSchema,
 } from "../../src/s2-cost-receipt.ts";
 import { ScreeningContractsSchema, ScreeningSchemaDocumentSchema } from "../../src/screening.ts";
-import { SessionsContractsSchema } from "../../src/sessions.ts";
+import {
+  SessionsContractsSchema,
+  SynthesizeRequestSchema,
+  SynthesizeResponseSchema,
+} from "../../src/sessions.ts";
+import { SynthesisDraftPublishResponseSchema } from "../../src/syntheses.ts";
 
 const minimalRevision = {
   claim_id: "C-1",
@@ -92,6 +97,41 @@ test("UTC timestamp exports and the Worker contract require RFC3339 seconds", ()
     expect(ProblemDormancyEventSchema.shape.quiet_since.safeParse(value).success).toBe(accepted);
     expect(validate(value)).toBe(accepted);
   }
+});
+
+test("generated synthesis contracts distinguish private drafts from publication receipts", () => {
+  const sessions = JSON.parse(
+    readFileSync(new URL("../../generated/sessions.schema.json", import.meta.url), "utf8"),
+  );
+  const syntheses = JSON.parse(
+    readFileSync(new URL("../../generated/syntheses.schema.json", import.meta.url), "utf8"),
+  );
+  const ajv = new Ajv2020({ strict: true });
+  addFormats(ajv);
+  const request = ajv.compile(sessions.properties.synthesize_request);
+  const draftResponse = ajv.compile(sessions.properties.synthesize_response);
+  const publication = ajv.compile(syntheses.$defs.draft_publish_response);
+  const readFixture = (name: string) =>
+    JSON.parse(readFileSync(new URL(`../fixtures/valid/${name}.json`, import.meta.url), "utf8"));
+  const body = readFixture("synthesize-request");
+  for (const [value, expected] of [
+    [body, true],
+    [{ ...body, draft: true }, true],
+    [{ ...body, draft: false }, false],
+  ] as const) {
+    expect(SynthesizeRequestSchema.safeParse(value).success).toBe(expected);
+    expect(request(value)).toBe(expected);
+  }
+  const draft = readFixture("synthesize-response");
+  const published = readFixture("synthesis-publication-response");
+  expect(SynthesizeResponseSchema.safeParse(draft).success).toBe(true);
+  expect(draftResponse(draft)).toBe(true);
+  expect(SynthesizeResponseSchema.safeParse(published).success).toBe(false);
+  expect(draftResponse(published)).toBe(false);
+  expect(SynthesisDraftPublishResponseSchema.safeParse(published).success).toBe(true);
+  expect(publication(published)).toBe(true);
+  expect(SynthesisDraftPublishResponseSchema.safeParse(draft).success).toBe(false);
+  expect(publication(draft)).toBe(false);
 });
 
 test("exported fixed tuples reject missing and surplus receipt items", () => {

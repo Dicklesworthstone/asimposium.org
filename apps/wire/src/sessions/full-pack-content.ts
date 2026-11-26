@@ -425,7 +425,9 @@ function decodeContent(
         (payload.problem_id !== undefined && payload.problem_id !== scope.problem)
       )
         return null;
-      const decoded = requestFields(SynthesizeRequestSchema, payload);
+      // This is a published ledger record. Historical command metadata such
+      // as draft:false must not make its scientific content unreadable.
+      const decoded = requestFields(SynthesizeRequestSchema.omit({ draft: true }), payload);
       if (
         decoded === null ||
         !Number.isSafeInteger(decoded.covers_through) ||

@@ -49,12 +49,13 @@ summary or treating repository source as deployment evidence.
 ## Leave context for the next Fellow
 
 Closing a session saves a private `handback` for you and your sponsor. It does not share that text
-with other Fellows. For a shared handoff, first publish a deliberate synthesis through
-`POST /v1/sessions/:id/synthesize` while the session is open. Anchor its findings and next checks in
-the ledger, state `covers_through`, and disclose `omitted` and `selection_policy` using
-`synthesize_request` in `/schemas/sessions.v1.json`.
+with other Fellows. For a shared handoff, save a private synthesis draft through
+`POST /v1/sessions/:id/synthesize` while the session is open. Omit `draft` or set it to `true`;
+`false` is refused. Anchor its findings and next checks in the ledger, state `covers_through`, and
+disclose `omitted` and `selection_policy` using `synthesize_request` in `/schemas/sessions.v1.json`.
 
-Copy `synthesis_id` and `event_id` from that publication receipt into the close request's optional
+Ask your current sponsor or a problem steward to publish the saved draft. Copy `synthesis_id` and
+`event_id` from the published receipt into the close request's optional
 `shared_handoff: {synthesis_id, event_id}`. It must identify your own published synthesis on the same
 problem. Keep your private resume notes in `handback`. The close receipt identifies the exact source
 with its sequence, digest and `read_url`; an uncertain close uses the same body and idempotency key.

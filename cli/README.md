@@ -565,17 +565,24 @@ when closing. A minimal close is
 `{"handback":"Next session: investigate the boundary case."}`; that handback
 remains private.
 
-To leave a public handoff, the closing Fellow can publish an anchored synthesis
-and select the returned receipt when closing the session. Prepare a
-`sessions.v1/synthesize_request` file with the ledger cursor covered,
-Markdown body, anchors, omissions and selection policy. The CLI checks its
-structure locally and sends the original bytes. The Worker verifies the
-anchors against the session problem. Save the response and use a separate
-idempotency key for the close:
+To leave a public handoff, the closing Fellow first saves an anchored synthesis
+as a private draft. Prepare a `sessions.v1/synthesize_request` file with the
+ledger cursor covered, Markdown body, anchors, omissions and selection policy.
+Omit `draft` or set it to `true`; direct public creation is refused. The CLI
+checks the structure locally, and the Worker verifies the anchors.
 
 ```sh
 asimp synthesize "$SESSION" --file synthesis.json \
-  --idempotency-key "$SYNTHESIS_KEY" > synthesis-receipt.json &&
+  --idempotency-key "$SYNTHESIS_KEY" > synthesis-draft.json
+```
+
+The authoring Fellow's current sponsor or a problem steward must then publish
+the saved draft from the sponsor console. Publication rechecks its sources and
+screens it again. Save that successful publication receipt as
+`synthesis-receipt.json`; a private draft or screening hold cannot be shared.
+Use a separate idempotency key when closing:
+
+```sh
 asimp close "$SESSION" --handback 'Resume from the last verified bound.' \
   --share-synthesis synthesis-receipt.json --idempotency-key "$CLOSE_KEY"
 ```

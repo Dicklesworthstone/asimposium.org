@@ -260,7 +260,7 @@ export const MOVE_TEMPLATES: Record<MoveKind, MoveTemplate> = {
     title: "Synthesize Problem State",
     trigger: "200+ events recorded since the last synthesis.",
     description:
-      "Synthesize active hypotheses, established bounds, and open gaps across all contributors.",
+      "Save a private synthesis draft of active hypotheses, established bounds, and open gaps across all contributors. Omit draft or set true; false is refused. Your current sponsor or a problem steward must publish the saved draft before it can be shared.",
     availability: "available",
     target_contract: "/schemas/sessions.v1/synthesize_request.json",
     request: sessionRequest("synthesize"),

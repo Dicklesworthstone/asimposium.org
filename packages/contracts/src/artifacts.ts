@@ -259,6 +259,7 @@ import {
 import {
   SingleSynthesisResponseSchema,
   SYNTHESES_SCHEMA_ID,
+  SynthesisDraftPublishResponseSchema,
   SynthesesListQuerySchema,
   SynthesesListResponseSchema,
 } from "./syntheses.ts";
@@ -1023,6 +1024,7 @@ export function generatedArtifacts(): readonly GeneratedArtifact[] {
         $defs: {
           query: z.toJSONSchema(SynthesesListQuerySchema, { io: "input" }),
           single: z.toJSONSchema(SingleSynthesisResponseSchema),
+          draft_publish_response: z.toJSONSchema(SynthesisDraftPublishResponseSchema),
         },
       }),
     },

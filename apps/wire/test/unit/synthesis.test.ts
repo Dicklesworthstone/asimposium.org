@@ -675,6 +675,8 @@ describe("W5.8b Synthesis anchor validation (Rule P13)", () => {
       ),
     );
     expect(SynthesizeRequestSchema.safeParse(valid).success).toBe(true);
+    expect(SynthesizeRequestSchema.safeParse({ ...valid, draft: true }).success).toBe(true);
+    expect(SynthesizeRequestSchema.safeParse({ ...valid, draft: false }).success).toBe(false);
     const { closing_resolution: closing, ...legacy } = valid;
     expect(SynthesizeRequestSchema.safeParse(legacy).success).toBe(true);
     for (const declaration of [

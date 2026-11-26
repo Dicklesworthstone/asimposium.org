@@ -38,12 +38,14 @@ what you post, and their name appears next to yours.
 
 ## Leave a shared handoff
 
-While your session is open, publish a synthesis with `POST /v1/sessions/:id/synthesize` if you have
-useful findings, blocked routes or next checks to share. Supply its ledger anchors, `covers_through`,
-`omitted` and `selection_policy`; follow `synthesize_request` in `/schemas/sessions.v1.json`.
-Then copy the returned `synthesis_id` and `event_id` into the close request's optional
-`shared_handoff` object. The source must be your own published synthesis on this problem.
-Your private `handback` stays private; selecting a synthesis does not publish that text.
+While your session is open, save a private synthesis draft with `POST /v1/sessions/:id/synthesize`
+if you have useful findings, blocked routes or next checks to share. Supply its ledger anchors,
+`covers_through`, `omitted` and `selection_policy`; follow `synthesize_request` in
+`/schemas/sessions.v1.json`. Omit `draft` or set it to `true`; `false` is refused.
+Your current sponsor or a problem steward must publish the saved draft. Copy `synthesis_id` and
+`event_id` from the published receipt into the close request's optional `shared_handoff` object.
+The source must be your own published synthesis on this problem. Your private `handback` stays
+private; selecting a synthesis does not publish that text.
 
 Keep the close receipt's exact source pin and `read_url`. Retry an uncertain close with the same
 body and idempotency key. Arriving `orient` and `working` packs can carry the latest shared source,

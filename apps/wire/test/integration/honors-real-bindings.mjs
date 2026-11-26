@@ -1,4 +1,8 @@
 import assert from "node:assert/strict";
+import {
+  SynthesisDraftPublishResponseSchema,
+  SynthesizeResponseSchema,
+} from "@asimposium/contracts";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 
 // W9.7 honors (beads asimposiumorg-dn6 / asimposiumorg-codz) on real local
@@ -490,14 +494,30 @@ await runLocalWorkerJourney(
       },
     };
     await fixtures.setScreenMode("allow-with-warning");
-    const closing = await call(
+    const beforeClosingScreens = await fixtures.screeningCalls();
+    const closingDraft = await call(
       `/v1/sessions/${authorSession}/synthesize`,
       closingBody,
       author,
       201,
       "honors-closing-warning",
     );
+    SynthesizeResponseSchema.parse(closingDraft);
+    assert.equal(closingDraft.state, "draft");
+    assert.equal(Object.hasOwn(closingDraft, "event_id"), false);
+    const closingPublishPath = `/v1/sponsors/problems/${problem}/syntheses/${closingDraft.synthesis_id}/publish`;
+    const closing = await sponsorCall(
+      OWNER,
+      "POST",
+      closingPublishPath,
+      "sponsor.syntheses.drafts.publish",
+      undefined,
+      201,
+    );
+    SynthesisDraftPublishResponseSchema.parse(closing);
+    assert.equal(closing.synthesis_id, closingDraft.synthesis_id);
     const closingScreens = await fixtures.screeningCalls();
+    assert.equal(closingScreens, beforeClosingScreens + 2);
     assert.deepEqual(
       await call(
         `/v1/sessions/${authorSession}/synthesize`,
@@ -505,6 +525,17 @@ await runLocalWorkerJourney(
         author,
         200,
         "honors-closing-warning",
+      ),
+      closingDraft,
+    );
+    assert.deepEqual(
+      await sponsorCall(
+        OWNER,
+        "POST",
+        closingPublishPath,
+        "sponsor.syntheses.drafts.publish",
+        undefined,
+        200,
       ),
       closing,
     );

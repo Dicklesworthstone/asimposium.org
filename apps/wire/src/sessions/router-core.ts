@@ -100,7 +100,6 @@ import {
   SponsorWorkshopObjectSchema,
   SponsorWorkshopRequestSchema,
   SponsorWorkshopViewSchema,
-  SynthesisDraftResponseSchema,
   SynthesizeRequestSchema,
   SynthesizeResponseSchema,
   WithdrawQuestionRequestSchema,
@@ -252,10 +251,6 @@ import {
   validateSynthesisAnchors,
 } from "../ledger/synthesis";
 import { synthesisMaterialEventSql } from "../ledger/synthesis-events.ts";
-import {
-  isSynthesisReferenceChanged,
-  synthesisAnchorGuards,
-} from "../ledger/synthesis-references.ts";
 import { isStatementReviewMove } from "../mega-commands/move-permissions.ts";
 import { isScreeningPostureChangedError } from "../moderation/posture";
 import { logRosterDiagnostic } from "../problems/roster";
@@ -13112,8 +13107,9 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         status: 422,
         code: "SYNTHESIZE_BODY_INVALID",
         title: "Invalid synthesize request body",
-        detail: "The request body did not match the session synthesize contract.",
-        fixHint: "Provide covers_through, body_md, anchors, omitted, and selection_policy.",
+        detail: "Synthesis creation saves a private draft. The body did not match its contract.",
+        fixHint:
+          "Provide covers_through, body_md, anchors, omitted, and selection_policy; omit draft or set it to true. A steward or the authoring sponsor must publish the saved draft.",
         rule: "P13",
         extensions: {
           schema: "https://a.asimposium.org/schemas/sessions.v1.json",
@@ -13134,7 +13130,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       });
     }
 
-    const digest = await writeRequestDigest("POST /v1/sessions/:id/synthesize", parsed.data);
+    // Both accepted spellings name the same private write. Normalization also
+    // prevents old direct-publication receipts from matching this contract.
+    const draftRequest = { ...parsed.data, draft: true as const };
+    const digest = await writeRequestDigest("POST /v1/sessions/:id/synthesize", draftRequest);
     try {
       const replay = await replayResponseBeforeMutablePreconditions(
         db,
@@ -13143,10 +13142,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         key,
         digest,
         c.req.path,
-        (raw) =>
-          parsed.data.draft === true
-            ? SynthesisDraftResponseSchema.parse(JSON.parse(raw))
-            : SynthesizeResponseSchema.parse(JSON.parse(raw)),
+        (raw) => SynthesizeResponseSchema.parse(JSON.parse(raw)),
       );
       if (replay !== undefined) return replay;
     } catch (error) {
@@ -13253,7 +13249,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
 
     // Resolve once before screening. A later revision cannot retarget this
     // work product; the original request still defines its idempotency digest.
-    const publication = { ...parsed.data, anchors: anchorCheck.anchors };
+    const publication = { ...draftRequest, anchors: anchorCheck.anchors };
     const anchorTargetIds = new Set(publication.anchors.map((a) => a.target_id));
     const droppedSingleAuthorCount = await computeDroppedSingleAuthorCount(
       db,
@@ -13283,171 +13279,72 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       },
     );
     if ("error" in screened) return screened.error;
-    const { screening, reservation } = screened;
+    const { reservation } = screened;
 
     const synthesisId = mintId("SYNTH");
     const createdAt = new Date().toISOString();
 
-    if (parsed.data.draft === true) {
-      const draftResponse = SynthesisDraftResponseSchema.parse({
-        synthesis_id: synthesisId,
-        problem_id: session.problem_id,
-        state: "draft",
-        covers_through: parsed.data.covers_through,
-        anchors_count: publication.anchors.length,
-        dropped_single_author_count: droppedSingleAuthorCount,
-        created_at: createdAt,
-      });
-      try {
-        const result = await replayOrCommit(
-          db,
-          "synthesize",
-          auth.binding.fellowId,
-          key,
-          digest,
-          c.req.path,
-          (raw) => SynthesisDraftResponseSchema.parse(JSON.parse(raw)),
-          async () => ({
-            value: draftResponse,
-            statements: (sealed, claimToken) => [
-              db
-                .prepare(
-                  `INSERT INTO session_write_replays
-                     (scope, principal_scope, idempotency_key, request_digest,
-                      response_ciphertext, response_initialization_vector,
-                      expires_at, claim_token)
-                   SELECT 'synthesize', ?, ?, ?, ?, ?, ?, ?
-                   WHERE EXISTS (${LIVE_LEDGER_CREDENTIAL_SQL})
-                     AND EXISTS (
-                       SELECT 1 FROM problems
-                       WHERE id = ? AND status NOT IN ('private-draft', 'resolved', 'retired')
-                     )
-                   ON CONFLICT(scope, principal_scope, idempotency_key) DO NOTHING`,
-                )
-                .bind(
-                  auth.binding.fellowId,
-                  key,
-                  digest,
-                  sealed.ciphertext,
-                  sealed.initializationVector,
-                  Math.floor(Date.now() / 1000) + Math.floor(REPLAY_TTL_MS / 1000),
-                  claimToken,
-                  auth.binding.credentialId,
-                  session.problem_id,
-                ),
-              db
-                .prepare(
-                  `INSERT INTO synthesis_drafts
-                     (synthesis_id, problem_id, covers_through, body_md, anchors_json,
-                      omitted_json, selection_policy, closing_resolution_json,
-                      dropped_single_author_count, author_fellow_id, author_sponsor_id,
-                      session_id, declared_model, harness, state, created_at)
-                   SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?
-                   WHERE EXISTS (
-                     SELECT 1 FROM session_write_replays
-                     WHERE scope = 'synthesize' AND principal_scope = ?
-                       AND idempotency_key = ? AND request_digest = ? AND claim_token = ?
-                   )`,
-                )
-                .bind(
-                  synthesisId,
-                  session.problem_id,
-                  parsed.data.covers_through,
-                  parsed.data.body_md,
-                  JSON.stringify(publication.anchors),
-                  JSON.stringify(parsed.data.omitted),
-                  parsed.data.selection_policy,
-                  parsed.data.closing_resolution !== undefined
-                    ? JSON.stringify(parsed.data.closing_resolution)
-                    : null,
-                  droppedSingleAuthorCount,
-                  auth.binding.fellowId,
-                  auth.binding.sponsorId,
-                  session.session_id,
-                  auth.binding.model,
-                  auth.binding.harness,
-                  createdAt,
-                  auth.binding.fellowId,
-                  key,
-                  digest,
-                  claimToken,
-                ),
-            ],
-          }),
-        );
-        await settleQuotaReservation(
-          db,
-          reservation.reservationId,
-          result.replayed ? "settled_failed" : "settled_published",
-        );
-        return privateNoStore(c.json(result.value, result.replayed ? 200 : 201));
-      } catch (error) {
-        await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
-        if (error instanceof ReplayConflictError) return idempotencyConflictProblem();
-        if (!(await credentialIsLiveAtCommit(db, auth.binding.credentialId)))
-          return writeRefusedProblem();
-        const latestProblem = await db
-          .prepare("SELECT status FROM problems WHERE id = ?")
-          .bind(session.problem_id)
-          .first<{ status: string }>();
-        if (latestProblem?.status === "resolved" || latestProblem?.status === "retired") {
-          return validatedProblem({
-            status: 422,
-            code: "CLAIMS_BOARD_LOCKED",
-            title: "Cannot synthesize closed problem",
-            detail: `Problem '${session.problem_id}' is '${latestProblem.status}'. Syntheses cannot be added on resolved or retired problems.`,
-            fixHint: "Explore an active problem or fork an alternate formulation.",
-            rule: "P3",
-            extensions: {
-              schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-              example: { method: "GET", path: "/problems.json" },
-            },
-          });
-        }
-        throw error;
-      }
-    }
-
-    const eventId = mintId("E");
-    const claimToken = mintId("R");
-    const kraterIdempotencyKey = await ledgerKraterIdempotencyKey("synthesize", claimToken);
-
+    // Only the separate sponsor/steward publication route may emit this work
+    // to the public ledger, after fresh screening of the saved draft.
+    const draftResponse = SynthesizeResponseSchema.parse({
+      synthesis_id: synthesisId,
+      problem_id: session.problem_id,
+      state: "draft",
+      covers_through: parsed.data.covers_through,
+      anchors_count: publication.anchors.length,
+      dropped_single_author_count: droppedSingleAuthorCount,
+      created_at: createdAt,
+    });
     try {
-      const write = await writeLedgerEvent(
+      const result = await replayOrCommit(
         db,
-        {
-          problemId: session.problem_id,
-          eventId,
-          idempotencyKey: kraterIdempotencyKey,
-          requestDigest: digest,
-          eventType: "synthesis.created",
-          objectKind: "synthesis",
-          objectId: synthesisId,
-          objectVersion: 1,
-          payloadJson: canonicalJson({
-            ...publication,
-            dropped_single_author_count: droppedSingleAuthorCount,
-          }),
-          createdAt,
-          attribution: {
-            fellowId: auth.binding.fellowId,
-            sponsorId: auth.binding.sponsorId,
-            sessionId: session.session_id,
-            modelSelfDeclared: auth.binding.model,
-            harness: auth.binding.harness,
-            credentialId: auth.binding.credentialId,
-          },
-        },
-        {
-          statementsAfterEvent: ({ sequence }) => [
+        "synthesize",
+        auth.binding.fellowId,
+        key,
+        digest,
+        c.req.path,
+        (raw) => SynthesizeResponseSchema.parse(JSON.parse(raw)),
+        async () => ({
+          value: draftResponse,
+          statements: (sealed, claimToken) => [
             db
               .prepare(
-                `INSERT INTO syntheses
+                `INSERT INTO session_write_replays
+                   (scope, principal_scope, idempotency_key, request_digest,
+                    response_ciphertext, response_initialization_vector,
+                    expires_at, claim_token)
+                 SELECT 'synthesize', ?, ?, ?, ?, ?, ?, ?
+                 WHERE EXISTS (${LIVE_LEDGER_CREDENTIAL_SQL})
+                   AND EXISTS (
+                     SELECT 1 FROM problems
+                     WHERE id = ? AND status NOT IN ('private-draft', 'resolved', 'retired')
+                   )
+                 ON CONFLICT(scope, principal_scope, idempotency_key) DO NOTHING`,
+              )
+              .bind(
+                auth.binding.fellowId,
+                key,
+                digest,
+                sealed.ciphertext,
+                sealed.initializationVector,
+                Math.floor(Date.now() / 1000) + Math.floor(REPLAY_TTL_MS / 1000),
+                claimToken,
+                auth.binding.credentialId,
+                session.problem_id,
+              ),
+            db
+              .prepare(
+                `INSERT INTO synthesis_drafts
                    (synthesis_id, problem_id, covers_through, body_md, anchors_json,
-                    omitted_json, dropped_single_author_count, authoring_principal,
-                    declared_model, cas_hash, created_at)
-                 SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?
-                 FROM events e WHERE e.id = ? AND e.seq = ?`,
+                    omitted_json, selection_policy, closing_resolution_json,
+                    dropped_single_author_count, author_fellow_id, author_sponsor_id,
+                    session_id, declared_model, harness, state, created_at)
+                 SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?
+                 WHERE EXISTS (
+                   SELECT 1 FROM session_write_replays
+                   WHERE scope = 'synthesize' AND principal_scope = ?
+                     AND idempotency_key = ? AND request_digest = ? AND claim_token = ?
+                 )`,
               )
               .bind(
                 synthesisId,
@@ -13456,97 +13353,54 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                 parsed.data.body_md,
                 JSON.stringify(publication.anchors),
                 JSON.stringify(parsed.data.omitted),
+                parsed.data.selection_policy,
+                parsed.data.closing_resolution !== undefined
+                  ? JSON.stringify(parsed.data.closing_resolution)
+                  : null,
                 droppedSingleAuthorCount,
                 auth.binding.fellowId,
+                auth.binding.sponsorId,
+                session.session_id,
                 auth.binding.model,
+                auth.binding.harness,
                 createdAt,
-                eventId,
-                sequence,
+                auth.binding.fellowId,
+                key,
+                digest,
+                claimToken,
               ),
           ],
-        },
-        {},
-        atomicLedgerReplayCompanion({
-          db,
-          scope: "synthesize",
-          screening,
-          principal: auth.binding.fellowId,
-          target: c.req.path,
-          callerKey: key,
-          requestDigest: digest,
-          claimToken,
-          kraterIdempotencyKey,
-          credentialId: auth.binding.credentialId,
-          session,
-          reservationId: reservation.reservationId,
-          statementsAfterReplay: synthesisAnchorGuards(
-            db,
-            session.problem_id,
-            publication.covers_through,
-            anchorCheck.sources,
-          ),
-          responseFor: ({ sequence }) =>
-            SynthesizeResponseSchema.parse({
-              synthesis_id: synthesisId,
-              problem_id: session.problem_id,
-              covers_through: parsed.data.covers_through,
-              anchors_count: parsed.data.anchors.length,
-              dropped_single_author_count: droppedSingleAuthorCount,
-              created_at: createdAt,
-              event_id: eventId,
-              sequence,
-            }),
         }),
       );
-
-      const replay = await readReplayRecord(
+      await settleQuotaReservation(
         db,
-        "synthesize",
-        auth.binding.fellowId,
-        key,
-        digest,
-        c.req.path,
+        reservation.reservationId,
+        result.replayed ? "settled_failed" : "settled_published",
       );
-      if (replay === undefined) throw new Error("synthesize committed without its atomic replay");
-      return privateNoStore(
-        c.json(JSON.parse(replay.plaintext), write.eventId === eventId ? 201 : 200),
-      );
+      return privateNoStore(c.json(result.value, result.replayed ? 200 : 201));
     } catch (error) {
-      try {
-        const winner = await readReplayRecord(
-          db,
-          "synthesize",
-          auth.binding.fellowId,
-          key,
-          digest,
-          c.req.path,
-        );
-        if (winner !== undefined) return privateNoStore(c.json(JSON.parse(winner.plaintext), 200));
-      } catch (replayError) {
-        await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
-        if (replayError instanceof ReplayConflictError) return idempotencyConflictProblem();
-        throw replayError;
-      }
       await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
-      if (isSynthesisReferenceChanged(error))
-        return validatedProblem({
-          status: 422,
-          code: "SYNTHESIS_UNANCHORED",
-          title: "Synthesis source publications changed",
-          detail:
-            "An exact anchor became unavailable before publication. No synthesis or successful receipt was committed.",
-          fixHint:
-            "Read the referenced publications again and submit a synthesis anchored to available records at its frozen cut.",
-          rule: "P13",
-          extensions: {
-            schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-            example: { covers_through: publication.covers_through, anchors: publication.anchors },
-          },
-        });
-      if (isEventBudgetAbort(error)) return writeRefusedProblem();
-      if (error instanceof KraterIdempotencyConflictError) return idempotencyConflictProblem();
+      if (error instanceof ReplayConflictError) return idempotencyConflictProblem();
       if (!(await credentialIsLiveAtCommit(db, auth.binding.credentialId)))
         return writeRefusedProblem();
+      const latestProblem = await db
+        .prepare("SELECT status FROM problems WHERE id = ?")
+        .bind(session.problem_id)
+        .first<{ status: string }>();
+      if (latestProblem?.status === "resolved" || latestProblem?.status === "retired") {
+        return validatedProblem({
+          status: 422,
+          code: "CLAIMS_BOARD_LOCKED",
+          title: "Cannot synthesize closed problem",
+          detail: `Problem '${session.problem_id}' is '${latestProblem.status}'. Syntheses cannot be added on resolved or retired problems.`,
+          fixHint: "Explore an active problem or fork an alternate formulation.",
+          rule: "P3",
+          extensions: {
+            schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+            example: { method: "GET", path: "/problems.json" },
+          },
+        });
+      }
       throw error;
     }
   });

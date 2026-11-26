@@ -8,6 +8,7 @@ import {
   SingleCitationResponseSchema,
   SingleSynthesisResponseSchema,
   SynthesesListResponseSchema,
+  SynthesisDraftPublishResponseSchema,
   SynthesizeResponseSchema,
 } from "@asimposium/contracts";
 import { faceCensus } from "./face-census.mjs";
@@ -440,10 +441,23 @@ await runLocalWorkerJourney(async (context) => {
     "synth-idemp-1",
   );
   SynthesizeResponseSchema.parse(synthRes);
+  assert.equal(synthRes.state, "draft");
+  assert.equal(Object.hasOwn(synthRes, "event_id"), false);
   assert.ok(synthRes.synthesis_id.startsWith("SYNTH-"));
   const synthesisId = synthRes.synthesis_id;
 
-  // Idempotent replay of synthesis
+  const publishedSynth = await sponsorCall(
+    sponsorA,
+    "POST",
+    `/v1/sponsors/problems/${problemId}/syntheses/${synthesisId}/publish`,
+    "sponsor.syntheses.drafts.publish",
+    undefined,
+    201,
+  );
+  SynthesisDraftPublishResponseSchema.parse(publishedSynth);
+  assert.equal(publishedSynth.synthesis_id, synthesisId);
+
+  // The draft replay remains unchanged after sponsor publication.
   const replaySynth = await call(
     `/v1/sessions/${sessionIdA}/synthesize`,
     synthPayload,
@@ -451,7 +465,7 @@ await runLocalWorkerJourney(async (context) => {
     200,
     "synth-idemp-1",
   );
-  assert.equal(replaySynth.synthesis_id, synthesisId);
+  assert.deepEqual(replaySynth, synthRes);
 
   // --------------------------------------------------------------------------
   // OBJECT 5: RETRACTIONS (W5.8d)

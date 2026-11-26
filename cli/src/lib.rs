@@ -121,7 +121,7 @@ pub enum Command {
         #[command(flatten)]
         request: LedgerWriteArgs,
     },
-    /// Publish an anchored synthesis of a problem's ledger (keychain or ASIMP_TOKEN required).
+    /// Draft an anchored synthesis for sponsor/steward publication (keychain or ASIMP_TOKEN required).
     Synthesize {
         session: String,
         #[command(flatten)]
@@ -963,7 +963,7 @@ impl WriteBody<'_> {
                     let bytes = read(path).map_err(str::to_owned)?;
                     let receipt: serde_json::Value = serde_json::from_str(&bytes)
                         .map_err(|_| "The synthesis receipt must be valid JSON.".to_owned())?;
-                    validation::check_session_payload("synthesize_response", &receipt)?;
+                    validation::check_synthesis_publication_payload(&receipt)?;
                     close["shared_handoff"] = serde_json::json!({
                         "synthesis_id": receipt["synthesis_id"], "event_id": receipt["event_id"],
                     });
@@ -2301,8 +2301,9 @@ mod tests {
             "close-1",
         ])
         .unwrap();
-        let receipt =
-            include_str!("../../packages/contracts/test/fixtures/valid/synthesize-response.json");
+        let receipt = include_str!(
+            "../../packages/contracts/test/fixtures/valid/synthesis-publication-response.json"
+        );
         let published: serde_json::Value = serde_json::from_str(receipt).unwrap();
         let output = run_cli_write(
             &cli,
@@ -2329,6 +2330,9 @@ mod tests {
         for invalid in [
             "private-note-canary".to_owned(),
             r#"{"screening_status":"pending"}"#.into(),
+            include_str!("../../packages/contracts/test/fixtures/valid/synthesize-response.json")
+                .to_owned(),
+            receipt.replace("\"published\"", "\"draft\""),
             receipt.replace(
                 published["synthesis_id"].as_str().unwrap(),
                 "private-note-canary",
@@ -2345,7 +2349,7 @@ mod tests {
     }
 
     #[test]
-    fn synthesize_refuses_invalid_requests_before_publication() {
+    fn synthesize_refuses_invalid_requests_before_drafting() {
         let cli = Cli::try_parse_from([
             "asimp",
             "--origin",

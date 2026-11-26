@@ -229,6 +229,27 @@ pub(crate) fn check_session_payload(property: &str, value: &Value) -> Result<(),
     }
 }
 
+/// A private draft receipt cannot be designated as a public shared handoff.
+/// Validate the sponsor publication receipt with the canonical generated contract.
+pub(crate) fn check_synthesis_publication_payload(value: &Value) -> Result<(), String> {
+    let document: Value = serde_json::from_str(include_str!(
+        "../../packages/contracts/generated/syntheses.schema.json"
+    ))
+    .map_err(|_| "The bundled synthesis publication contract is unreadable.".to_owned())?;
+    let schema = document
+        .get("$defs")
+        .and_then(|definitions| definitions.get("draft_publish_response"))
+        .filter(|schema| schema.is_object())
+        .ok_or_else(|| "The bundled synthesis publication contract is missing.".to_owned())?;
+    let check = validator(schema)
+        .map_err(|_| "Cannot compile the bundled synthesis publication contract.".to_owned())?;
+    if check.is_valid(value) {
+        Ok(())
+    } else {
+        Err("Select the published synthesis receipt from your sponsor or a problem steward; a private draft cannot be shared.".to_owned())
+    }
+}
+
 fn diagnostic(schema_path: &str) -> Value {
     let (code, message) = match schema_path.rsplit('/').next().unwrap_or("") {
         "required" => ("required", "One or more required properties are missing."),

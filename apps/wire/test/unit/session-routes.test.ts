@@ -49,6 +49,7 @@ import {
   SPONSOR_WORKSHOP_MAX_RESPONSE_BYTES,
   SponsorLeaseReleaseResponseSchema,
   SponsorWorkshopViewSchema,
+  SynthesisDraftPublishResponseSchema,
   SynthesizeResponseSchema,
   WorkshopObjectResponseSchema,
   WorkshopPublicationDraftSchema,
@@ -69,6 +70,7 @@ import {
 import { protocolVersionPair } from "@asimposium/protocol";
 import type { ExecutionContext } from "@cloudflare/workers-types";
 import Ajv2020 from "ajv/dist/2020.js";
+import { mintServiceEnvelope, serviceEnvelopeHeaders } from "../../../web/lib/service-envelope.ts";
 import { createApp } from "../../src/app.ts";
 import {
   readDirectiveDisclosureState,
@@ -311,8 +313,8 @@ describe("producer-backed ledger pack sections (ceq.5)", () => {
           await publish?.();
         },
       });
-      const publish = async (coversThrough: number) =>
-        SynthesizeResponseSchema.parse(
+      const publish = async (coversThrough: number) => {
+        const draft = SynthesizeResponseSchema.parse(
           await f.post(`${f.path}/synthesize`, {
             covers_through: coversThrough,
             body_md: `A synthesis through ${coversThrough}.`,
@@ -321,6 +323,8 @@ describe("producer-backed ledger pack sections (ceq.5)", () => {
             selection_policy: "Summarize the exact recorded claim.",
           }),
         );
+        return f.publishSynthesis(draft.synthesis_id);
+      };
       const earlier = await publish(Number(f.gap.seq));
       let later: Awaited<ReturnType<typeof publish>> | undefined;
       interleave = async () => {
@@ -350,7 +354,7 @@ describe("producer-backed ledger pack sections (ceq.5)", () => {
 
   test("synthesis context ignores an acquired scientific-object lease and follows gap settlement", async () => {
     const f = await ledgerPackFixture();
-    const synthesis = SynthesizeResponseSchema.parse(
+    const draft = SynthesizeResponseSchema.parse(
       await f.post(`${f.path}/synthesize`, {
         covers_through: Number(f.relation.seq),
         body_md: "The current claim, proposed relation and unclosed proof gap are recorded.",
@@ -359,6 +363,7 @@ describe("producer-backed ledger pack sections (ceq.5)", () => {
         selection_policy: "Summarize the recorded research frontier at this cut.",
       }),
     );
+    const synthesis = await f.publishSynthesis(draft.synthesis_id);
     await f.post(`${f.path}/leases`, {
       object: "C-1",
       objective: "Check the parity claim against its exact statement.",
@@ -382,8 +387,8 @@ describe("producer-backed ledger pack sections (ceq.5)", () => {
 
   test("synthesis context uses committed metadata and never revives a hidden latest publication", async () => {
     const f = await ledgerPackFixture();
-    const publish = async (coversThrough: number) =>
-      SynthesizeResponseSchema.parse(
+    const publish = async (coversThrough: number) => {
+      const draft = SynthesizeResponseSchema.parse(
         await f.post(`${f.path}/synthesize`, {
           covers_through: coversThrough,
           body_md: "A recorded state of the exact claim.",
@@ -392,6 +397,8 @@ describe("producer-backed ledger pack sections (ceq.5)", () => {
           selection_policy: "Summarize the recorded claim.",
         }),
       );
+      return f.publishSynthesis(draft.synthesis_id);
+    };
     const earlier = await publish(Number(f.gap.seq));
     const latest = await publish(earlier.sequence);
     // The projection is rebuildable and cannot supply authoritative coverage.
@@ -2464,21 +2471,18 @@ export async function fixture(options: LocalD1Options = {}) {
     replayProtector,
   });
   const enrollmentRouter = createEnrollmentRouter({ service });
-  const sessionRouter = createSessionRouter({
-    service,
-    replayProtector,
-    screenPromotion: async (input) => {
-      const decision = options.screenPromotion
-        ? await options.screenPromotion(input)
-        : {
-            decision: "pass" as const,
-            coarse_category: "benign-context" as const,
-            provider_status: "ok" as const,
-          };
-      const observation = await syntheticScreeningObservation(input, decision);
-      return options.screeningAttestation?.(observation) ?? observation;
-    },
-  });
+  const screenPromotion = async (input: WorkersAIPromotionInput) => {
+    const decision = options.screenPromotion
+      ? await options.screenPromotion(input)
+      : {
+          decision: "pass" as const,
+          coarse_category: "benign-context" as const,
+          provider_status: "ok" as const,
+        };
+    const observation = await syntheticScreeningObservation(input, decision);
+    return options.screeningAttestation?.(observation) ?? observation;
+  };
+  const sessionRouter = createSessionRouter({ service, replayProtector, screenPromotion });
   const db = migratedDb(options);
   const sponsor = { type: "sponsor", sponsorId: "usr_sessionsponsor1" } as const;
   const minted = await service.mint(sponsor, {
@@ -2545,6 +2549,57 @@ export async function fixture(options: LocalD1Options = {}) {
   if (binding === undefined) throw new Error("fixture binding missing");
   await seedCredentialRow(db, binding);
   const env = { DB: db } as unknown as Env;
+  // Public synthesis approval crosses the mounted signed-sponsor route. The
+  // SQLite adapter and synthetic classifier remain explicit fixture seams.
+  let publication: Promise<{
+    app: ReturnType<typeof createApp>;
+    keys: CryptoKeyPair;
+    env: Env;
+  }> | undefined;
+  const publishSynthesisResponse = async (synthesisId: string) => {
+    publication ??= (async () => {
+      const keys = (await crypto.subtle.generateKey({ name: "Ed25519" }, true, [
+        "sign",
+        "verify",
+      ])) as CryptoKeyPair;
+      const publicKeyHex = Buffer.from(await crypto.subtle.exportKey("raw", keys.publicKey)).toString("hex");
+      return {
+        app: createApp({ screenPromotion }),
+        keys,
+        env: {
+          ...env,
+          STOA_ORIGIN: "https://a-staging.asimposium.org",
+          AGORA_ORIGIN: "https://staging.asimposium.org",
+          ENROLLMENT_REPLAY_KEY: Buffer.from(Uint8Array.from({ length: 32 }, (_value, index) => index)).toString("base64url"),
+          SERVICE_ENVELOPE_KEYS: JSON.stringify([{ kid: "session-synthesis-publisher", publicKeyHex, notBefore: 0 }]),
+        } as Env,
+      };
+    })();
+    const mounted = await publication;
+    const route = `/v1/sponsors/problems/P-4DSP/syntheses/${synthesisId}/publish`;
+    const envelope = await mintServiceEnvelope({
+      kid: "session-synthesis-publisher",
+      privateKey: mounted.keys.privateKey,
+      issuer: "agora",
+      audience: "stoa",
+      principalType: "sponsor",
+      principalId: binding.sponsorId,
+      method: "POST",
+      route,
+      action: "sponsor.syntheses.drafts.publish",
+      body: "",
+      now: Math.floor(Date.now() / 1_000),
+    });
+    return mounted.app.fetch(new Request(`https://a-staging.asimposium.org${route}`, {
+      method: "POST",
+      headers: serviceEnvelopeHeaders(envelope),
+    }), mounted.env);
+  };
+  const publishSynthesis = async (synthesisId: string, expectedStatus = 201) => {
+    const response = await publishSynthesisResponse(synthesisId);
+    expect(response.status, await response.clone().text()).toBe(expectedStatus);
+    return SynthesisDraftPublishResponseSchema.parse(await response.json());
+  };
   const call = (path: string, init: RequestInit = {}) =>
     sessionRouter.fetch(
       new Request(`https://a-staging.asimposium.org${path}`, {
@@ -2567,6 +2622,8 @@ export async function fixture(options: LocalD1Options = {}) {
     enrollmentStore,
     replayProtector,
     sponsor,
+    publishSynthesis,
+    publishSynthesisResponse,
   };
 }
 
@@ -3117,7 +3174,9 @@ describe("explicit shared session handoffs", () => {
       selection_policy: "Preserve the exact conjecture and its unresolved boundary cases.",
     });
     expect(published.status, await published.clone().text()).toBe(201);
-    const synthesis = SynthesizeResponseSchema.parse(await published.json());
+    const synthesisDraft = SynthesizeResponseSchema.parse(await published.json());
+    expect(synthesisDraft.state).toBe("draft");
+    const synthesis = await f.publishSynthesis(synthesisDraft.synthesis_id);
     const shared_handoff = { synthesis_id: synthesis.synthesis_id, event_id: synthesis.event_id };
     return { ...f, post, path, session, claim, synthesis, shared_handoff };
   }
@@ -7438,7 +7497,7 @@ describe("session protocol routes", () => {
       expect(deChanged.status).toBe(409);
     }
 
-    // --- 3. POST /v1/sessions/:id/synthesize (kind: "synthesis", sink: syntheses, events) ---
+    // --- 3. Private synthesis submission, then signed sponsor publication ---
     {
       const beforeEvents = await rowCount("events");
       const beforeSyntheses = await rowCount("syntheses");
@@ -7473,7 +7532,11 @@ describe("session protocol routes", () => {
       });
       expect(sPass.status).toBe(201);
       const sJson = SynthesizeResponseSchema.parse(await sPass.json());
-      expect(typeof sJson.synthesis_id).toBe("string");
+      expect(sJson.state).toBe("draft");
+      expect("event_id" in sJson).toBe(false);
+      expect(await rowCount("events")).toBe(beforeEvents);
+      expect(await rowCount("syntheses")).toBe(beforeSyntheses);
+      const published = await f.publishSynthesis(sJson.synthesis_id);
       expect(await rowCount("events")).toBe(beforeEvents + 1);
       expect(await rowCount("syntheses")).toBe(beforeSyntheses + 1);
 
@@ -7485,6 +7548,7 @@ describe("session protocol routes", () => {
       });
       expect(sReplay.status).toBe(200);
       expect(await sReplay.json()).toEqual(sJson);
+      expect(await f.publishSynthesis(sJson.synthesis_id, 200)).toEqual(published);
       expect(screens).toBe(screensBeforeReplay);
 
       const sChanged = await f.call(`${f.path}/synthesize`, {
@@ -17817,7 +17881,7 @@ describe("committed promotion outbox nudge", () => {
   });
 
   describe("synthesis lifecycle and P13 anchor validation (W5.8b)", () => {
-    test("admits the original admission cutoff after later statement review and revision", async () => {
+    test("retains the original admission cutoff in private drafts after later statement review and revision", async () => {
       const screens: WorkersAIPromotionInput[] = [];
       const f = await fixture({
         screenPromotion: async (input) => {
@@ -18019,13 +18083,15 @@ describe("committed promotion outbox nudge", () => {
         synthesis(admitted.seq, [{ target_kind: "statement", target_id: "P-4DSP" }]),
       );
       expect(accepted.covers_through).toBe(1);
+      expect(accepted.state).toBe("draft");
+      expect("event_id" in accepted).toBe(false);
       expect(screens).toHaveLength(6);
       expect(JSON.parse(screens.at(-1)!.statement).anchors).toEqual([
         { target_kind: "statement", target_id: "P-4DSP", target_version: 1, target_seq: 1 },
       ]);
     });
 
-    test("valid synthesis creation, idempotent replay, and unanchored anchor rejection", async () => {
+    test("synthesis stays private until signed sponsor approval and both receipts replay independently", async () => {
       const f = await ledgerPackFixture();
       let key = 0;
       const post = async (path: string, body: unknown, status = 201) => {
@@ -18083,23 +18149,37 @@ describe("committed promotion outbox nudge", () => {
         .first<{ max_seq: number }>();
       const currentSeq = maxSeqRow?.max_seq ?? 1;
 
-      const validSynth = (await post(`${f.path}/synthesize`, {
+      const synthesisBody = {
         covers_through: currentSeq,
         body_md: "## State of Problem P-4DSP\n\nClaim C-1 is established.",
         anchors: [{ target_kind: "claim", target_id: "C-1", target_version: 1 }],
         omitted: [],
         selection_policy: "Include claims at head version",
-      })) as Record<string, unknown>;
+      };
+      const bypass = await post(`${f.path}/synthesize`, { ...synthesisBody, draft: false }, 422);
+      expect(bypass.code).toBe("SYNTHESIZE_BODY_INVALID");
+      const synthesisDraft = SynthesizeResponseSchema.parse(
+        await post(`${f.path}/synthesize`, synthesisBody),
+      );
+      expect(synthesisDraft.state).toBe("draft");
+      expect("event_id" in synthesisDraft).toBe(false);
+      expect("sequence" in synthesisDraft).toBe(false);
+      expect(await f.db.prepare("SELECT id FROM events WHERE object_id = ?")
+        .bind(synthesisDraft.synthesis_id).first()).toBeNull();
+      expect(await f.db.prepare("SELECT synthesis_id FROM syntheses WHERE synthesis_id = ?")
+        .bind(synthesisDraft.synthesis_id).first()).toBeNull();
+      expect((await f.db.prepare("SELECT public_seq FROM problems WHERE id = 'P-4DSP'")
+        .first<{ public_seq: number }>())?.public_seq).toBe(currentSeq);
 
-      expect(typeof validSynth.synthesis_id).toBe("string");
-      expect((validSynth.synthesis_id as string).startsWith("SYNTH-")).toBe(true);
+      const validSynth = await f.publishSynthesis(synthesisDraft.synthesis_id);
+      expect(validSynth.state).toBe("published");
       expect(validSynth.problem_id).toBe("P-4DSP");
       expect(validSynth.covers_through).toBe(currentSeq);
       expect(validSynth.anchors_count).toBe(1);
       expect(validSynth.dropped_single_author_count).toBe(1);
       expect(validSynth.sequence).toBeGreaterThan(currentSeq);
 
-      // Verify row in syntheses table
+      // Verify the projection appears only after sponsor approval.
       const synthRow = await f.db
         .prepare("SELECT * FROM syntheses WHERE synthesis_id = ?")
         .bind(validSynth.synthesis_id)
@@ -18126,9 +18206,16 @@ describe("committed promotion outbox nudge", () => {
       });
       expect(replayResponse.status).toBe(200);
       expect(replayResponse.headers.get("cache-control")).toBe("private, no-store");
-      const replayJson = (await replayResponse.json()) as Record<string, unknown>;
-      expect(replayJson.synthesis_id).toBe(validSynth.synthesis_id);
-      expect(replayJson.sequence).toBe(validSynth.sequence);
+      const replayJson = SynthesizeResponseSchema.parse(await replayResponse.json());
+      expect(replayJson).toEqual(synthesisDraft);
+      const explicitDraftReplay = await f.call(`${f.path}/synthesize`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": `synth-${key}` },
+        body: JSON.stringify({ ...synthesisBody, draft: true }),
+      });
+      expect(explicitDraftReplay.status).toBe(200);
+      expect(await explicitDraftReplay.json()).toEqual(synthesisDraft);
+      expect(await f.publishSynthesis(synthesisDraft.synthesis_id, 200)).toEqual(validSynth);
     });
 
     test("freezes exact anchors before screening, retains a Fellow closing declaration, and replays original bytes", async () => {
@@ -18186,20 +18273,24 @@ describe("committed promotion outbox nudge", () => {
       const response = await post(body, "synthesis-closing-exact");
       expect(response.status, await response.clone().text()).toBe(201);
       const accepted = SynthesizeResponseSchema.parse(await response.json());
+      expect(accepted.state).toBe("draft");
       const exactAnchors = [
         { target_kind: "claim", target_id: "C-1", target_version: 1, target_seq: source!.seq },
       ];
-      expect(JSON.parse(screens[0]!.statement)).toEqual({ ...body, anchors: exactAnchors });
+      expect(JSON.parse(screens[0]!.statement)).toEqual({ ...body, draft: true, anchors: exactAnchors });
+      const publication = await f.publishSynthesis(accepted.synthesis_id);
+      expect(JSON.parse(screens[1]!.statement)).toEqual({ ...body, anchors: exactAnchors });
       const published = await f.db
         .prepare(`SELECT c.payload_json, s.anchors_json FROM events e
         JOIN event_content c ON c.event_id = e.id JOIN syntheses s ON s.synthesis_id = e.object_id
         WHERE e.id = ?`)
-        .bind(accepted.event_id)
+        .bind(publication.event_id)
         .first<{ payload_json: string; anchors_json: string }>();
       expect(JSON.parse(published!.payload_json)).toEqual({
         ...body,
         anchors: exactAnchors,
         dropped_single_author_count: accepted.dropped_single_author_count,
+        published_by_principal_id: f.binding.sponsorId,
       });
       expect(JSON.parse(published!.anchors_json)).toEqual(exactAnchors);
 
@@ -18212,14 +18303,15 @@ describe("committed promotion outbox nudge", () => {
       const replay = await post(body, "synthesis-closing-exact");
       expect(replay.status, await replay.clone().text()).toBe(200);
       expect(await replay.json()).toEqual(accepted);
-      expect(screens).toHaveLength(1);
+      expect(await f.publishSynthesis(accepted.synthesis_id, 200)).toEqual(publication);
+      expect(screens).toHaveLength(2);
       const changed = await post({ ...body, anchors: exactAnchors }, "synthesis-closing-exact");
       expect(changed.status).toBe(409);
       expect(((await changed.json()) as { code: string }).code).toBe("IDEMPOTENCY_CONFLICT");
     });
 
     for (const mutation of ["event-hide", "version-hide", "redact", "corrupt-body"] as const) {
-      test(`a ${mutation} during screening leaves no synthesis publication effect`, async () => {
+      test(`a ${mutation} during sponsor publication screening leaves the synthesis private`, async () => {
         let changeSource: (() => Promise<void>) | undefined;
         let synthesisScreens = 0;
         const f = await ledgerPackFixture({
@@ -18247,6 +18339,23 @@ describe("committed promotion outbox nudge", () => {
           (SELECT COUNT(*) FROM session_write_replays) AS replays
           FROM problems WHERE id = 'P-4DSP'`)
             .first();
+        const draftResponse = await f.call(`${f.path}/synthesize`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "idempotency-key": `synthesis-race-${mutation}`,
+          },
+          body: JSON.stringify({
+            covers_through: Number(f.relation.seq),
+            body_md: "A summary whose exact source must remain public through commit.",
+            anchors: [{ target_kind: "claim", target_id: "C-1" }],
+            omitted: [],
+            selection_policy: "One exact retained publication.",
+          }),
+        });
+        expect(draftResponse.status, await draftResponse.clone().text()).toBe(201);
+        const savedDraft = SynthesizeResponseSchema.parse(await draftResponse.json());
+        expect(savedDraft.state).toBe("draft");
         const before = await footprint();
         changeSource = async () => {
           if (mutation === "event-hide" || mutation === "version-hide") {
@@ -18271,27 +18380,15 @@ describe("committed promotion outbox nudge", () => {
               .run();
           }
         };
-        const response = await f.call(`${f.path}/synthesize`, {
-          method: "POST",
-          headers: {
-            "content-type": "application/json",
-            "idempotency-key": `synthesis-race-${mutation}`,
-          },
-          body: JSON.stringify({
-            covers_through: Number(f.relation.seq),
-            body_md: "A summary whose exact source must remain public through commit.",
-            anchors: [{ target_kind: "claim", target_id: "C-1" }],
-            omitted: [],
-            selection_policy: "One exact retained publication.",
-          }),
-        });
-        // Every mutation changes this author's screened source history. The
-        // context guard now checks exact event/version controls as well as bytes,
-        // so it refuses before the narrower synthesis-anchor commit guard.
-        expect(response.status, await response.clone().text()).toBe(409);
-        expect(((await response.json()) as { code: string }).code).toBe("SCREENING_CONTEXT_STALE");
-        expect(synthesisScreens).toBe(1);
+        const response = await f.publishSynthesisResponse(savedDraft.synthesis_id);
+        // Approval rechecks exact sources in its event transaction. The
+        // already saved draft remains private when one of those sources changes.
+        expect(response.status, await response.clone().text()).toBe(422);
+        expect(((await response.json()) as { code: string }).code).toBe("SYNTHESIS_UNANCHORED");
+        expect(synthesisScreens).toBe(2);
         expect(await footprint()).toEqual(before);
+        expect(await f.db.prepare("SELECT state FROM synthesis_drafts WHERE synthesis_id = ?")
+          .bind(savedDraft.synthesis_id).first()).toEqual({ state: "draft" });
       });
     }
   });

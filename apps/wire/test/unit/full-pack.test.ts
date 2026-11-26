@@ -480,6 +480,8 @@ const settlementPublications: readonly {
     kind: "synthesis",
     id: "SYNTH-HISTORY",
     payload: {
+      // Legacy public events retain their original command metadata.
+      draft: false,
       covers_through: 1,
       body_md: "The original claim still needs a zero-residue check.",
       anchors: [{ target_kind: "claim", target_id: "C-1", target_version: 1, target_seq: 1 }],
@@ -1311,6 +1313,8 @@ describe("full public ledger packs", () => {
         expect(original.body).not.toContain(PRIVATE);
         expect(original.records[0].content).not.toHaveProperty("ttl_seconds");
         expect(original.records[0].content).not.toHaveProperty("source_claim_id");
+        if (publication.type === "synthesis.created")
+          expect(original.records[0].content).not.toHaveProperty("draft");
         if (publication.type === "gap.withdrawn")
           expect(original.records[0].content).not.toHaveProperty("closed_by");
         for (const target of [`${publication.id}@${publication.version ?? 1}`, "#2"]) {

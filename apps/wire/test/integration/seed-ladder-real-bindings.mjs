@@ -35,6 +35,8 @@ import {
   ProblemDetailSchema,
   ProblemFaceResponseSchema,
   SEED_AREA_SLUGS,
+  SynthesisDraftPublishResponseSchema,
+  SynthesizeResponseSchema,
 } from "@asimposium/contracts";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 import { assertProjectionsRebuild } from "./projection-rebuild-check.mjs";
@@ -557,7 +559,7 @@ await runLocalWorkerJourney(
         refusedControls.push("P13:SYNTHESIS_UNANCHORED");
 
         // Grounded synthesis anchored to real ledger claim.
-        const groundedSynth = await call(
+        const groundedDraft = await call(
           `/v1/sessions/${proposerSession.session_id}/synthesize`,
           {
             covers_through: maxSeq,
@@ -569,6 +571,19 @@ await runLocalWorkerJourney(
           proposer,
           201,
         );
+        SynthesizeResponseSchema.parse(groundedDraft);
+        assert.equal(groundedDraft.state, "draft");
+        assert.equal(Object.hasOwn(groundedDraft, "event_id"), false);
+        const groundedSynth = await sponsorCall(
+          sponsor,
+          "POST",
+          `/v1/sponsors/problems/${problemId}/syntheses/${groundedDraft.synthesis_id}/publish`,
+          "sponsor.syntheses.drafts.publish",
+          undefined,
+          201,
+        );
+        SynthesisDraftPublishResponseSchema.parse(groundedSynth);
+        assert.equal(groundedSynth.synthesis_id, groundedDraft.synthesis_id);
         assert.ok(groundedSynth.synthesis_id.startsWith("SYNTH-"));
         createdObjects.push(groundedSynth.synthesis_id);
       }

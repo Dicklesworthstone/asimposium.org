@@ -7,7 +7,9 @@ import {
   ScreeningPublicationProvenanceSchema,
   SingleSynthesisResponseSchema,
   SynthesesListResponseSchema,
+  SynthesisDraftPublishResponseSchema,
   SynthesizeRequestSchema,
+  SynthesizeResponseSchema,
 } from "@asimposium/contracts";
 import {
   parsePublicProblemExport,
@@ -100,6 +102,22 @@ await runLocalWorkerJourney(
       201,
     );
     const sessionId = session.session_id;
+    const publishSynthesis = async (value, expected = 201) => {
+      const draft = SynthesizeResponseSchema.parse(value);
+      assert.equal(draft.state, "draft");
+      assert.equal("event_id" in draft, false);
+      assert.equal("sequence" in draft, false);
+      return SynthesisDraftPublishResponseSchema.parse(
+        await sponsorCall(
+          sponsorA,
+          "POST",
+          `/v1/sponsors/problems/${problemId}/syntheses/${draft.synthesis_id}/publish`,
+          "sponsor.syntheses.drafts.publish",
+          undefined,
+          expected,
+        ),
+      );
+    };
 
     // 3. Promote claim C-1
     const workshop1 = await call(
@@ -178,8 +196,8 @@ await runLocalWorkerJourney(
     assert.equal(unanchoredFuture.code, "SYNTHESIS_UNANCHORED");
     assert.equal(unanchoredFuture.rule, "P13");
 
-    // 6. Valid synthesis creation grounded in claim C-1
-    const synth1 = await call(
+    // 6. A valid synthesis is private until its sponsor explicitly approves it.
+    const synth1Draft = await call(
       `/v1/sessions/${sessionId}/synthesize`,
       {
         covers_through: maxSeq1,
@@ -193,6 +211,12 @@ await runLocalWorkerJourney(
       201,
       "synth-idempotent-key-1",
     );
+    assert.equal(synth1Draft.state, "draft");
+    assert.equal((await env.DB.prepare("SELECT public_seq FROM problems WHERE id = ?")
+      .bind(problemId).first()).public_seq, maxSeq1);
+    assert.equal(await env.DB.prepare("SELECT id FROM events WHERE object_id = ?")
+      .bind(synth1Draft.synthesis_id).first(), null);
+    const synth1 = await publishSynthesis(synth1Draft);
     assert.ok(synth1.synthesis_id.startsWith("SYNTH-"));
     assert.equal(synth1.problem_id, problemId);
     assert.equal(synth1.covers_through, maxSeq1);
@@ -200,7 +224,7 @@ await runLocalWorkerJourney(
     assert.equal(synth1.dropped_single_author_count, 0);
     assert.ok(synth1.sequence > maxSeq1);
 
-    // 7. Idempotent replay
+    // 7. The private draft and the public publication have separate replay receipts.
     const replay1 = await call(
       `/v1/sessions/${sessionId}/synthesize`,
       {
@@ -215,8 +239,8 @@ await runLocalWorkerJourney(
       200,
       "synth-idempotent-key-1",
     );
-    assert.equal(replay1.synthesis_id, synth1.synthesis_id);
-    assert.equal(replay1.sequence, synth1.sequence);
+    assert.deepEqual(replay1, synth1Draft);
+    assert.deepEqual(await publishSynthesis(synth1Draft, 200), synth1);
 
     // 8. Promote claim C-2 by same author, then omit it in synthesis 2
     const workshop2 = await call(
@@ -251,7 +275,7 @@ await runLocalWorkerJourney(
 
     // Synthesis 2: covers through maxSeq2, but anchors only C-1, dropping C-2.
     // C-2 is single-author because no other Fellow reviewed or related it.
-    const synth2 = await call(
+    const synth2Draft = await call(
       `/v1/sessions/${sessionId}/synthesize`,
       {
         covers_through: maxSeq2,
@@ -264,6 +288,7 @@ await runLocalWorkerJourney(
       201,
       "synth-idempotent-key-2",
     );
+    const synth2 = await publishSynthesis(synth2Draft);
     assert.ok(synth2.synthesis_id.startsWith("SYNTH-"));
     assert.equal(synth2.covers_through, maxSeq2);
     assert.equal(synth2.dropped_single_author_count, 1);
@@ -453,6 +478,16 @@ await runLocalWorkerJourney(
         admission.seq,
       ],
     ];
+    // Each admitted summary now has two bounded attempts: draft and approval.
+    // Keep this historical-anchor matrix independent of the original writer's
+    // later quota proof by using another enrolled Fellow under the same sponsor.
+    const historyWriter = await enroll("synthesis-history-writer", sponsorA);
+    const historySession = await call(
+      "/v1/sessions",
+      { problem_id: problemId, intent: "explore" },
+      historyWriter,
+      201,
+    );
     for (const [index, [label, allowed, anchor, through = maxSeq2]] of cases.entries()) {
       const before = await footprint();
       const screeningBefore = await fixtures.screeningCalls();
@@ -465,73 +500,80 @@ await runLocalWorkerJourney(
         selection_policy: "Summarize the selected record at the retained cursor.",
       };
       const key = `frozen-anchor-${index}`;
-      const response = await call(`/v1/sessions/${sessionId}/synthesize`, body, author, null, key);
-      const after = await footprint();
+      const draft = await call(
+        `/v1/sessions/${historySession.session_id}/synthesize`, body, historyWriter, null, key,
+      );
       if (allowed) {
         assert.equal(
-          typeof response.synthesis_id,
+          typeof draft.synthesis_id,
           "string",
-          `${label}: expected an admitted synthesis; received ${response.code ?? "unknown"}: ${response.detail ?? ""}`,
+          `${label}: expected a private draft; received ${draft.code ?? "unknown"}: ${draft.detail ?? ""}`,
         );
-        check(typeof response.synthesis_id === "string", `${label}: accepted`);
-        check(after.events === before.events + 1, `${label}: one event`);
-        if (response.synthesis_id) {
-          const retained = await env.DB.prepare(
-            "SELECT provenance_json FROM screening_publications WHERE event_id = ?",
-          )
-            .bind(response.event_id)
-            .first();
-          assert.ok(retained, "Successful synthesis retains screening provenance atomically");
-          const provenance = ScreeningPublicationProvenanceSchema.parse(
-            JSON.parse(retained.provenance_json),
-          );
-          const publication = await env.DB.prepare(
-            "SELECT payload_json FROM event_content WHERE event_id = ?",
-          )
-            .bind(response.event_id)
-            .first();
-          assert.ok(publication);
-          const { dropped_single_author_count: _dropped, ...publishedRequest } = JSON.parse(
-            publication.payload_json,
-          );
-          const exact = SynthesizeRequestSchema.parse(publishedRequest);
-          assert.ok(
-            exact.anchors.every(
-              (item) =>
-                Number.isSafeInteger(item.target_version) &&
-                Number.isSafeInteger(item.target_seq) &&
-                item.target_seq <= through,
-            ),
-          );
-          assert.equal(exact.anchors[0].target_id, anchor.target_id);
-          if (anchor.target_seq !== undefined)
-            assert.equal(exact.anchors[0].target_seq, anchor.target_seq);
-          const screenedBytes = JSON.stringify({
-            kind: "synthesis",
-            statement: JSON.stringify(exact),
-            falsifier: null,
-          });
-          assert.equal(
-            provenance.candidate_digest,
-            createHash("sha256").update(screenedBytes).digest("hex"),
-            "Screening binds the complete validated public payload",
-          );
-          assert.notEqual(
-            provenance.input_digest,
-            provenance.candidate_digest,
-            "The provider input also binds the surrounding public context",
-          );
-          const replay = await call(`/v1/sessions/${sessionId}/synthesize`, body, author, 200, key);
-          assert.deepEqual(replay, response);
-          assert.deepEqual(await footprint(), after);
-          assert.equal(await fixtures.screeningCalls(), screeningBefore + 1);
-        }
+        check(draft.state === "draft", `${label}: private draft accepted`);
+        const response = await publishSynthesis(draft);
+        const after = await footprint();
+        check(after.events === before.events + 1, `${label}: one event after approval`);
+        const retained = await env.DB.prepare(
+          "SELECT provenance_json FROM screening_publications WHERE event_id = ?",
+        )
+          .bind(response.event_id)
+          .first();
+        assert.ok(retained, "Successful synthesis retains screening provenance atomically");
+        const provenance = ScreeningPublicationProvenanceSchema.parse(
+          JSON.parse(retained.provenance_json),
+        );
+        const publication = await env.DB.prepare(
+          "SELECT payload_json FROM event_content WHERE event_id = ?",
+        )
+          .bind(response.event_id)
+          .first();
+        assert.ok(publication);
+        const {
+          dropped_single_author_count: _dropped,
+          published_by_principal_id: publisher,
+          ...publishedRequest
+        } = JSON.parse(publication.payload_json);
+        assert.equal(publisher, sponsorA);
+        const exact = SynthesizeRequestSchema.parse(publishedRequest);
+        assert.ok(
+          exact.anchors.every(
+            (item) =>
+              Number.isSafeInteger(item.target_version) &&
+              Number.isSafeInteger(item.target_seq) &&
+              item.target_seq <= through,
+          ),
+        );
+        assert.equal(exact.anchors[0].target_id, anchor.target_id);
+        if (anchor.target_seq !== undefined)
+          assert.equal(exact.anchors[0].target_seq, anchor.target_seq);
+        const screenedBytes = JSON.stringify({
+          kind: "synthesis",
+          statement: JSON.stringify(publishedRequest),
+          falsifier: null,
+        });
+        assert.equal(
+          provenance.candidate_digest,
+          createHash("sha256").update(screenedBytes).digest("hex"),
+          "Screening binds the complete validated public payload",
+        );
+        assert.notEqual(
+          provenance.input_digest,
+          provenance.candidate_digest,
+          "The provider input also binds the surrounding public context",
+        );
+        const replay = await call(
+          `/v1/sessions/${historySession.session_id}/synthesize`, body, historyWriter, 200, key,
+        );
+        assert.deepEqual(replay, draft);
+        assert.deepEqual(await publishSynthesis(draft, 200), response);
+        assert.deepEqual(await footprint(), after);
+        assert.equal(await fixtures.screeningCalls(), screeningBefore + 2);
       } else {
         check(
-          response.code === "SYNTHESIS_UNANCHORED" && response.rule === "P13",
+          draft.code === "SYNTHESIS_UNANCHORED" && draft.rule === "P13",
           `${label}: P13 refusal`,
         );
-        check(JSON.stringify(after) === JSON.stringify(before), `${label}: no public mutation`);
+        check(JSON.stringify(await footprint()) === JSON.stringify(before), `${label}: no public mutation`);
         check((await fixtures.screeningCalls()) === screeningBefore, `${label}: no paid screen`);
       }
     }
@@ -543,9 +585,8 @@ await runLocalWorkerJourney(
       selection_policy: "Only the selected claim is summarized.",
     };
     // The local classifier rejects a known marker. Run the first canary under a
-    // dedicated Fellow of the same sponsor so the remaining four canaries still
-    // trigger author quarantine-first while leaving exact budget headroom for
-    // author's reanchor (20/20) before proving 429 quota exhaustion at 21/20.
+    // dedicated Fellow of the same sponsor so the remaining four canaries
+    // trigger author quarantine-first without changing production quota caps.
     const canaryAuthor = await enroll("synthesis-canary-author", sponsorA);
     const canarySession = await call(
       "/v1/sessions",
@@ -860,7 +901,7 @@ await runLocalWorkerJourney(
     // - hypRes.hypothesis_id (hypothesis)
     // - deRes.dead_end_id (dead end)
     // Dropped single author count must be 3!
-    const synthMinority = await call(
+    const synthMinorityDraft = await call(
       `/v1/sessions/${sessionId}/synthesize`,
       {
         covers_through: maxSeqMinority,
@@ -877,6 +918,7 @@ await runLocalWorkerJourney(
       201,
       "synth-idempotent-key-minority-3",
     );
+    const synthMinority = await publishSynthesis(synthMinorityDraft);
     assert.equal(synthMinority.dropped_single_author_count, 3);
 
     // A synthesis can now retain the actual review and negative result, rather
@@ -949,9 +991,9 @@ await runLocalWorkerJourney(
       omitted: ["The remaining claim and hypothesis are outside this summary."],
       selection_policy: "Preserve checks and failed approaches with the claim they contextualize.",
     };
-    // Re-anchoring is a real promotion attempt too. Keep the original
-    // Fellow's exhausted quota intact and publish the remaining independent
-    // retention subject under a freshly enrolled Fellow with unchanged caps.
+    // Drafting and publication each reserve capacity. Isolate the remaining
+    // retention subject under a freshly enrolled Fellow with unchanged caps;
+    // the original author's reservations remain intact for the quota proof.
     const retainedWriter = await enroll("synthesis-retention-writer", sponsorA);
     const retainedSession = await call(
       "/v1/sessions",
@@ -959,13 +1001,14 @@ await runLocalWorkerJourney(
       retainedWriter,
       201,
     );
-    const retained = await call(
+    const retainedDraft = await call(
       `/v1/sessions/${retainedSession.session_id}/synthesize`,
       retainedBody,
       retainedWriter,
       201,
       "synthesis-review-and-dead-end",
     );
+    const retained = await publishSynthesis(retainedDraft);
     assert.equal(retained.anchors_count, 3);
     assert.equal(retained.dropped_single_author_count, 2);
     const retainedFace = SingleSynthesisResponseSchema.parse(
@@ -999,13 +1042,14 @@ await runLocalWorkerJourney(
     };
     await fixtures.setScreenMode("allow-with-warning");
     const beforeWarning = await footprint();
-    const warned = await call(
+    const warnedDraft = await call(
       `/v1/sessions/${retainedSession.session_id}/synthesize`,
       warningBody,
       retainedWriter,
       201,
       "synthesis-published-warning",
     );
+    const warned = await publishSynthesis(warnedDraft);
     const afterWarning = await footprint();
     assert.equal(afterWarning.events, beforeWarning.events + 1);
     assert.equal(afterWarning.syntheses, beforeWarning.syntheses + 1);
@@ -1020,8 +1064,9 @@ await runLocalWorkerJourney(
         200,
         "synthesis-published-warning",
       ),
-      warned,
+      warnedDraft,
     );
+    assert.deepEqual(await publishSynthesis(warnedDraft, 200), warned);
     assert.deepEqual(await footprint(), afterWarning);
     assert.equal(await fixtures.screeningCalls(), warningScreens, "replay is not screened again");
 
@@ -1204,13 +1249,14 @@ await runLocalWorkerJourney(
     };
     await fixtures.setScreenMode("allow-with-warning");
     const beforeClosingWarning = await footprint();
-    const warnedClosing = await call(
+    const warnedClosingDraft = await call(
       `/v1/sessions/${retainedSession.session_id}/synthesize`,
       closingWarningBody,
       retainedWriter,
       201,
       "synthesis-closing-published-warning",
     );
+    const warnedClosing = await publishSynthesis(warnedClosingDraft);
     const afterClosingWarning = await footprint();
     assert.equal(afterClosingWarning.events, beforeClosingWarning.events + 1);
     assert.equal(afterClosingWarning.syntheses, beforeClosingWarning.syntheses + 1);
@@ -1228,8 +1274,9 @@ await runLocalWorkerJourney(
         200,
         "synthesis-closing-published-warning",
       ),
-      warnedClosing,
+      warnedClosingDraft,
     );
+    assert.deepEqual(await publishSynthesis(warnedClosingDraft, 200), warnedClosing);
     assert.deepEqual(await footprint(), afterClosingWarning);
     assert.equal(await fixtures.screeningCalls(), closingScreenCalls);
     await fixtures.setScreenMode("pass");
@@ -1269,9 +1316,28 @@ await runLocalWorkerJourney(
       .bind(problemId, reviewed.review_id)
       .first();
     assert.ok(reviewSource);
-    // Earlier independent subjects consume the author's real attempt budget.
-    // Prove that refusal rather than resetting it, then isolate the source
-    // race under a fresh real Fellow with the same sponsor and unchanged caps.
+    // Fill the original author's remaining slots with real private drafts.
+    // Drafting and approving both count; no reservation or limit is reset to
+    // accommodate the expanded journey.
+    const attempts = await env.DB.prepare(`SELECT COUNT(*) AS n
+      FROM public_write_attempt_reservations
+      WHERE fellow_id = (SELECT fellow_id FROM sessions WHERE session_id = ?)
+        AND problem_id = ? AND reserved_at > ?`)
+      .bind(sessionId, problemId, Date.now() - 3_600_000)
+      .first();
+    assert.ok(Number.isInteger(attempts.n) && attempts.n <= 20);
+    for (let attempt = attempts.n; attempt < 20; attempt++) {
+      const budgetDraft = await call(
+        `/v1/sessions/${sessionId}/synthesize`,
+        retainedBody,
+        author,
+        201,
+        `synthesis-quota-fill-${attempt}`,
+      );
+      assert.equal(budgetDraft.state, "draft");
+    }
+    // The next attempt must refuse before paid screening. Isolate the source
+    // race under a fresh enrolled Fellow with unchanged caps.
     const beforeQuota = await footprint();
     const screensBeforeQuota = await fixtures.screeningCalls();
     const exhausted = await call(
@@ -1296,15 +1362,24 @@ await runLocalWorkerJourney(
       raceWriter,
       201,
     );
-    const beforeRace = await footprint();
-    const screensBeforeRace = await fixtures.screeningCalls();
-    await fixtures.redactOnNextScreen(reviewSource.id);
-    const refused = await call(
+    const raceDraft = await call(
       `/v1/sessions/${raceSession.session_id}/synthesize`,
       retainedBody,
       raceWriter,
-      null,
+      201,
       "synthesis-redaction-race",
+    );
+    assert.equal(raceDraft.state, "draft");
+    const beforeRace = await footprint();
+    const screensBeforeRace = await fixtures.screeningCalls();
+    await fixtures.redactOnNextScreen(reviewSource.id);
+    const refused = await sponsorCall(
+      sponsorA,
+      "POST",
+      `/v1/sponsors/problems/${problemId}/syntheses/${raceDraft.synthesis_id}/publish`,
+      "sponsor.syntheses.drafts.publish",
+      undefined,
+      [409, 422],
     );
     console.log(
       JSON.stringify({
@@ -1332,8 +1407,13 @@ await runLocalWorkerJourney(
         200,
         "synthesis-review-and-dead-end",
       ),
+      retainedDraft,
+      "A completed draft receipt survives later source redaction",
+    );
+    assert.deepEqual(
+      await publishSynthesis(retainedDraft, 200),
       retained,
-      "A completed receipt survives later source redaction",
+      "A completed publication receipt survives later source redaction",
     );
 
     console.log(

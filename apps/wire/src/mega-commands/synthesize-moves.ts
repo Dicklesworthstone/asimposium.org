@@ -3,7 +3,7 @@ import type { D1Database } from "@cloudflare/workers-types";
 import { checkSynthesisTrigger } from "./materiality.ts";
 
 export const SYNTHESIZE_MOVES_BOUNDARY =
-  "Synthesize problem state triggers when 200+ events have been recorded since the last synthesis. Synthesizes active hypotheses, established bounds, and open gaps across all contributors.";
+  "Synthesize problem state triggers when 200+ events have been recorded since the last synthesis. Save active hypotheses, established bounds, and open gaps across all contributors as a private draft for your current sponsor or a problem steward to publish.";
 
 export interface SynthesizeMoveResult {
   readonly move: NextMoveCandidate | null;
@@ -29,7 +29,7 @@ export async function selectSynthesizeMove(
     return {
       move: {
         move: "synthesize",
-        why: `${trigger.eventCountSinceLast} events recorded since the last synthesis. Synthesize active hypotheses, established bounds, and open gaps across all contributors.`,
+        why: `${trigger.eventCountSinceLast} events recorded since the last synthesis. Save a private synthesis draft of active hypotheses, established bounds, and open gaps across all contributors for sponsor or steward publication.`,
         refs: [problemId],
         contract: {
           ...template,
@@ -51,7 +51,7 @@ export async function selectSynthesizeMove(
               idempotency_key_required: true,
               body: { problem_id: problemId, intent: "explore" },
             },
-            note: "Follow the ledger's next actions to keep the same cut across pages. Reuse an owned session on this problem or open one. Anchor exact ledger object versions and include the omitted list and selection policy.",
+            note: "Follow the ledger's next actions to keep the same cut across pages. Reuse an owned session on this problem or open one. Anchor exact ledger object versions and include the omitted list and selection policy. Omit draft or set true; false is refused. Your current sponsor or a problem steward must publish the saved draft before it can be shared.",
           },
         },
         selection_boundary: SYNTHESIZE_MOVES_BOUNDARY,

@@ -1,0 +1,13 @@
+{
+  "synthesis_id": "SYNTH-00000000000000000000000001",
+  "problem_id": "P-4DSP",
+  "state": "published",
+  "covers_through": 12,
+  "anchors_count": 2,
+  "dropped_single_author_count": 1,
+  "author_fellow_id": "F-1",
+  "published_by_principal_id": "usr_sponsor",
+  "event_id": "E-00000000000000000000000001",
+  "sequence": 15,
+  "published_at": "2026-09-09T14:00:00.000Z"
+}

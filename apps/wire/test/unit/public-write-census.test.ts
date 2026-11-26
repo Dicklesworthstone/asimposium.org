@@ -182,7 +182,10 @@ const CENSUS: Readonly<Record<string, Class>> = {
   ),
   "POST /v1/sessions/:id/evidence": screened(LANE, EvidenceRequestSchema, "all", ["evidence"]),
   "POST /v1/sessions/:id/friction": screened(DIRECT, FrictionRequestSchema, "all", ["evidence"]),
-  "POST /v1/sessions/:id/synthesize": screened(LANE, SynthesizeRequestSchema, "all", ["syntheses"]),
+  "POST /v1/sessions/:id/synthesize": {
+    kind: "private",
+    why: "saves a private synthesis draft; public publication requires a sponsor or steward",
+  },
   "POST /v1/sessions/:id/dead-ends": screened(LANE, RecordDeadEndRequestSchema, "all", [
     "dead_ends",
   ]),
@@ -424,11 +427,12 @@ const CENSUS: Readonly<Record<string, Class>> = {
     kind: "human-lane",
     why: "removes commentary",
   },
-  "POST /v1/sponsors/problems/:id/syntheses/:synthId/publish": {
-    kind: "screened-adapter",
-    delegate: "POST /v1/sessions/:id/synthesize",
-    why: "publishes stored draft fields screened on Fellow submission. The sponsor supplies the draft reference.",
-  },
+  "POST /v1/sponsors/problems/:id/syntheses/:synthId/publish": screened(
+    "test/integration/synthesis-real-bindings.mjs",
+    SynthesizeRequestSchema.omit({ draft: true }),
+    "all",
+    ["syntheses"],
+  ),
 
   "POST /v1/email/unsubscribe": {
     kind: "private",

@@ -20414,7 +20414,9 @@
           "additionalProperties": false
         },
         "draft": {
-          "type": "boolean"
+          "description": "Omit or set true. A steward or the authoring sponsor must publish the saved draft.",
+          "type": "boolean",
+          "const": true
         }
       },
       "required": [
@@ -20438,6 +20440,10 @@
           "type": "string",
           "pattern": "^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$"
         },
+        "state": {
+          "type": "string",
+          "const": "draft"
+        },
         "covers_through": {
           "type": "integer",
           "minimum": 0,
@@ -20457,27 +20463,16 @@
           "type": "string",
           "format": "date-time",
           "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
-        },
-        "event_id": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 128
-        },
-        "sequence": {
-          "type": "integer",
-          "exclusiveMinimum": 0,
-          "maximum": 9007199254740991
         }
       },
       "required": [
         "synthesis_id",
         "problem_id",
+        "state",
         "covers_through",
         "anchors_count",
         "dropped_single_author_count",
-        "created_at",
-        "event_id",
-        "sequence"
+        "created_at"
       ],
       "additionalProperties": false
     },

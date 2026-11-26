@@ -4,6 +4,10 @@ import { createServer } from "node:http";
 import { promisify } from "node:util";
 import { gunzipSync } from "node:zlib";
 import {
+  SynthesisDraftPublishResponseSchema,
+  SynthesizeResponseSchema,
+} from "@asimposium/contracts";
+import {
   EventTailNdjsonPageEndSchema,
   EventTailResponseSchema,
   renderEventTail,
@@ -202,7 +206,7 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, worker, origin, 
     201,
   );
   const synthesisCut = (await call(`/p/${problem}/events.json?since=0&limit=1`)).page_end.through;
-  const synthesis = await call(
+  const synthesisDraft = await call(
     `/v1/sessions/${session}/synthesize`,
     {
       covers_through: synthesisCut,
@@ -216,6 +220,19 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, worker, origin, 
     author,
     201,
   );
+  SynthesizeResponseSchema.parse(synthesisDraft);
+  assert.equal(synthesisDraft.state, "draft");
+  assert.equal(Object.hasOwn(synthesisDraft, "event_id"), false);
+  const synthesis = await sponsorCall(
+    "usr_tails_author",
+    "POST",
+    `/v1/sponsors/problems/${problem}/syntheses/${synthesisDraft.synthesis_id}/publish`,
+    "sponsor.syntheses.drafts.publish",
+    undefined,
+    201,
+  );
+  SynthesisDraftPublishResponseSchema.parse(synthesis);
+  assert.equal(synthesis.synthesis_id, synthesisDraft.synthesis_id);
 
   const get = async (path, headers = {}) => {
     const response = await worker.fetch(`${origin}${path}`, {
