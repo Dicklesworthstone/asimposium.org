@@ -177,3 +177,22 @@ test("storage must confirm exact bytes before dispatch, and expiry never mints a
   expect(problemResearchAttemptExpired(attempt, now - 1)).toBe(true);
   expect(attempt.key).toBe("console-research-exact-retry");
 });
+
+test("external review recovery retains the exact stored record and cannot silently substitute another", () => {
+  const reviewId = "EER-00000000000000000000000001";
+  const command = { ...resolve, external_expert_review_proof: reviewId };
+  const attempt = pending(command);
+  const saved = storage();
+  persistPendingProblemResearch(saved, attempt);
+  const restored = parsePendingProblemResearch(saved.getItem(problemResearchRecoveryKey(sponsorId, problemId)) ?? "", sponsorId, problemId);
+  expect(restored.input).toEqual(command);
+  expect(restored.key).toBe(attempt.key);
+  expect(() => persistPendingProblemResearch(saved, pending({
+    ...command, external_expert_review_proof: "EER-00000000000000000000000002",
+  }))).toThrow("still pending");
+  expect(() => persistPendingProblemResearch(saved, pending(resolve))).toThrow("still pending");
+  for (const invalid of [reviewId + "\n", " " + reviewId, "https://example.org/review", "EER-1", "An expert approved this."])
+    expect(() => pending({ ...resolve, external_expert_review_proof: invalid })).toThrow();
+  clearPendingProblemResearch(saved, restored);
+  expect(saved.getItem(problemResearchRecoveryKey(sponsorId, problemId))).toBeNull();
+});

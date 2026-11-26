@@ -1,4 +1,5 @@
 import {
+  ExternalExpertReviewIdSchema,
   ProblemLifecycleActionRequestSchema,
   PublicLedgerProblemIdSchema,
 } from "@asimposium/contracts";
@@ -62,9 +63,11 @@ export function parsePendingProblemResearch(
     input.action === "resolve" &&
     (input.closing_synthesis.synthesis_id === undefined ||
       input.closing_synthesis.synthesis_id.trim() !== input.closing_synthesis.synthesis_id ||
-      input.external_expert_review_proof !== undefined)
+      (input.external_expert_review_proof !== undefined &&
+        (!ExternalExpertReviewIdSchema.safeParse(input.external_expert_review_proof).success ||
+          input.external_expert_review_proof.trim() !== input.external_expert_review_proof)))
   ) {
-    throw new Error("A resolution retry requires its exact ordinary closing synthesis");
+    throw new Error("A resolution retry requires its exact closing synthesis and stored review reference");
   }
   if (input.action !== "enter-result-review" && input.action !== "resolve") {
     throw new Error("Invalid research action");

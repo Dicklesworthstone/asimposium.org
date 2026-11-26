@@ -4,6 +4,10 @@ on:
   push:
     branches: [main]
     paths:
+      - "apps/web/lib/problem-research*.ts"
+      - "apps/web/components/problem-research-control.tsx"
+      - "apps/web/app/console/problems/**"
+      - "apps/web/test/unit/problem-research*.test.*"
       - "apps/wire/src/app.ts"
       - "apps/wire/src/problems/**"
       - "apps/wire/src/sessions/**"
@@ -61,6 +65,17 @@ jobs:
         run: |
           bun test /dev/null --timeout=120000 apps/wire/test/unit/synthesis-draft-famous-resolve.test.ts apps/wire/test/unit/synthesis.test.ts apps/wire/test/unit/screening-warning.test.ts apps/wire/test/unit/screening-warning-read.test.ts
           bun test /dev/null --timeout=120000 --test-name-pattern 'synthesis|synthesize|shared.*handoff' apps/wire/test/unit/session-routes.test.ts
+      - name: Typecheck sponsor result controls
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
+        run: bun run --filter @asimposium/web typecheck
+      - name: Sponsor result confirmation and recovery regressions
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
+        working-directory: apps/web
+        run: |
+          bun test /dev/null --timeout=120000 test/unit/problem-research-transport.test.ts
+          bun test /dev/null --timeout=120000 test/unit/problem-research-recovery.test.ts
+          bun test /dev/null --timeout=120000 test/unit/problem-research-actions.test.ts
+          bun test /dev/null --timeout=120000 test/unit/problem-research-control.test.tsx
       - name: Native synthesis, shared handoff, and honors journeys
         if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
         run: |

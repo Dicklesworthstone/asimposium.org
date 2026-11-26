@@ -107,7 +107,7 @@ export async function changeProblemResearch(
     const command = parseProblemResearchCommand(input);
     if (!validProblemResearchTarget(problemId) || !validProblemResearchKey(idempotencyKey) || !command) {
       return { ok: false, retryable: false, retainAttempt: true,
-        message: "Choose an exact result claim and version, or review a published closing synthesis and keep its direction, text, and boundaries unchanged. An external expert-review assertion cannot authorize this transition." };
+        message: "Choose an exact result claim and version, or review a published closing synthesis and keep its direction, text, and boundaries unchanged. External review must identify an operator-recorded EER record; a prose assertion cannot authorize this transition." };
     }
     if (confirmed !== true) return { ok: false, retryable: false, retainAttempt: true,
       message: "Explicitly confirm the displayed result-review or resolution command and its consequences before submitting." };
@@ -131,7 +131,7 @@ export async function changeProblemResearch(
     if (result.reason === "refused" && result.problemCode !== undefined &&
         [400, 422].includes(result.status ?? 0)) {
       return { ok: false, retryable: false, refreshRequired: true,
-        message: "Stoa refused this transition. Check the current exact result claim, sponsor disclosures, independent scientific support, and the Fellow's published closing declaration, then refresh and review a new command." };
+        message: "Stoa refused this transition. Check the current exact result claim, sponsor disclosures, independent scientific support, and the Fellow's published closing declaration. Famous problems also require an unrevoked operator-recorded external review of the same claim version and limits. Refresh and review a new command." };
     }
     return uncertain;
   } catch {

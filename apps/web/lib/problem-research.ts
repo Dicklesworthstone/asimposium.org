@@ -1,6 +1,7 @@
 import "server-only";
 
 import {
+  ExternalExpertReviewIdSchema,
   type ProblemLifecycleActionRequest,
   ProblemLifecycleActionRequestSchema,
   type ProblemResolutionResponse,
@@ -72,7 +73,7 @@ export function validProblemResearchKey(key: unknown): key is string {
   return typeof key === "string" && /^[A-Za-z0-9._-]{1,160}$/.exec(key)?.[0] === key;
 }
 
-/** The console supports ordinary resolution using an existing Fellow work product. */
+/** Resolution selects existing scientific work and, when required, one stored review. */
 export function parseProblemResearchCommand(input: unknown): ProblemResearchCommand | undefined {
   const parsed = ProblemLifecycleActionRequestSchema.safeParse(input);
   if (!parsed.success) return undefined;
@@ -82,7 +83,9 @@ export function parseProblemResearchCommand(input: unknown): ProblemResearchComm
   }
   if (parsed.data.action !== "resolve" || parsed.data.closing_synthesis.synthesis_id === undefined ||
       parsed.data.closing_synthesis.synthesis_id.trim() !== parsed.data.closing_synthesis.synthesis_id ||
-      parsed.data.external_expert_review_proof !== undefined) return undefined;
+      (parsed.data.external_expert_review_proof !== undefined &&
+        (!ExternalExpertReviewIdSchema.safeParse(parsed.data.external_expert_review_proof).success ||
+          parsed.data.external_expert_review_proof.trim() !== parsed.data.external_expert_review_proof))) return undefined;
   return parsed.data;
 }
 

@@ -303,3 +303,29 @@ test("invalid result selectors are refused before signing or public I/O", async 
   }
   expect(fetcher).not.toHaveBeenCalled();
 });
+
+test("canonical external review references travel unchanged while prose and malformed references never dispatch", async () => {
+  const reviewId = "EER-00000000000000000000000001";
+  const command = { ...researchResolveCommand, external_expert_review_proof: reviewId };
+  const calls: { url: string; init: RequestInit }[] = [];
+  globalThis.fetch = mock(async (url: string | URL | Request, init?: RequestInit) => {
+    calls.push({ url: String(url), init: init ?? {} });
+    return Response.json(researchResolutionReceipt);
+  }) as unknown as typeof fetch;
+  for (let retry = 0; retry < 2; retry++) {
+    expect(await stoaChangeProblemResearch(researchSponsor, researchProblem, command, "same-external-review"))
+      .toEqual({ ok: true, data: researchResolutionReceipt });
+  }
+  expect(calls).toHaveLength(2);
+  expect(calls[0]!.init.body).toBe(JSON.stringify(command));
+  expect(calls[1]!.init.body).toBe(calls[0]!.init.body);
+  const headers = new Headers(calls[1]!.init.headers);
+  expect(headers.get("idempotency-key")).toBe("same-external-review");
+  expect(JSON.parse(headers.get(SERVICE_ENVELOPE_HEADER) ?? "{}").claims.payload_sha256)
+    .toBe(await payloadDigest(JSON.stringify(command)));
+  for (const proof of [reviewId + "\n", " " + reviewId, "https://example.org/review", "EER-1", "An expert approved this."]) {
+    expect((await stoaChangeProblemResearch(researchSponsor, researchProblem,
+      { ...command, external_expert_review_proof: proof }, "same-external-review")).ok).toBe(false);
+  }
+  expect(calls).toHaveLength(2);
+});

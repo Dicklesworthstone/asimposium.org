@@ -1,6 +1,6 @@
 "use client";
 
-import { isTrustedStoaOrigin, type SponsorProblemGovernanceResponse } from "@asimposium/contracts";
+import { ExternalExpertReviewIdSchema, isTrustedStoaOrigin, type SponsorProblemGovernanceResponse } from "@asimposium/contracts";
 import type { ClaimsListResponse } from "@asimposium/contracts/claims-list";
 import { type SynthesesListQuery, synthesesListPath } from "@asimposium/contracts/syntheses";
 import Link from "next/link";
@@ -48,7 +48,7 @@ export type ProblemResearchWorkspace = Pick<
 function describeCommand(input: ProblemResearchCommand): string {
   return input.action === "enter-result-review"
     ? `Select ${input.result_claim.claim_id}@${input.result_claim.version} for result review`
-    : `Resolve as ${input.direction} using ${input.closing_synthesis.synthesis_id}`;
+    : `Resolve as ${input.direction} using ${input.closing_synthesis.synthesis_id}${input.external_expert_review_proof ? ` and external review ${input.external_expert_review_proof}` : ""}`;
 }
 
 function PublishedItems({ items }: { readonly items: readonly string[] }) {
@@ -223,6 +223,7 @@ export function ProblemResearchControl({
   const [claimPreview, setClaimPreview] = useState<ResultClaimPreview | null>(null);
   const [claimPreviewMessage, setClaimPreviewMessage] = useState<string | null>(null);
   const [synthesisId, setSynthesisId] = useState(selectedSynthesis ?? "");
+  const [externalReviewId, setExternalReviewId] = useState("");
   const [confirmedAction, setConfirmedAction] = useState<ProblemResearchCommand["action"] | null>(null);
   const [preview, setPreview] = useState<ClosingSynthesisPreview | null>(null);
   const [previewMessage, setPreviewMessage] = useState<string | null>(null);
@@ -248,6 +249,9 @@ export function ProblemResearchControl({
       ? target
       : undefined;
   const status = result?.ok ? result.receipt.problem.status : initial.problem.status;
+  const validExternalReview = externalReviewId === "" ||
+    (externalReviewId.trim() === externalReviewId &&
+      ExternalExpertReviewIdSchema.safeParse(externalReviewId).success);
 
   useEffect(() => {
     let cancelled = false;
@@ -348,6 +352,7 @@ export function ProblemResearchControl({
     lock.current = true;
     setSynthesisId(selectedId);
     setPreview(null);
+    setExternalReviewId("");
     setConfirmedAction(null);
     setPreviewMessage(null);
     startTransition(async () => {
@@ -657,11 +662,31 @@ export function ProblemResearchControl({
               <form
                 onSubmit={(event) => {
                   event.preventDefault();
-                  submit(preview.command);
+                  if (!validExternalReview) return;
+                  submit({ ...preview.command,
+                    ...(externalReviewId === "" ? {} : { external_expert_review_proof: externalReviewId }),
+                  });
                 }}
               >
                 <fieldset disabled={disabled}>
                   <legend>Confirm the unchanged published record</legend>
+                  <label>
+                    Operator-recorded external review identifier (required for famous problems)
+                    <input name="external_expert_review_id" value={externalReviewId} maxLength={30}
+                      autoComplete="off" spellCheck={false} placeholder="EER-…"
+                      aria-describedby="external-review-help" aria-invalid={!validExternalReview}
+                      onChange={(event) => {
+                        setExternalReviewId(event.target.value);
+                        setConfirmedAction(null);
+                      }} />
+                  </label>
+                  <p id="external-review-help">
+                    Use the exact EER identifier supplied by the operator after inspecting the external
+                    expert attestation. Stoa checks that the stored review supports resolution, remains
+                    unrevoked, and matches this exact claim version and no-claim boundary. Entering an
+                    identifier does not establish those facts. Leave this empty for ordinary problems.
+                  </p>
+                  {!validExternalReview && <p role="alert">Enter a canonical EER identifier, not a review assertion or URL.</p>}
                   <label>
                     <input
                       type="checkbox"
@@ -673,9 +698,9 @@ export function ProblemResearchControl({
                     I have read this exact synthesis and its limits, and confirm resolving{" "}
                     <code>{problemId}</code> as <strong>{preview.command.direction}</strong> using{" "}
                     <code>{preview.synthesis.synthesis_id}</code> without changing its scientific
-                    content.
+                    content{externalReviewId === "" ? "." : <> and reference external review <code>{externalReviewId}</code>.</>}
                   </label>
-                  <button type="submit" className="btn-action" disabled={confirmedAction !== "resolve"}>
+                  <button type="submit" className="btn-action" disabled={confirmedAction !== "resolve" || !validExternalReview}>
                     Resolve using this exact synthesis
                   </button>
                 </fieldset>

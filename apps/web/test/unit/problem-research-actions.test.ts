@@ -195,3 +195,18 @@ test("only an authenticated typed contract refusal can settle a pending scientif
   }
   expect(reads).toHaveLength(0);
 });
+
+test("an operator-recorded external review identifier survives confirmation and lost-response recovery", async () => {
+  const command = { ...researchResolveCommand,
+    external_expert_review_proof: "EER-00000000000000000000000001" };
+  mutationResult = { ok: false, reason: "unreachable" };
+  expect(await actions.changeProblemResearch(researchSponsor, researchProblem, command, "external-review-retry", true))
+    .toMatchObject({ ok: false, retainAttempt: true, retryable: true });
+  mutationResult = { ok: true, data: researchResolutionReceipt };
+  expect(await actions.changeProblemResearch(researchSponsor, researchProblem, command, "external-review-retry", true))
+    .toEqual({ ok: true, receipt: researchResolutionReceipt });
+  expect(writes).toEqual(Array.from({ length: 2 }, () =>
+    [researchSponsor, researchProblem, command, "external-review-retry"]));
+  expect(reads).toHaveLength(0);
+  expect(claimReads).toHaveLength(0);
+});
