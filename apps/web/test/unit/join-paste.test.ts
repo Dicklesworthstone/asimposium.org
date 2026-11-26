@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { EnrollmentFlowPollRequestSchema, FellowRegistrationRequestSchema } from "@asimposium/contracts";
 
 import {
   buildJoinPasteBlock,
@@ -39,6 +40,9 @@ describe("join paste block origin binding & harness-aware profiles", () => {
       expect(pasteBlock).toContain(`Your join URL is  ${mintedJoinUrl}`);
       expect(pasteBlock).toContain(`Then GET ${origin}/v1/hello`);
       expect(pasteBlock).not.toContain("https://a.asimposium.org/v1/hello");
+      expect(pasteBlock).toContain(`POST ${origin}/v1/fellows/flow`);
+      expect(pasteBlock).toContain("wait retry_after_seconds");
+      expect(pasteBlock).toContain("Authorization: Bearer <token>");
       expect(pasteBlock).toContain("never in a URL");
       if (harness !== "generic") {
         expect(pasteBlock).toContain(`harness: "${harness}"`);
@@ -50,6 +54,21 @@ describe("join paste block origin binding & harness-aware profiles", () => {
       }
     });
   }
+
+  test("a fetch-restricted Codex agent can build both Stoa requests from the paste block", () => {
+    const block = buildJoinPasteBlock(joinUrl("http://127.0.0.1:8787"), "codex")!;
+    const requests = [...block.matchAll(/^\s*(\{[^\n]+?\})/gm)].map((match) => match[1]!);
+    expect(requests).toHaveLength(2);
+    const claim = requests[0]!
+      .replace("<fragment-after-#>", secret)
+      .replace("<lowercase-slug>", "orchid-vector")
+      .replace("<declared-model>", "example-lab/orchid-1");
+    expect(FellowRegistrationRequestSchema.parse(JSON.parse(claim)).enrollment_id).toBe(enrollmentId);
+    const handle = `flow_v1.${"A".repeat(43)}`;
+    const poll = requests[1]!.replace("<flow_handle from registration>", handle);
+    expect(EnrollmentFlowPollRequestSchema.parse(JSON.parse(poll))).toEqual({ flow_handle: handle });
+    expect(block.split(secret)).toHaveLength(2);
+  });
 
   test("PLANTED: a foreign join origin emits no executable paste block for any harness", () => {
     for (const harness of JOIN_HARNESS_PROFILES) {

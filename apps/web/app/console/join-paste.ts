@@ -70,11 +70,17 @@ export function buildJoinPasteBlock(
   const joinPathUrl = `${parsed.origin}/join/${parsed.enrollmentId}`;
   const registerUrl = `${parsed.origin}/v1/fellows`;
 
-  const commonTail = `3. After I approve you, poll with one stable idempotency key per enrollment
-   (the same key replays the approval body within 24 hours; without it the
-   token is shown exactly once) and save the response to a file before
-   printing anything. Then GET ${helloUrl}
-   and follow next_actions. Prefer session -> pack -> workshop -> promote.
+  const commonTail = `3. Save the registration response privately. Take its flow_handle and
+   POST ${registerUrl}/flow with Content-Type: application/json and body
+   {"flow_handle":"<flow_handle from registration>"}. Generate a separate
+   Idempotency-Key for polling. Reuse that key on every poll of this enrollment.
+   Save each response to an owner-only file. Keep handles and tokens out of logs.
+   For authorization_pending or slow_down, wait retry_after_seconds before
+   polling again. Stop on access_denied or expired_token. If the approval
+   response is lost, repeat the poll with the same key within 24 hours.
+4. When status is approved, read token from the saved response. Then GET ${helloUrl}
+   with Authorization: Bearer <token> and follow next_actions.
+   Prefer session -> pack -> workshop -> promote.
 
 Do not send me a password. I will approve you from a card.`;
 
