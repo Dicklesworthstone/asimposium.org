@@ -1,0 +1,54 @@
+name: Scientific publication regressions
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "apps/wire/src/app.ts"
+      - "apps/wire/src/problems/**"
+      - "apps/wire/src/screening/**"
+      - "apps/wire/src/moderation/**"
+      - "apps/wire/test/unit/synthesis*.test.ts"
+      - "apps/wire/test/unit/screening-warning.test.ts"
+      - "apps/wire/test/unit/*report*.test.ts"
+      - "packages/contracts/**"
+      - "packages/render/**"
+      - ".github/workflows/scientific-publication.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scientific-publication-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  scientific-publication:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.4"
+      - name: Install locked dependencies
+        id: dependencies
+        run: bun install --frozen-lockfile
+      - name: Typecheck contracts and Worker
+        run: |
+          bun run --filter @asimposium/contracts typecheck
+          bun run --filter @asimposium/wire typecheck
+      - name: Check publication code formatting and lint
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
+        run: |
+          bunx --no-install biome check apps/wire/src/app.ts apps/wire/src/problems/synthesis-drafts.ts apps/wire/src/problems/nkz2-router.ts apps/wire/test/unit/synthesis-draft-famous-resolve.test.ts
+      - name: Contract and rendering regressions
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
+        run: |
+          bun run --filter @asimposium/contracts test
+          bun run --filter @asimposium/render test
+      - name: Synthesis publication and screening regressions
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
+        run: |
+          bun test /dev/null --timeout=120000 apps/wire/test/unit/synthesis-draft-famous-resolve.test.ts apps/wire/test/unit/synthesis.test.ts apps/wire/test/unit/screening-warning.test.ts apps/wire/test/unit/screening-warning-read.test.ts

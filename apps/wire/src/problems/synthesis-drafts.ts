@@ -26,6 +26,7 @@ import {
 } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
 import { z } from "zod";
+import { validatedProblem } from "../http/envelope.ts";
 import {
   canonicalJson,
   KraterIdempotencyConflictError,
@@ -37,11 +38,30 @@ import {
   isSynthesisReferenceChanged,
   synthesisAnchorGuards,
 } from "../ledger/synthesis-references.ts";
+import { isScreeningPostureChangedError } from "../moderation/posture.ts";
 import {
   readSponsorSuspensionStatus,
   SponsorSuspensionError,
 } from "../moderation/sponsor-suspension.ts";
 import { scanFieldsForCredentials } from "../screening/credential-scan.ts";
+import {
+  isScreeningDecisionChangedError,
+  type ScreenedPublication,
+  screeningPublicationStatements,
+} from "../screening/ingress.ts";
+import { screeningHoldResponse } from "../screening/public-candidate.ts";
+import {
+  isScreeningContextStaleError,
+  screeningContextStaleProblem,
+  screeningContextUnavailableProblem,
+} from "../screening/publication-context.ts";
+import type { WorkersAIPromotionInput } from "../screening/workers-ai.ts";
+import {
+  checkAndReserveQuota,
+  promotionRateLimitedProblem,
+  settleQuotaReservation,
+  settleQuotaReservationStatement,
+} from "../sessions/quota.ts";
 
 const CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
@@ -230,12 +250,49 @@ export type PublishDraftResult =
       readonly detail: string;
     };
 
+function publishedDraftReceipt(draft: DraftRow): PublishDraftResult | undefined {
+  if (
+    draft.state !== "published" ||
+    !draft.published_event_id ||
+    !draft.published_seq ||
+    !draft.published_at ||
+    !draft.published_by_principal_id
+  ) {
+    return undefined;
+  }
+  const anchors = z.array(SynthesisAnchorSchema).parse(JSON.parse(draft.anchors_json));
+  return {
+    ok: true,
+    status: 200,
+    body: SynthesisDraftPublishResponseSchema.parse({
+      synthesis_id: draft.synthesis_id,
+      problem_id: draft.problem_id,
+      state: "published",
+      covers_through: draft.covers_through,
+      anchors_count: anchors.length,
+      dropped_single_author_count: draft.dropped_single_author_count,
+      author_fellow_id: draft.author_fellow_id,
+      published_by_principal_id: draft.published_by_principal_id,
+      event_id: draft.published_event_id,
+      sequence: draft.published_seq,
+      published_at: draft.published_at,
+    }),
+  };
+}
+
 export async function publishSynthesisDraftForSponsor(
   db: D1Database,
   problemId: string,
   synthesisId: string,
   sponsorId: string,
-): Promise<PublishDraftResult> {
+  screening?: {
+    readonly sponsorLimit: number;
+    readonly screen: (
+      candidate: WorkersAIPromotionInput,
+      authorSponsorId: string,
+    ) => Promise<Response | ScreenedPublication>;
+  },
+): Promise<PublishDraftResult | Response> {
   const problem = await db
     .prepare("SELECT id, status FROM problems WHERE id = ?")
     .bind(problemId)
@@ -259,7 +316,10 @@ export async function publishSynthesisDraftForSponsor(
     };
   }
   const draft = await db
-    .prepare("SELECT * FROM synthesis_drafts WHERE problem_id = ? AND synthesis_id = ?")
+    .prepare(
+      `SELECT d.* FROM synthesis_drafts d WHERE d.problem_id = ? AND d.synthesis_id = ?
+       AND NOT EXISTS (SELECT 1 FROM private_draft_erasures e WHERE e.problem_id = d.problem_id)`,
+    )
     .bind(problemId, synthesisId)
     .first<DraftRow>();
   if (!draft) {
@@ -298,31 +358,34 @@ export async function publishSynthesisDraftForSponsor(
     };
   }
 
-  if (
-    draft.state === "published" &&
-    draft.published_event_id &&
-    draft.published_seq &&
-    draft.published_at
-  ) {
-    const anchors = z.array(SynthesisAnchorSchema).parse(JSON.parse(draft.anchors_json));
-    return {
-      ok: true,
-      status: 200,
-      body: SynthesisDraftPublishResponseSchema.parse({
-        synthesis_id: draft.synthesis_id,
-        problem_id: draft.problem_id,
-        state: "published",
-        covers_through: draft.covers_through,
-        anchors_count: anchors.length,
-        dropped_single_author_count: draft.dropped_single_author_count,
-        author_fellow_id: draft.author_fellow_id,
-        published_by_principal_id: draft.published_by_principal_id ?? sponsorId,
-        event_id: draft.published_event_id,
-        sequence: draft.published_seq,
-        published_at: draft.published_at,
-      }),
-    };
-  }
+  const replay = publishedDraftReceipt(draft);
+  if (replay !== undefined) return replay;
+
+  const latestReceipt = async (): Promise<PublishDraftResult | undefined> => {
+    const latest = await db
+      .prepare(
+        `SELECT d.* FROM synthesis_drafts d WHERE d.problem_id = ? AND d.synthesis_id = ?
+         AND NOT EXISTS (SELECT 1 FROM private_draft_erasures e WHERE e.problem_id = d.problem_id)`,
+      )
+      .bind(problemId, synthesisId)
+      .first<DraftRow>();
+    if (latest === null) return undefined;
+    const receipt = publishedDraftReceipt(latest);
+    if (receipt === undefined) return undefined;
+    const stillAuthorized =
+      (await readSponsorStanding(db, sponsorId)) === "active" &&
+      ((await isProblemSteward(db, problemId, sponsorId)) ||
+        (await isCurrentSponsorOfFellow(db, latest.author_fellow_id, sponsorId)));
+    if (!stillAuthorized) {
+      return {
+        ok: false,
+        status: 403,
+        code: "WRITE_REFUSED",
+        detail: "Sponsor authority changed before the synthesis receipt could be returned.",
+      };
+    }
+    return receipt;
+  };
 
   if (
     problem.status === "private-draft" ||
@@ -391,15 +454,16 @@ export async function publishSynthesisDraftForSponsor(
     };
   }
 
-  const eventId = mintCrockfordId("E");
-  const publishedAt = new Date().toISOString();
-  const payloadObj = {
+  const candidateBody = {
     covers_through: draft.covers_through,
     body_md: draft.body_md,
     anchors: anchorCheck.anchors,
     omitted: parsedOmitted,
     selection_policy: draft.selection_policy,
     ...(parsedClosing !== undefined ? { closing_resolution: parsedClosing } : {}),
+  };
+  const payloadObj = {
+    ...candidateBody,
     dropped_single_author_count: draft.dropped_single_author_count,
     published_by_principal_id: sponsorId,
   };
@@ -409,6 +473,101 @@ export async function publishSynthesisDraftForSponsor(
     .map((b) => b.toString(16).padStart(2, "0"))
     .join("");
 
+  // A draft-time screen cannot authorize a later public write. The author
+  // history, problem formulation and moderation decisions may have changed.
+  // Completed receipts above replay before any quota or provider charge.
+  if (screening === undefined) return screeningContextUnavailableProblem();
+  // A steward may publish another sponsor's Fellow. Review cases must remain
+  // accessible to that Fellow's current sponsor, while the acting publisher
+  // remains accountable for this attempt's quota.
+  const author = await db
+    .prepare(
+      `SELECT f.sponsor_id FROM enrollment_fellows f
+       JOIN sponsors s ON s.sponsor_id = f.sponsor_id AND s.tombstoned_at IS NULL
+       WHERE f.fellow_id = ?`,
+    )
+    .bind(draft.author_fellow_id)
+    .first<{ sponsor_id: string }>();
+  if (author === null) {
+    return {
+      ok: false,
+      status: 403,
+      code: "WRITE_REFUSED",
+      detail: "The authoring Fellow must have a current sponsor who can review held work.",
+    };
+  }
+  const admission = await checkAndReserveQuota(db, {
+    fellowId: draft.author_fellow_id,
+    problemId,
+    sponsorId,
+    sessionId: draft.session_id,
+    route: "synthesis-draft-publish",
+    idempotencyKey: `synth-draft-publish:${problemId}:${synthesisId}`,
+    requestDigest,
+    sponsorLimit: screening.sponsorLimit,
+  });
+  if (!admission.allowed) {
+    const winner = await latestReceipt();
+    if (winner !== undefined) return winner;
+    if (admission.reason === "RATE_LIMITED") return promotionRateLimitedProblem(admission);
+    const response = validatedProblem({
+      status: admission.reason === "IN_FLIGHT_CONFLICT" ? 429 : 409,
+      code: admission.reason === "IN_FLIGHT_CONFLICT" ? "WRITE_REFUSED" : "IDEMPOTENCY_CONFLICT",
+      title: "Synthesis publication is already in progress",
+      detail: "A publication attempt for this draft already holds the write reservation.",
+      fixHint: "Retry the same draft publication after the current attempt finishes.",
+      headers: { "cache-control": "private, no-store" },
+    });
+    if (admission.reason === "IN_FLIGHT_CONFLICT")
+      response.headers.set("retry-after", String(admission.retryAfterSeconds));
+    return response;
+  }
+  const reservationId = admission.reservation.reservationId;
+  let screened: ScreenedPublication;
+  try {
+    const winner = await latestReceipt();
+    if (winner !== undefined) {
+      await settleQuotaReservation(db, reservationId, "settled_failed");
+      return winner;
+    }
+    const outcome = await screening.screen(
+      Object.freeze({
+        problemId,
+        fellowId: draft.author_fellow_id,
+        kind: "synthesis",
+        statement: canonicalJson(candidateBody),
+        falsifier: null,
+      }),
+      author.sponsor_id,
+    );
+    if (outcome instanceof Response) {
+      await settleQuotaReservation(
+        db,
+        reservationId,
+        outcome.status === 202
+          ? "settled_held"
+          : outcome.status === 403 || outcome.status === 422
+            ? "settled_rejected"
+            : "settled_failed",
+      );
+      return outcome;
+    }
+    if (
+      outcome.problemId !== problemId ||
+      outcome.fellowId !== draft.author_fellow_id ||
+      outcome.contextGuard === undefined
+    ) {
+      await settleQuotaReservation(db, reservationId, "settled_failed");
+      return screeningContextUnavailableProblem();
+    }
+    screened = outcome;
+  } catch {
+    await settleQuotaReservation(db, reservationId, "settled_failed");
+    return screeningContextUnavailableProblem();
+  }
+
+  const eventId = mintCrockfordId("E");
+  const publishedAt = new Date().toISOString();
   let write: Awaited<ReturnType<typeof writeLedgerEvent>>;
   try {
     write = await writeLedgerEvent(
@@ -439,6 +598,17 @@ export async function publishSynthesisDraftForSponsor(
         preconditionSql: ` AND EXISTS (
             SELECT 1 FROM synthesis_drafts
             WHERE synthesis_id = ? AND problem_id = ? AND state = 'draft'
+              AND covers_through = ? AND body_md = ? AND anchors_json = ?
+              AND omitted_json = ? AND selection_policy = ?
+              AND closing_resolution_json IS ? AND dropped_single_author_count = ?
+              AND author_fellow_id = ? AND author_sponsor_id = ? AND session_id = ?
+              AND declared_model = ? AND harness = ? AND created_at = ?
+          ) AND NOT EXISTS (
+            SELECT 1 FROM private_draft_erasures WHERE problem_id = ?
+          ) AND EXISTS (
+            SELECT 1 FROM enrollment_fellows f
+            JOIN sponsors s ON s.sponsor_id = f.sponsor_id AND s.tombstoned_at IS NULL
+            WHERE f.fellow_id = ? AND f.sponsor_id = ?
           ) AND EXISTS (
             SELECT 1 FROM problems
             WHERE id = ? AND status NOT IN ('private-draft', 'resolved', 'retired')
@@ -462,6 +632,22 @@ export async function publishSynthesisDraftForSponsor(
         preconditionBindings: [
           draft.synthesis_id,
           problemId,
+          draft.covers_through,
+          draft.body_md,
+          draft.anchors_json,
+          draft.omitted_json,
+          draft.selection_policy,
+          draft.closing_resolution_json,
+          draft.dropped_single_author_count,
+          draft.author_fellow_id,
+          draft.author_sponsor_id,
+          draft.session_id,
+          draft.declared_model,
+          draft.harness,
+          draft.created_at,
+          problemId,
+          draft.author_fellow_id,
+          author.sponsor_id,
           problemId,
           sponsorId,
           sponsorId,
@@ -474,6 +660,8 @@ export async function publishSynthesisDraftForSponsor(
         ],
         statementsAfterEvent: ({ sequence }) => [
           ...synthesisAnchorGuards(db, problemId, draft.covers_through, anchorCheck.sources),
+          ...screeningPublicationStatements(db, screened, eventId, draft.session_id, requestDigest),
+          settleQuotaReservationStatement(db, reservationId, eventId),
           db
             .prepare(
               `INSERT OR IGNORE INTO syntheses
@@ -537,6 +725,14 @@ export async function publishSynthesisDraftForSponsor(
       },
     );
   } catch (error) {
+    await settleQuotaReservation(db, reservationId, "settled_failed");
+    const winner = await latestReceipt();
+    if (winner !== undefined) return winner;
+    if (isScreeningPostureChangedError(error))
+      return screeningHoldResponse("provider-unavailable", undefined, "quarantine-first");
+    if (isScreeningDecisionChangedError(error))
+      return screeningHoldResponse("provider-unavailable");
+    if (isScreeningContextStaleError(error)) return screeningContextStaleProblem();
     if (isSynthesisReferenceChanged(error)) {
       return {
         ok: false,
@@ -550,37 +746,6 @@ export async function publishSynthesisDraftForSponsor(
       error instanceof KraterIdempotencyConflictError ||
       error instanceof KraterLedgerPreconditionError
     ) {
-      // Concurrent multi-steward publish race: return the already-committed 200 receipt
-      // if another authorized sponsor won the transaction, or map revocation/lock cleanly.
-      const latestDraft = await db
-        .prepare("SELECT * FROM synthesis_drafts WHERE problem_id = ? AND synthesis_id = ?")
-        .bind(problemId, synthesisId)
-        .first<DraftRow>();
-      if (
-        latestDraft?.state === "published" &&
-        latestDraft.published_event_id &&
-        latestDraft.published_seq &&
-        latestDraft.published_at
-      ) {
-        const anchors = z.array(SynthesisAnchorSchema).parse(JSON.parse(latestDraft.anchors_json));
-        return {
-          ok: true,
-          status: 200,
-          body: SynthesisDraftPublishResponseSchema.parse({
-            synthesis_id: latestDraft.synthesis_id,
-            problem_id: latestDraft.problem_id,
-            state: "published",
-            covers_through: latestDraft.covers_through,
-            anchors_count: anchors.length,
-            dropped_single_author_count: latestDraft.dropped_single_author_count,
-            author_fellow_id: latestDraft.author_fellow_id,
-            published_by_principal_id: latestDraft.published_by_principal_id ?? sponsorId,
-            event_id: latestDraft.published_event_id,
-            sequence: latestDraft.published_seq,
-            published_at: latestDraft.published_at,
-          }),
-        };
-      }
       const latestStanding = await readSponsorStanding(db, sponsorId);
       const stillAuthorized =
         latestStanding === "active" &&
@@ -611,8 +776,29 @@ export async function publishSynthesisDraftForSponsor(
           detail: `Problem '${problemId}' is '${latestProblem.status}' and cannot publish new syntheses.`,
         };
       }
+      return validatedProblem({
+        status: 409,
+        code: "OBJECT_VERSION_CONFLICT",
+        title: "Synthesis draft changed before publication",
+        detail:
+          "The draft or its publication authority changed while it was being screened. Nothing was published.",
+        fixHint: "Read the current draft and problem, then retry the intended publication.",
+        rule: "A5",
+        extensions: {
+          schema: SYNTHESES_SCHEMA_ID,
+          example: { problem_id: problemId, synthesis_id: synthesisId },
+        },
+        headers: { "cache-control": "private, no-store" },
+      });
     }
     throw error;
+  }
+
+  if (write.eventId !== eventId) {
+    await settleQuotaReservation(db, reservationId, "settled_failed");
+    const winner = await latestReceipt();
+    if (winner !== undefined) return winner;
+    throw new Error("Synthesis publication replay has no retained draft receipt.");
   }
 
   return {

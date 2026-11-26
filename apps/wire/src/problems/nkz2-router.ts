@@ -10,13 +10,17 @@
 import {
   PublicLedgerProblemIdSchema,
   SYNTHESES_SCHEMA_ID,
-  SynthesisIdSchema,
   SynthesisDraftPageRequestSchema,
+  SynthesisIdSchema,
 } from "@asimposium/contracts";
 import { Hono } from "hono";
 import { cancelUnconsumedRequestBody, parseAuthenticatedJsonBytes } from "../auth/http";
 import type { EnrollmentRouterOptions } from "../enrollment/router";
+import type { Env } from "../env";
 import { validatedProblem } from "../http/envelope";
+import { type PublicCandidateScreener, screenPublicCandidate } from "../screening/public-candidate";
+import { screenPromotionWithWorkersAI, type WorkersAiBinding } from "../screening/workers-ai";
+import { parseSponsorLimit } from "../sessions/quota";
 import { listExternalExpertReviews, recordExternalExpertReview } from "./external-expert-reviews";
 import { listSynthesisDraftsForSponsor, publishSynthesisDraftForSponsor } from "./synthesis-drafts";
 
@@ -73,9 +77,15 @@ function invalidIdProblem(detail: string, fixHint: string, example: Record<strin
 }
 
 export function createSynthesisDraftsAndExternalReviewsApp(
-  options: Pick<EnrollmentRouterOptions, "db" | "verifiedSponsor" | "verifiedOperator">,
+  options: Pick<EnrollmentRouterOptions, "db" | "verifiedSponsor" | "verifiedOperator"> & {
+    readonly screenPromotion?: PublicCandidateScreener;
+  },
 ) {
-  const app = new Hono();
+  const app = new Hono<{ Bindings: Env }>();
+  const screenPromotion: PublicCandidateScreener =
+    options.screenPromotion ??
+    ((input, env) =>
+      screenPromotionWithWorkersAI(env.AI as unknown as WorkersAiBinding | undefined, input));
 
   app.on(["GET", "POST"], "/v1/sponsors/problems/:id/syntheses/drafts", async (c) => {
     if (hasQueryParams(c.req.raw)) {
@@ -125,17 +135,24 @@ export function createSynthesisDraftsAndExternalReviewsApp(
       try {
         if (!isJsonContentType(c.req.raw) || !(authenticated.rawBody instanceof Uint8Array))
           throw new Error("Expected signed JSON.");
-        page = SynthesisDraftPageRequestSchema.parse(parseAuthenticatedJsonBytes(authenticated.rawBody));
+        page = SynthesisDraftPageRequestSchema.parse(
+          parseAuthenticatedJsonBytes(authenticated.rawBody),
+        );
       } catch {
-        return privateResponse(validatedProblem({
-          status: 422,
-          code: "SCHEMA_INVALID",
-          title: "Invalid synthesis draft page",
-          detail: "The signed JSON body must select a valid draft page.",
-          fixHint: "Send {} for the first page or { after: next_after } from the preceding page.",
-          rule: "A5",
-          extensions: { schema: SYNTHESES_SCHEMA_ID, example: { method: "POST", path: route, body: {} } },
-        }));
+        return privateResponse(
+          validatedProblem({
+            status: 422,
+            code: "SCHEMA_INVALID",
+            title: "Invalid synthesis draft page",
+            detail: "The signed JSON body must select a valid draft page.",
+            fixHint: "Send {} for the first page or { after: next_after } from the preceding page.",
+            rule: "A5",
+            extensions: {
+              schema: SYNTHESES_SCHEMA_ID,
+              example: { method: "POST", path: route, body: {} },
+            },
+          }),
+        );
       }
     }
     const list = await listSynthesisDraftsForSponsor(
@@ -199,7 +216,18 @@ export function createSynthesisDraftsAndExternalReviewsApp(
       problemId,
       synthId,
       authenticated.principal.sponsorId,
+      {
+        sponsorLimit: parseSponsorLimit(c.env.SPONSOR_PROMOTION_RATE_LIMIT),
+        screen: (candidate, authorSponsorId) =>
+          screenPublicCandidate(screenPromotion, c.env, candidate, {
+            sponsorId: authorSponsorId,
+            // The canonical synthesis faces already preserve this exact
+            // publication's warning notice and released-case provenance.
+            route: "synthesize",
+          }),
+      },
     );
+    if (result instanceof Response) return privateResponse(result);
     if (!result.ok) {
       if (result.code === "WRITE_REFUSED" || result.code === "WORKSHOP_NOT_FOUND") {
         return privateResponse(

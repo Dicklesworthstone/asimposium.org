@@ -1017,7 +1017,12 @@ function enrollmentStack(env: Env, options: CreateAppOptions): EnrollmentStack |
   router.route("/", createScreeningAppealsApp({ db: env.DB, verifiedSponsor, verifiedOperator }));
   router.route(
     "/",
-    createSynthesisDraftsAndExternalReviewsApp({ db: env.DB, verifiedSponsor, verifiedOperator }),
+    createSynthesisDraftsAndExternalReviewsApp({
+      db: env.DB,
+      verifiedSponsor,
+      verifiedOperator,
+      screenPromotion: options.screenPromotion,
+    }),
   );
   router.route("/", createTransactionalEmailApp({ db: env.DB, verifiedSponsor, verifiedOperator }));
   router.route("/", createIntegrityCaseRouter({ db: env.DB, verifiedSponsor, verifiedOperator }));

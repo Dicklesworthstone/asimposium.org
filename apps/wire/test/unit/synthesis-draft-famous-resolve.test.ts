@@ -26,8 +26,18 @@ import {
 } from "../../src/krater/krater.ts";
 import { SCIENTIFIC_INDEPENDENCE_POLICY } from "../../src/ledger/scientific-checks.ts";
 import { readSynthesisPage } from "../../src/ledger/synthesis-read.ts";
+import { sponsorScreeningCases } from "../../src/moderation/appeals-store.ts";
 import { applyPublicProblemGovernance } from "../../src/problems/lifecycle-ledger.ts";
 import { createSynthesisDraftsAndExternalReviewsApp } from "../../src/problems/nkz2-router.ts";
+import {
+  type PublishDraftResult,
+  publishSynthesisDraftForSponsor,
+} from "../../src/problems/synthesis-drafts.ts";
+import {
+  type PublicCandidateScreener,
+  screenPublicCandidate,
+} from "../../src/screening/public-candidate.ts";
+import type { WorkersAIPromotionInput } from "../../src/screening/workers-ai.ts";
 import {
   FELLOW,
   NOW,
@@ -54,6 +64,32 @@ const FAMOUS_GUARDRAIL = JSON.stringify({
   authoritative_references: ["Peano, Arithmetices principia (1889)"],
   standing_banner: "Famous benchmark problem; external expert review required for resolution.",
 });
+
+function expectPublishResult(result: PublishDraftResult | Response): PublishDraftResult {
+  if (result instanceof Response)
+    throw new Error(`Expected a publication result, received HTTP ${result.status}`);
+  return result;
+}
+
+function draftScreening(
+  db: Env["DB"],
+  sponsorId = SPONSOR,
+  screener: PublicCandidateScreener = (input) =>
+    syntheticScreeningObservation(input, {
+      decision: "pass",
+      coarse_category: "benign-context",
+      provider_status: "ok",
+    }),
+) {
+  return {
+    sponsorLimit: 60,
+    screen: (input: WorkersAIPromotionInput, authorSponsorId = sponsorId) =>
+      screenPublicCandidate(screener, { DB: db } as Env, input, {
+        sponsorId: authorSponsorId,
+        route: "synthesize",
+      }),
+  };
+}
 
 async function seedResolvedFixture(options: { famous: boolean }) {
   const f = await publicationContextFixture();
@@ -412,6 +448,272 @@ async function seedResolvedFixture(options: { famous: boolean }) {
   return { f, claim, contentDigest, through, apply, problemRow };
 }
 
+async function privateSynthesisFixture() {
+  const fixture = await seedResolvedFixture({ famous: false });
+  const synthesisId = `SYNTH-${"P".repeat(26)}`;
+  const candidate = {
+    covers_through: fixture.problemRow().public_seq,
+    body_md: "A private synthesis of the exact finite equality result.",
+    anchors: [
+      { target_kind: "claim", target_id: CLAIM, target_version: 1, target_seq: fixture.claim.seq },
+    ],
+    omitted: ["Unverified alternatives remain outside this summary."],
+    selection_policy: "Include the exact supported claim and its scope.",
+  };
+  fixture.f.sql
+    .query(
+      `INSERT INTO synthesis_drafts
+        (synthesis_id, problem_id, covers_through, body_md, anchors_json, omitted_json,
+         selection_policy, dropped_single_author_count, author_fellow_id, author_sponsor_id,
+         session_id, declared_model, harness, state, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, 'S-CONTEXT', 'model', 'harness', 'draft', ?)`,
+    )
+    .run(
+      synthesisId,
+      PROBLEM,
+      candidate.covers_through,
+      candidate.body_md,
+      JSON.stringify(candidate.anchors),
+      JSON.stringify(candidate.omitted),
+      candidate.selection_policy,
+      FELLOW,
+      SPONSOR,
+      NOW(),
+    );
+  const publicState = () => ({
+    head: fixture.problemRow().public_seq,
+    cursor: fixture.f.sql.query("SELECT cursor FROM public_cursor WHERE singleton = 1").get(),
+    event: fixture.f.sql.query("SELECT id FROM events WHERE object_id = ?").get(synthesisId),
+    synthesis: fixture.f.sql
+      .query("SELECT synthesis_id FROM syntheses WHERE synthesis_id = ?")
+      .get(synthesisId),
+    draft: fixture.f.sql
+      .query("SELECT state, published_event_id FROM synthesis_drafts WHERE synthesis_id = ?")
+      .get(synthesisId),
+  });
+  const reservations = () =>
+    fixture.f.sql
+      .query(
+        "SELECT status FROM public_write_attempt_reservations WHERE route = 'synthesis-draft-publish'",
+      )
+      .all();
+  return { ...fixture, synthesisId, candidate, publicState, reservations };
+}
+
+for (const decision of ["quarantine", "reject", "provider-error", "wrong-digest"] as const) {
+  test(`draft publication preserves private work and public state on ${decision}`, async () => {
+    const { f, synthesisId, candidate, publicState, reservations } =
+      await privateSynthesisFixture();
+    try {
+      const before = publicState();
+      const observed: WorkersAIPromotionInput[] = [];
+      const result = await publishSynthesisDraftForSponsor(
+        f.db,
+        PROBLEM,
+        synthesisId,
+        SPONSOR,
+        draftScreening(f.db, SPONSOR, async (bound) => {
+          observed.push(bound);
+          const observation = await syntheticScreeningObservation(bound, {
+            decision:
+              decision === "reject" ? "reject" : decision === "quarantine" ? "quarantine" : "pass",
+            coarse_category:
+              decision === "reject" || decision === "quarantine" ? "abuse" : "benign-context",
+            provider_status: decision === "provider-error" ? "error" : "ok",
+          });
+          return decision === "wrong-digest"
+            ? { ...observation, evaluated_body_digest: `sha256:${"0".repeat(64)}` }
+            : observation;
+        }),
+      );
+      expect(result).toBeInstanceOf(Response);
+      if (!(result instanceof Response)) throw new Error("Expected a screening refusal.");
+      expect(result.status).toBe(decision === "reject" ? 403 : 202);
+      expect(result.headers.get("cache-control")).toBe("private, no-store");
+      expect(observed).toHaveLength(1);
+      const evaluated = observed[0];
+      if (evaluated === undefined) throw new Error("No candidate reached screening.");
+      expect(JSON.parse(evaluated.statement)).toEqual(candidate);
+      expect(evaluated.publicationContext).toBeDefined();
+      expect(publicState()).toEqual(before);
+      const refusal = (await result.json()) as { case_id?: string };
+      expect(refusal.case_id).toBeDefined();
+      if (refusal.case_id === undefined) throw new Error("The refused draft needs a review case.");
+      expect(
+        f.sql.query("SELECT state FROM screening_cases WHERE case_id = ?").get(refusal.case_id),
+      ).toEqual({ state: "pending" });
+      expect(reservations()).toEqual([
+        { status: decision === "reject" ? "settled_rejected" : "settled_held" },
+      ]);
+    } finally {
+      f.sql.close();
+    }
+  });
+}
+
+test("a steward's held synthesis stays in the author's sponsor review queue", async () => {
+  const { f, synthesisId, publicState } = await privateSynthesisFixture();
+  try {
+    const steward = "usr_draft_steward";
+    f.sql
+      .query("INSERT INTO sponsors(sponsor_id, created_at, last_seen_at) VALUES(?, ?, ?)")
+      .run(steward, Date.now(), Date.now());
+    f.sql
+      .query(
+        "INSERT INTO problem_stewards(problem_id, sponsor_id, is_founding, created_at) VALUES(?, ?, 0, ?)",
+      )
+      .run(PROBLEM, steward, NOW());
+    const before = publicState();
+    const held = await publishSynthesisDraftForSponsor(
+      f.db,
+      PROBLEM,
+      synthesisId,
+      steward,
+      draftScreening(f.db, steward, (input) =>
+        syntheticScreeningObservation(input, {
+          decision: "quarantine",
+          coarse_category: "abuse",
+          provider_status: "ok",
+        }),
+      ),
+    );
+    expect(held).toBeInstanceOf(Response);
+    if (!(held instanceof Response)) throw new Error("Expected a review hold.");
+    expect(held.status).toBe(202);
+    const body = (await held.json()) as { case_id?: string };
+    if (body.case_id === undefined) throw new Error("The held draft needs a review case.");
+    expect(
+      f.sql
+        .query("SELECT sponsor_id, fellow_id FROM screening_cases WHERE case_id = ?")
+        .get(body.case_id),
+    ).toEqual({ sponsor_id: SPONSOR, fellow_id: FELLOW });
+    const ownerCases = await sponsorScreeningCases(f.db, SPONSOR, body.case_id);
+    const stewardCases = await sponsorScreeningCases(f.db, steward, body.case_id);
+    expect(ownerCases.cases.map((entry) => entry.case_id)).toEqual([body.case_id]);
+    expect(stewardCases.cases).toEqual([]);
+    expect(
+      f.sql
+        .query(
+          "SELECT sponsor_id, status FROM public_write_attempt_reservations WHERE route = 'synthesis-draft-publish'",
+        )
+        .get(),
+    ).toEqual({ sponsor_id: steward, status: "settled_held" });
+    expect(publicState()).toEqual(before);
+  } finally {
+    f.sql.close();
+  }
+});
+
+test("draft publication stores its contextual warning and replays without screening or quota", async () => {
+  const { f, synthesisId, reservations } = await privateSynthesisFixture();
+  try {
+    let calls = 0;
+    const screen = draftScreening(f.db, SPONSOR, async (bound) => {
+      calls++;
+      return syntheticScreeningObservation(bound, {
+        decision: "allow-with-warning",
+        coarse_category: "off-topic",
+        provider_status: "ok",
+      });
+    });
+    const result = expectPublishResult(
+      await publishSynthesisDraftForSponsor(f.db, PROBLEM, synthesisId, SPONSOR, {
+        ...screen,
+        sponsorLimit: 1,
+      }),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error(result.detail);
+    const stored = f.sql
+      .query("SELECT provenance_json FROM screening_publications WHERE event_id = ?")
+      .get(result.body.event_id) as { provenance_json: string };
+    const provenance = JSON.parse(stored.provenance_json);
+    expect(provenance.scope).toBe("candidate-and-public-context");
+    const notice = {
+      category: "off-topic",
+      action: "published-with-warning",
+      notice: "off-scope",
+    };
+    expect(provenance.public_action).toEqual(notice);
+    const page = await readSynthesisPage(f.db, PROBLEM, {}, (value) =>
+      SynthesisItemSchema.parse(value),
+    );
+    const item = page.items.find((entry) => entry.synthesis.synthesis_id === synthesisId);
+    expect(item?.synthesis.screening_notice).toEqual(notice);
+    expect(item?.synthesis.authoring_principal).toBe(FELLOW);
+    expect(item?.synthesis.published_by_principal_id).toBe(SPONSOR);
+
+    // No screener is supplied and the sponsor's only slot is occupied.
+    // An exact committed receipt still replays for free.
+    const replay = expectPublishResult(
+      await publishSynthesisDraftForSponsor(f.db, PROBLEM, synthesisId, SPONSOR),
+    );
+    expect(replay).toEqual({ ...result, status: 200 });
+    expect(calls).toBe(1);
+    expect(reservations()).toEqual([{ status: "settled_published" }]);
+  } finally {
+    f.sql.close();
+  }
+});
+
+test("draft publication fails closed without a screener or available sponsor quota", async () => {
+  const { f, synthesisId, publicState, reservations } = await privateSynthesisFixture();
+  try {
+    const before = publicState();
+    const unavailable = await publishSynthesisDraftForSponsor(f.db, PROBLEM, synthesisId, SPONSOR);
+    expect(unavailable).toBeInstanceOf(Response);
+    if (!(unavailable instanceof Response)) throw new Error("Expected unavailable screening.");
+    expect(unavailable.status).toBe(503);
+    expect(ProblemDocumentSchema.parse(await unavailable.json()).code).toBe(
+      "SCREENING_CONTEXT_UNAVAILABLE",
+    );
+    let calls = 0;
+    const exhausted = await publishSynthesisDraftForSponsor(f.db, PROBLEM, synthesisId, SPONSOR, {
+      sponsorLimit: 0,
+      screen: async () => {
+        calls++;
+        throw new Error("Quota must stop paid screening.");
+      },
+    });
+    expect(exhausted).toBeInstanceOf(Response);
+    if (!(exhausted instanceof Response)) throw new Error("Expected quota refusal.");
+    expect(exhausted.status).toBe(429);
+    expect(ProblemDocumentSchema.parse(await exhausted.json()).code).toBe("PROMOTION_RATE_LIMITED");
+    expect(calls).toBe(0);
+    expect(publicState()).toEqual(before);
+    expect(reservations()).toEqual([]);
+  } finally {
+    f.sql.close();
+  }
+});
+
+test("draft bytes changed after screening cannot enter the publication transaction", async () => {
+  const { f, synthesisId, publicState, reservations } = await privateSynthesisFixture();
+  try {
+    const before = publicState();
+    const pass = draftScreening(f.db);
+    const result = await publishSynthesisDraftForSponsor(f.db, PROBLEM, synthesisId, SPONSOR, {
+      ...pass,
+      screen: async (candidate) => {
+        const screened = await pass.screen(candidate);
+        if (screened instanceof Response) return screened;
+        f.sql
+          .query("UPDATE synthesis_drafts SET body_md = ? WHERE synthesis_id = ?")
+          .run("Changed unscreened draft bytes.", synthesisId);
+        return screened;
+      },
+    });
+    expect(result).toBeInstanceOf(Response);
+    if (!(result instanceof Response)) throw new Error("Expected changed-draft refusal.");
+    expect(result.status).toBe(409);
+    expect(ProblemDocumentSchema.parse(await result.json()).code).toBe("OBJECT_VERSION_CONFLICT");
+    expect(publicState()).toEqual(before);
+    expect(reservations()).toEqual([{ status: "settled_failed" }]);
+  } finally {
+    f.sql.close();
+  }
+});
+
 test("Fable §6.1: draft synthesis stays private until steward/sponsor publishes, preserves Fellow authorship, and keeps prior syntheses intact", async () => {
   const { f, claim } = await seedResolvedFixture({ famous: false });
   try {
@@ -472,13 +774,16 @@ test("Fable §6.1: draft synthesis stays private until steward/sponsor publishes
       ENROLLMENT_REPLAY_KEY: replayKeyB64Url,
     } as unknown as Env;
 
+    let screeningCalls = 0;
     const app = createApp({
-      screenPromotion: async (input) =>
-        syntheticScreeningObservation(input, {
+      screenPromotion: async (input) => {
+        screeningCalls++;
+        return syntheticScreeningObservation(input, {
           decision: "pass",
           coarse_category: "benign-context",
           provider_status: "ok",
-        }),
+        });
+      },
     });
     const openRes = await app.fetch(
       new Request("https://a.asimposium.org/v1/sessions", {
@@ -626,7 +931,7 @@ test("Fable §6.1: draft synthesis stays private until steward/sponsor publishes
     // Multiple pages, including identical timestamps and an admitted draft
     // larger than the old 256 KiB transport ceiling. No row may be clipped.
     const path = `/v1/sponsors/problems/${PROBLEM}/syntheses/drafts`;
-    const page = (body: unknown, principal = SPONSOR) =>
+    const draftPage = (body: unknown, principal = SPONSOR) =>
       signedSponsorReq("POST", path, "sponsor.syntheses.drafts.list", principal, JSON.stringify(body));
     const copy = f.sql.query(`INSERT INTO synthesis_drafts
       (synthesis_id, problem_id, covers_through, body_md, anchors_json, omitted_json, selection_policy,
@@ -645,7 +950,7 @@ test("Fable §6.1: draft synthesis stays private until steward/sponsor publishes
     let after: { created_at: string; synthesis_id: string } | undefined;
     const seen: string[] = [];
     do {
-      const res = await page(after ? { after } : {});
+      const res = await draftPage(after ? { after } : {});
       expect(res.status).toBe(200);
       const bytes = await res.arrayBuffer();
       expect(bytes.byteLength).toBeLessThanOrEqual(2 * 1024 * 1024);
@@ -663,9 +968,9 @@ test("Fable §6.1: draft synthesis stays private until steward/sponsor publishes
       expect(seen.length).toBeLessThanOrEqual(expected.size);
     } while (after);
     expect(seen).toEqual([...expected].sort().reverse());
-    const unrelated = await page({ after: { created_at: parsedList.drafts[0]?.created_at, synthesis_id: draftJson.synthesis_id } }, OTHER_SPONSOR);
+    const unrelated = await draftPage({ after: { created_at: parsedList.drafts[0]?.created_at, synthesis_id: draftJson.synthesis_id } }, OTHER_SPONSOR);
     expect(SynthesisDraftListResponseSchema.parse(await unrelated.json()).drafts).toEqual([]);
-    expect((await page({ after: { synthesis_id: draftJson.synthesis_id } })).status).toBe(422);
+    expect((await draftPage({ after: { synthesis_id: draftJson.synthesis_id } })).status).toBe(422);
 
     const cursorBeforePub = (
       f.sql.query("SELECT cursor FROM public_cursor WHERE singleton = 1").get() as {
@@ -673,6 +978,7 @@ test("Fable §6.1: draft synthesis stays private until steward/sponsor publishes
       }
     ).cursor;
 
+    const screeningsBeforePublication = screeningCalls;
     const pubRes = await signedSponsorReq(
       "POST",
       `/v1/sponsors/problems/${PROBLEM}/syntheses/${draftJson.synthesis_id}/publish`,
@@ -680,6 +986,7 @@ test("Fable §6.1: draft synthesis stays private until steward/sponsor publishes
       SPONSOR,
     );
     expect(pubRes.status).toBe(201);
+    expect(screeningCalls).toBe(screeningsBeforePublication + 1);
     const published = SynthesisDraftPublishResponseSchema.parse(await pubRes.json());
     expect(published.synthesis_id).toBe(draftJson.synthesis_id);
     expect(published.author_fellow_id).toBe(fellowId);
@@ -701,6 +1008,7 @@ test("Fable §6.1: draft synthesis stays private until steward/sponsor publishes
       SPONSOR,
     );
     expect(pubAgain.status).toBe(200);
+    expect(screeningCalls).toBe(screeningsBeforePublication + 1);
     expect(SynthesisDraftPublishResponseSchema.parse(await pubAgain.json())).toEqual(published);
     const cursorAfterReplay = (
       f.sql.query("SELECT cursor FROM public_cursor WHERE singleton = 1").get() as {
@@ -904,12 +1212,24 @@ test("non-famous problem still refuses unexpected external_expert_review_proof",
   }
 });
 
-test("REGRESSION (Bug #3): suspended steward is refused (403) and concurrent multi-steward draft publish settles cleanly without 500", async () => {
+test("suspended stewards are refused and concurrent draft publishers share one paid attempt and receipt", async () => {
   const { f, problemRow } = await seedResolvedFixture({ famous: false });
   try {
-    const { publishSynthesisDraftForSponsor } = await import(
-      "../../src/problems/synthesis-drafts.ts"
-    );
+    const publish = async (
+      db: Env["DB"],
+      problemId: string,
+      synthesisId: string,
+      sponsorId: string,
+    ) =>
+      expectPublishResult(
+        await publishSynthesisDraftForSponsor(
+          db,
+          problemId,
+          synthesisId,
+          sponsorId,
+          draftScreening(db, sponsorId),
+        ),
+      );
     // Add a second active steward and a suspended steward (using exact sponsors + sponsor_suspension_events schema).
     const nowMs = Date.now() + 5_000;
     const stepUpSec = Math.floor(nowMs / 1000);
@@ -977,24 +1297,75 @@ test("REGRESSION (Bug #3): suspended steward is refused (403) and concurrent mul
       );
 
     // 1. Suspended steward must be refused 403 WRITE_REFUSED.
-    const suspendedRes = await publishSynthesisDraftForSponsor(
-      f.db,
-      PROBLEM,
-      synthId,
-      "usr_suspended",
-    );
+    const suspendedRes = await publish(f.db, PROBLEM, synthId, "usr_suspended");
     expect(suspendedRes.ok).toBe(false);
     if (!suspendedRes.ok) {
       expect(suspendedRes.status).toBe(403);
       expect(suspendedRes.code).toBe("WRITE_REFUSED");
     }
 
-    // 2. Concurrent multi-steward publish: both stewards resolve without 500 (one 201, one 200),
-    // and both agree on the committed event_id & publisher.
-    const [r1, r2] = await Promise.all([
-      publishSynthesisDraftForSponsor(f.db, PROBLEM, synthId, SPONSOR),
-      publishSynthesisDraftForSponsor(f.db, PROBLEM, synthId, "usr_costeward"),
+    // 2. Hold the first provider call open. A second publisher must wait for
+    // that single paid attempt, then replay its exact committed receipt.
+    let markScreenStarted: (() => void) | undefined;
+    const screenStarted = new Promise<void>((resolve) => {
+      markScreenStarted = resolve;
+    });
+    let finishScreen: (() => void) | undefined;
+    const screenBarrier = new Promise<void>((resolve) => {
+      finishScreen = resolve;
+    });
+    let concurrentScreeningCalls = 0;
+    const first = publishSynthesisDraftForSponsor(
+      f.db,
+      PROBLEM,
+      synthId,
+      SPONSOR,
+      draftScreening(f.db, SPONSOR, async (input) => {
+        concurrentScreeningCalls++;
+        markScreenStarted?.();
+        await screenBarrier;
+        return syntheticScreeningObservation(input, {
+          decision: "pass",
+          coarse_category: "benign-context",
+          provider_status: "ok",
+        });
+      }),
+    );
+    await Promise.race([
+      screenStarted,
+      first.then(() => {
+        throw new Error("The first publisher did not reach screening.");
+      }),
     ]);
+    try {
+      const pending = await publishSynthesisDraftForSponsor(
+        f.db,
+        PROBLEM,
+        synthId,
+        "usr_costeward",
+        draftScreening(f.db, "usr_costeward", async () => {
+          concurrentScreeningCalls++;
+          throw new Error("An in-flight retry must not buy another screen.");
+        }),
+      );
+      expect(pending).toBeInstanceOf(Response);
+      if (!(pending instanceof Response)) throw new Error("Expected in-flight refusal.");
+      expect(pending.status).toBe(429);
+      expect(pending.headers.get("retry-after")).toBe("1");
+    } finally {
+      finishScreen?.();
+      await first;
+    }
+    const r1 = expectPublishResult(await first);
+    const r2 = await publish(f.db, PROBLEM, synthId, "usr_costeward");
+    expect(concurrentScreeningCalls).toBe(1);
+    expect(
+      f.sql
+        .query(
+          "SELECT COUNT(*) AS n FROM public_write_attempt_reservations WHERE route = 'synthesis-draft-publish'",
+        )
+        .get(),
+    ).toEqual({ n: 1 });
     expect(r1.ok).toBe(true);
     expect(r2.ok).toBe(true);
     if (r1.ok && r2.ok) {
@@ -1027,7 +1398,7 @@ test("REGRESSION (Bug #3): suspended steward is refused (403) and concurrent mul
         SPONSOR,
         "S-CONCUR-2",
       );
-    const secretRes = await publishSynthesisDraftForSponsor(f.db, PROBLEM, secretSynthId, SPONSOR);
+    const secretRes = await publish(f.db, PROBLEM, secretSynthId, SPONSOR);
     expect(secretRes.ok).toBe(false);
     if (!secretRes.ok) {
       expect(secretRes.status).toBe(422);
@@ -1043,12 +1414,7 @@ test("REGRESSION (Bug #3): suspended steward is refused (403) and concurrent mul
          VALUES ('usr_tombstoned', 1700000000000, 1700000000000, 1700000001000)`,
       )
       .run();
-    const tombRes = await publishSynthesisDraftForSponsor(
-      f.db,
-      PROBLEM,
-      secretSynthId,
-      "usr_tombstoned",
-    );
+    const tombRes = await publish(f.db, PROBLEM, secretSynthId, "usr_tombstoned");
     expect(tombRes.ok).toBe(false);
     if (!tombRes.ok) {
       expect(tombRes.status).toBe(403);
@@ -1086,12 +1452,7 @@ test("REGRESSION (Bug #3): suspended steward is refused (403) and concurrent mul
         SPONSOR,
         "S-CONCUR-3",
       );
-    const closingSecretRes = await publishSynthesisDraftForSponsor(
-      f.db,
-      PROBLEM,
-      closingSecretId,
-      SPONSOR,
-    );
+    const closingSecretRes = await publish(f.db, PROBLEM, closingSecretId, SPONSOR);
     expect(closingSecretRes.ok).toBe(false);
     if (!closingSecretRes.ok) {
       expect(closingSecretRes.status).toBe(422);
@@ -1187,7 +1548,11 @@ test("REGRESSION (Bug #3): suspended steward is refused (403) and concurrent mul
       get(target, prop, receiver) {
         if (prop === "batch") {
           return async (stmts: Parameters<typeof target.batch>[0]) => {
-            if (!injectedLock) {
+            const writesEvent = stmts.some((statement) => {
+              const text = (statement as unknown as { text: string }).text;
+              return /INSERT(?: OR IGNORE)? INTO events\b/.test(text);
+            });
+            if (!injectedLock && writesEvent) {
               injectedLock = true;
               f.sql.query("UPDATE problems SET status = 'retired' WHERE id = ?").run(PROBLEM);
             }
@@ -1198,12 +1563,7 @@ test("REGRESSION (Bug #3): suspended steward is refused (403) and concurrent mul
         return typeof val === "function" ? val.bind(target) : val;
       },
     });
-    const racedPublish = await publishSynthesisDraftForSponsor(
-      racingDb,
-      PROBLEM,
-      raceDraftId,
-      SPONSOR,
-    );
+    const racedPublish = await publish(racingDb, PROBLEM, raceDraftId, SPONSOR);
     expect(injectedLock).toBe(true);
     expect(racedPublish.ok).toBe(false);
     if (!racedPublish.ok) {
