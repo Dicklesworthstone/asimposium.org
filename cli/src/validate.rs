@@ -699,29 +699,48 @@ fn is_claim_publication_slice(schema_id: &str, slice: Option<&str>) -> bool {
         )
 }
 
-/// Rewrites ECMAScript `/u` lone-surrogate negative lookahead guards that Rust
-/// UTF-8 regex engines reject as out-of-range scalar escapes (`\uD800-\uDFFF`).
-/// In Rust, `serde_json::from_str` already rejects lone UTF-16 surrogates when
-/// decoding UTF-8 JSON strings, so removing this guard preserves exact `/u`
-/// semantics (valid astral pairs remain permitted, lone surrogates cannot exist).
-fn normalize_utf8_schema_patterns(value: &mut Value) {
-    match value {
-        Value::Object(map) => {
-            if let Some(Value::String(pattern)) = map.get_mut("pattern")
-                && pattern.contains(r"(?![\s\S]*[\uD800-\uDFFF])")
-            {
-                *pattern = pattern.replace(r"(?![\s\S]*[\uD800-\uDFFF])", "");
+/// Adapt the published Unicode regexes to Rust scalar strings. serde_json rejects
+/// unpaired surrogates on input. Every other constraint, including NUL, remains
+/// significant. Visit schema positions only, so enum/const payloads stay literal.
+pub(crate) fn normalize_utf8_schema_patterns(schema: &mut Value) {
+    let Some(map) = schema.as_object_mut() else {
+        return;
+    };
+    if let Some(Value::String(pattern)) = map.get_mut("pattern") {
+        if let Some(rest) = pattern.strip_prefix(r"^(?![\s\S]*[\uD800-\uDFFF])") {
+            *pattern = format!("^{rest}");
+        } else if pattern == r"^[^\u0000\uD800-\uDFFF]*$" {
+            *pattern = r"^[^\u0000]*$".to_owned();
+        }
+    }
+    for (keyword, child) in map {
+        match keyword.as_str() {
+            "properties" | "patternProperties" | "$defs" | "definitions" | "dependentSchemas" => {
+                if let Some(schemas) = child.as_object_mut() {
+                    schemas
+                        .values_mut()
+                        .for_each(normalize_utf8_schema_patterns);
+                }
             }
-            for child in map.values_mut() {
+            "allOf" | "anyOf" | "oneOf" | "prefixItems" => {
+                if let Some(schemas) = child.as_array_mut() {
+                    schemas.iter_mut().for_each(normalize_utf8_schema_patterns);
+                }
+            }
+            "not"
+            | "if"
+            | "then"
+            | "else"
+            | "items"
+            | "contains"
+            | "propertyNames"
+            | "additionalProperties"
+            | "unevaluatedItems"
+            | "unevaluatedProperties" => {
                 normalize_utf8_schema_patterns(child);
             }
+            _ => {}
         }
-        Value::Array(items) => {
-            for item in items {
-                normalize_utf8_schema_patterns(item);
-            }
-        }
-        _ => {}
     }
 }
 
@@ -940,6 +959,11 @@ fn list_slices(raw: &str) -> Vec<String> {
 }
 
 fn format_schema_catalog(json_mode: bool) -> CliOutput {
+    let Ok(structural) = crate::validation::structural_selectors() else {
+        return input_error(
+            "A bundled schema is unavailable; rebuild this CLI from the repository.",
+        );
+    };
     if json_mode {
         let schemas: Vec<Value> = BUNDLED_SCHEMAS
             .iter()
@@ -957,6 +981,7 @@ fn format_schema_catalog(json_mode: bool) -> CliOutput {
         }
         let payload = json!({
             "schema": "asimp.validate.catalog.v1",
+            "structural_selectors": structural,
             "aliases": aliases,
             "schemas": schemas,
         });
@@ -974,6 +999,13 @@ fn format_schema_catalog(json_mode: bool) -> CliOutput {
         for entry in BUNDLED_SCHEMAS {
             let slices = list_slices(entry.raw);
             out.push_str(&format!("  {} ({} slices)\n", entry.id, slices.len()));
+        }
+        out.push_str("\nPublished selectors for --schema:\n");
+        for entry in structural {
+            out.push_str(&format!(
+                "  {}\n",
+                entry["selector"].as_str().expect("catalog selector")
+            ));
         }
         CliOutput {
             exit_code: 0,
@@ -1289,6 +1321,26 @@ mod tests {
             compile_offline_validator(&sub)
                 .unwrap_or_else(|e| panic!("alias {alias} compile failed: {e}"));
         }
+    }
+
+    #[test]
+    fn unicode_normalization_preserves_literal_data_and_enrollment_reason_bounds() {
+        let pattern = r"^[^\u0000\uD800-\uDFFF]*$";
+        let constant = json!({"pattern": pattern});
+        let schema = json!({"const": constant});
+        assert!(
+            compile_offline_validator(&schema)
+                .unwrap()
+                .is_valid(&constant)
+        );
+        let root: Value = serde_json::from_str(bundled_schema_raw("enrollment").unwrap()).unwrap();
+        let reason =
+            &root["properties"]["operator_fellow_cap_override_request"]["properties"]["reason"];
+        let validator = compile_offline_validator(reason).unwrap();
+        assert!(validator.is_valid(&json!("🐈".repeat(10))));
+        assert!(!validator.is_valid(&json!("🐈".repeat(9))));
+        assert!(!validator.is_valid(&json!("abcdefghij ")));
+        assert!(!validator.is_valid(&json!("abc\0defghij")));
     }
 
     #[test]

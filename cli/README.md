@@ -57,17 +57,12 @@ request slice. Unsupported documents, arbitrary URLs, fragments and file paths
 are refused. Rebuild the binary after updating the generated contracts to use
 the new schema versions.
 
-The structural JSON catalog separates supported `schemas` from `unsupported_schemas`, with
-an explicit reason for each unsupported selector. The current Rust regex engines
-cannot evaluate the ECMAScript surrogate ranges in five selectors: the whole
-`enrollment.v1` and `ledger.v1` documents, the enrollment
-`operator_fellow_cap_audit_page_response` and `operator_fellow_cap_override_request`
-slices, and `ledger.v1/problem_face_response`. Their published patterns are
-preserved. These selectors return `unsupported_schema`, exit 2, and
-`structural_valid: null` before reading the payload. Ordinary enrollment request
-slices and the other compatible ledger slices remain available. The compiled
-catalog test checks every supported selector and each declared exclusion.
-`--list-schemas` without `--schema` prints the parity catalog (`asimp.validate.catalog.v1`), including kind aliases.
+In `asimp validate --list-schemas --json`, `structural_selectors` lists the
+published names and URLs accepted by `--schema`. The `aliases` and `schemas`
+fields describe the separate `--kind` interface. Enrollment override reasons and
+problem-roster names accept Unicode scalar text, including characters outside
+the Basic Multilingual Plane. The JSON decoder rejects unpaired surrogate
+escapes. The published roster constraint also rejects NUL inside a name.
 
 Validation reports **structural validity only** for `--schema`. JSON Schema checks types,
 required fields, declared bounds, patterns and formats. It does not reproduce

@@ -9,19 +9,6 @@ use std::path::PathBuf;
 const ORIGIN: &str = "https://a.asimposium.org";
 const MAX_DIAGNOSTICS: usize = 20;
 const BOUNDARY: &str = "Checks bundled published JSON Schema only. Worker authorization, publication checks, screening, relational refinements and scientific validity remain separate.";
-const UNSUPPORTED_PATTERN: &str = "The published schema contains ECMAScript surrogate-range patterns that this validator cannot evaluate. Its patterns have not been changed or skipped; use the Worker's validation for this schema.";
-
-// jsonschema 0.61.1 offers Rust regex and fancy-regex engines, neither of which
-// can represent these ECMAScript surrogate ranges. Do not weaken the published
-// patterns. The catalog test proves every other selector compiles and requires
-// these explicit exclusions to remain justified by an actual compile failure.
-const UNSUPPORTED_SELECTORS: &[&str] = &[
-    "enrollment.v1",
-    "enrollment.v1/operator_fellow_cap_audit_page_response",
-    "enrollment.v1/operator_fellow_cap_override_request",
-    "ledger.v1",
-    "ledger.v1/problem_face_response",
-];
 
 #[derive(Debug, clap::Args)]
 pub struct ValidateArgs {
@@ -122,10 +109,6 @@ impl SchemaEntry {
             "kind": if self.property.is_some() { "slice" } else { "document" },
         })
     }
-
-    fn is_supported(&self) -> bool {
-        !UNSUPPORTED_SELECTORS.contains(&self.selector.as_str())
-    }
 }
 
 fn parse_document(document: &BundledDocument) -> Result<Value, ()> {
@@ -203,11 +186,13 @@ fn resolve_schema(selector: &str) -> Result<Option<(SchemaEntry, Value)>, ()> {
 fn validator(
     schema: &Value,
 ) -> Result<jsonschema::Validator, jsonschema::error::ValidationError<'static>> {
+    let mut schema = schema.clone();
+    crate::validate::normalize_utf8_schema_patterns(&mut schema);
     jsonschema::options()
         .offline()
         .should_validate_formats(true)
         .should_ignore_unknown_formats(false)
-        .build(schema)
+        .build(&schema)
 }
 
 /// Validate the in-memory value that will actually be used by a CLI write.
@@ -357,36 +342,31 @@ fn error(args: &ValidateArgs, schema: Option<&str>, code: &str, message: &str) -
     )
 }
 
+pub(crate) fn structural_selectors() -> Result<Vec<Value>, ()> {
+    let mut catalog = Vec::new();
+    for document in DOCUMENTS {
+        let parent = parse_document(document)?;
+        catalog.extend(entries(document, &parent).iter().map(SchemaEntry::as_json));
+    }
+    Ok(catalog)
+}
+
 pub fn run(args: &ValidateArgs) -> CliOutput {
     if args.list_schemas {
-        let mut catalog = Vec::new();
-        let mut unsupported = Vec::new();
-        for document in DOCUMENTS {
-            let Ok(parent) = parse_document(document) else {
-                return error(
-                    args,
-                    None,
-                    "bundled_schema",
-                    "A bundled schema is unavailable; rebuild this CLI from the repository.",
-                );
-            };
-            for entry in entries(document, &parent) {
-                let mut item = entry.as_json();
-                if entry.is_supported() {
-                    catalog.push(item);
-                } else {
-                    item["code"] = json!("unsupported_pattern");
-                    item["message"] = json!(UNSUPPORTED_PATTERN);
-                    unsupported.push(item);
-                }
-            }
-        }
+        let Ok(catalog) = structural_selectors() else {
+            return error(
+                args,
+                None,
+                "bundled_schema",
+                "A bundled schema is unavailable; rebuild this CLI from the repository.",
+            );
+        };
         let stdout = if args.json {
             let result = json!({
                 "format": "asimp.schema_catalog.v1",
                 "validation": "structural",
                 "schemas": catalog,
-                "unsupported_schemas": unsupported,
+                "unsupported_schemas": [],
                 "boundary": BOUNDARY,
             });
             format!(
@@ -401,13 +381,6 @@ pub fn run(args: &ValidateArgs) -> CliOutput {
                 text.push_str(entry["selector"].as_str().expect("catalog selector"));
                 text.push('\n');
             }
-            text.push_str("Bundled selectors currently unsupported by this validator:\n");
-            for entry in unsupported {
-                text.push_str(entry["selector"].as_str().expect("catalog selector"));
-                text.push('\n');
-            }
-            text.push_str(UNSUPPORTED_PATTERN);
-            text.push('\n');
             text.push_str(BOUNDARY);
             text.push('\n');
             text
@@ -445,14 +418,6 @@ pub fn run(args: &ValidateArgs) -> CliOutput {
             );
         }
     };
-    if !entry.is_supported() {
-        return error(
-            args,
-            Some(&entry.url),
-            "unsupported_schema",
-            UNSUPPORTED_PATTERN,
-        );
-    }
     let text = match crate::read_request_file(path) {
         Ok(text) => text,
         Err(_) => {
@@ -511,23 +476,12 @@ mod tests {
     #[test]
     fn bundled_catalog_compiles_and_slices_preserve_published_constraints() {
         let mut unexpected = Vec::new();
-        let mut excluded = 0;
         for document in DOCUMENTS {
             let parent = parse_document(document).unwrap();
             for entry in entries(document, &parent) {
                 let schema = selected_schema(&parent, &entry);
-                match validator(&schema) {
-                    Ok(_) if !entry.is_supported() => {
-                        unexpected.push(format!(
-                            "{} compiles; remove its stale exclusion",
-                            entry.selector
-                        ));
-                    }
-                    Err(error) if entry.is_supported() => {
-                        unexpected.push(format!("{}: {error}", entry.selector));
-                    }
-                    Err(_) => excluded += 1,
-                    Ok(_) => {}
+                if let Err(error) = validator(&schema) {
+                    unexpected.push(format!("{}: {error}", entry.selector));
                 }
                 if let Some(property) = &entry.property {
                     assert_eq!(schema["type"], parent["properties"][property]["type"]);
@@ -543,7 +497,6 @@ mod tests {
             }
         }
         assert!(unexpected.is_empty(), "{}", unexpected.join("\n"));
-        assert_eq!(excluded, UNSUPPORTED_SELECTORS.len());
     }
 
     #[test]

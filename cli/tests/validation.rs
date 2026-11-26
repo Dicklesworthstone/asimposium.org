@@ -186,14 +186,19 @@ fn catalog_explicitly_lists_the_bundled_subset_without_network_or_file_access() 
     let output = run_cli_with_fetch(&cli, |_| panic!("catalog attempted an HTTP request"));
     assert_eq!(output.exit_code, 0);
     let report = parsed(&output);
-    assert_eq!(report["format"], "asimp.schema_catalog.v1");
-    let entries = report["schemas"].as_array().unwrap();
+    assert_eq!(report["schema"], "asimp.validate.catalog.v1");
+    let entries = report["structural_selectors"].as_array().unwrap();
     for selector in [
         "sessions.v1",
         CLOSE,
         "sessions.v1/session_open_request",
         "sessions.v1/workshop_push_request",
         "enrollment.v1/mint_request",
+        "enrollment.v1",
+        "enrollment.v1/operator_fellow_cap_audit_page_response",
+        "enrollment.v1/operator_fellow_cap_override_request",
+        "ledger.v1",
+        "ledger.v1/problem_face_response",
         "problems.v1",
         "inbox.v1/ack_request",
         "ledger.v1/problem_index_entry",
@@ -211,47 +216,38 @@ fn catalog_explicitly_lists_the_bundled_subset_without_network_or_file_access() 
             .unwrap()
             .starts_with("https://a.asimposium.org/schemas/")
     }));
-    assert!(!output.stdout.contains("batch.v1"));
-    assert!(!output.stdout.contains("directives.v1"));
-    let unsupported = report["unsupported_schemas"].as_array().unwrap();
-    assert_eq!(unsupported.len(), 5);
-    for selector in [
-        "enrollment.v1",
-        "enrollment.v1/operator_fellow_cap_audit_page_response",
-        "enrollment.v1/operator_fellow_cap_override_request",
-        "ledger.v1",
-        "ledger.v1/problem_face_response",
-    ] {
-        assert!(!entries.iter().any(|entry| entry["selector"] == selector));
-        assert!(
-            unsupported.iter().any(
-                |entry| entry["selector"] == selector && entry["code"] == "unsupported_pattern"
-            )
-        );
-    }
+    assert!(entries.iter().all(|entry| {
+        !entry["selector"].as_str().unwrap().starts_with("batch.v1")
+            && !entry["selector"]
+                .as_str()
+                .unwrap()
+                .starts_with("directives.v1")
+    }));
 }
 
 #[test]
-fn unsupported_published_patterns_never_become_a_payload_verdict() {
-    let missing = Path::new("/unavailable/private-path-canary.json");
-    for selector in [
-        "enrollment.v1",
-        "enrollment.v1/operator_fellow_cap_override_request",
-        "https://a.asimposium.org/schemas/ledger.v1/problem_face_response.json",
-    ] {
-        let output = validate(missing, selector);
-        assert_eq!(output.exit_code, 2);
-        let report = parsed(&output);
-        assert_eq!(report["structural_valid"], Value::Null);
-        assert_eq!(report["diagnostics"][0]["code"], "unsupported_schema");
-        assert!(
-            report["schema"]
-                .as_str()
-                .unwrap()
-                .starts_with("https://a.asimposium.org/schemas/")
-        );
-        assert!(!output.stdout.contains("canary"));
+fn ledger_roster_accepts_unicode_scalars_and_refuses_nul_or_a_lone_surrogate() {
+    let mut face: Value = serde_json::from_str(include_str!(
+        "../../packages/contracts/test/fixtures/valid/ledger-problem-face.json"
+    ))
+    .unwrap();
+    face["roster"] = serde_json::from_str(include_str!(
+        "../../packages/contracts/test/fixtures/valid/ledger-problem-roster.json"
+    ))
+    .unwrap();
+    let selector = "ledger.v1/problem_face_response";
+    for (name, expected) in [("Fellow 🐈", 0), ("Fellow\0", 1)] {
+        face["roster"]["members"][0]["name"] = json!(name);
+        let file = input_file(face.to_string().as_bytes());
+        let output = validate(&file, selector);
+        assert_eq!(output.exit_code, expected, "{}", output.stdout);
+        assert_eq!(parsed(&output)["structural_valid"], expected == 0);
     }
+    let file = input_file(br#"{"roster":"\uD800"}"#);
+    assert_eq!(
+        parsed(&validate(&file, selector))["diagnostics"][0]["code"],
+        "malformed_json"
+    );
 }
 
 #[test]
