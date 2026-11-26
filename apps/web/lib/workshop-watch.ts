@@ -289,6 +289,7 @@ export class WorkshopWatch {
   private generation = 0;
   private timer: Timer | undefined;
   private heartbeatTimer: Timer | undefined;
+  private socketDeadlineTimer: Timer | undefined;
   private controller: AbortController | undefined;
   private socket: WorkshopWatchSocket | undefined;
   private liveTransport: WorkshopWatchTransport = "poll";
@@ -350,6 +351,7 @@ export class WorkshopWatch {
   }
 
   private closeSocket(): void {
+    this.clearSocketDeadline();
     if (this.heartbeatTimer !== undefined) {
       this.runtime.clearTimer(this.heartbeatTimer);
       this.heartbeatTimer = undefined;
@@ -383,18 +385,43 @@ export class WorkshopWatch {
     void this.poll();
   }
 
+  private isCurrentSocket(sock: WorkshopWatchSocket, generation: number): boolean {
+    return (
+      this.running &&
+      this.active &&
+      !this.accessEnded &&
+      this.generation === generation &&
+      this.socket === sock
+    );
+  }
+
+  private clearSocketDeadline(): void {
+    if (this.socketDeadlineTimer !== undefined) {
+      this.runtime.clearTimer(this.socketDeadlineTimer);
+      this.socketDeadlineTimer = undefined;
+    }
+  }
+
+  /** A socket must prove authorization, then answer each heartbeat with a pong
+   * or scoped workshop activity. A silent connection may never emit close/error. */
+  private armSocketDeadline(sock: WorkshopWatchSocket, generation: number): void {
+    if (!this.isCurrentSocket(sock, generation)) return;
+    this.clearSocketDeadline();
+    this.socketDeadlineTimer = this.runtime.setTimer(() => {
+      if (!this.isCurrentSocket(sock, generation)) return;
+      this.socketDeadlineTimer = undefined;
+      this.dropToPolling(generation);
+    }, WORKSHOP_WATCH_TIMEOUT_MS);
+  }
+
   private scheduleHeartbeat(sock: WorkshopWatchSocket, generation: number): void {
+    if (!this.isCurrentSocket(sock, generation)) return;
     if (this.heartbeatTimer !== undefined) this.runtime.clearTimer(this.heartbeatTimer);
     this.heartbeatTimer = this.runtime.setTimer(() => {
-      if (
-        !this.running ||
-        !this.active ||
-        this.accessEnded ||
-        this.generation !== generation ||
-        this.socket !== sock
-      )
-        return;
+      if (!this.isCurrentSocket(sock, generation)) return;
+      this.heartbeatTimer = undefined;
       try {
+        this.armSocketDeadline(sock, generation);
         sock.send("ping");
         this.scheduleHeartbeat(sock, generation);
       } catch {
@@ -448,15 +475,16 @@ export class WorkshopWatch {
       const sock = openWs(minted.room_url, "asimposium.room.v1");
       this.socket = sock;
       this.liveTransport = "ws";
+      this.armSocketDeadline(sock, generation);
+      let authenticated = false;
       let closed = false;
       const onDisconnect = () => {
-        if (closed || !this.running || !this.active || this.generation !== generation) return;
+        if (closed || !this.isCurrentSocket(sock, generation)) return;
         closed = true;
         this.dropToPolling(generation);
       };
       sock.addEventListener("open", () => {
-        if (!this.running || !this.active || this.generation !== generation || this.socket !== sock)
-          return;
+        if (!this.isCurrentSocket(sock, generation)) return;
         try {
           sock.send(JSON.stringify({ auth: minted.ticket }));
           this.scheduleHeartbeat(sock, generation);
@@ -465,16 +493,22 @@ export class WorkshopWatch {
         }
       });
       sock.addEventListener("message", (event) => {
-        if (!this.running || !this.active || this.generation !== generation || this.socket !== sock)
-          return;
+        if (!this.isCurrentSocket(sock, generation)) return;
         const data = (event as { data?: unknown })?.data;
-        if (data === "pong") return;
+        if (data === "pong") {
+          // Hibernation auto-responses can precede ticket verification. Only
+          // a scoped workshop notice establishes an authorized connection.
+          if (authenticated) this.clearSocketDeadline();
+          return;
+        }
         const cursor = parseWorkshopNoticeCursor(
           data,
           this.options.fellowId,
           this.options.problemId,
         );
         if (cursor === undefined) return;
+        authenticated = true;
+        this.clearSocketDeadline();
         this.failures = 0;
         this.changed(cursor);
       });

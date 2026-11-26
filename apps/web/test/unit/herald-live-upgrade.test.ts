@@ -12,6 +12,8 @@ import {
   loadWorkshopRoomTicketResponse,
 } from "../../lib/workshop-page.ts";
 import {
+  WORKSHOP_WATCH_HEARTBEAT_MS,
+  WORKSHOP_WATCH_TIMEOUT_MS,
   WorkshopWatch,
   type WorkshopWatchRuntime,
   type WorkshopWatchSocket,
@@ -56,12 +58,14 @@ class FakeSocket implements PublicWatchSocket, WorkshopWatchSocket {
   constructor(
     readonly url: string,
     readonly protocol: string,
+    private readonly emitClose = false,
   ) {}
   send(data: string) {
     this.sent.push(data);
   }
   close() {
     this.closed = true;
+    if (this.emitClose) this.emit("close");
   }
   addEventListener(type: string, listener: (event: unknown) => void) {
     const list = this.listeners.get(type) ?? [];
@@ -89,6 +93,250 @@ class FakeEventSource implements PublicWatchEventSource {
     for (const fn of this.listeners.get(type) ?? []) fn(event);
   }
 }
+
+function workshopNotice(socket: FakeSocket, overrides: Record<string, unknown> = {}): void {
+  socket.emit("message", {
+    data: JSON.stringify({
+      control: "workshop-update",
+      fellow_id: "fellow-01JXYZ",
+      problem_id: "P-4DSP",
+      workshop_cursor: 7,
+      ...overrides,
+    }),
+  });
+}
+
+async function liveWorkshopFixture() {
+  const clock = new FakeClock();
+  const sockets: FakeSocket[] = [];
+  const calls: { url: string; init: RequestInit }[] = [];
+  const states: WorkshopWatchState[] = [];
+  const refreshes: ("access" | "change")[] = [];
+  const authority = { cursor: 7, status: 200 };
+  const scope = {
+    schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+    sponsor_id: "usr_sponsor_alpha",
+    problem_id: "P-4DSP",
+    fellow_id: "fellow-01JXYZ",
+  };
+  const runtime: WorkshopWatchRuntime = {
+    setTimer: clock.setTimer,
+    clearTimer: clock.clearTimer,
+    random: () => 0,
+    openWebSocket: (url, protocol) => {
+      const socket = new FakeSocket(url, protocol, true);
+      sockets.push(socket);
+      return socket;
+    },
+    fetch: async (input, init = {}) => {
+      const url = String(input);
+      calls.push({ url, init });
+      if (url.endsWith("/room-ticket"))
+        return Response.json(
+          {
+            ...scope,
+            ticket: `${"A".repeat(64)}.${"B".repeat(86)}`,
+            expires_at: "2026-09-10T00:01:00.000Z",
+            workshop_cursor: 7,
+            room_url: "wss://a.asimposium.org/v1/workshop-room?fellow=fellow-01JXYZ&problem=P-4DSP",
+          },
+          { headers: { "cache-control": "private, no-store" } },
+        );
+      assert.equal(url, "/console/workshop/fellow-01JXYZ/P-4DSP/cursor");
+      return Response.json(
+        { ...scope, workshop_cursor: authority.cursor },
+        { status: authority.status, headers: { "cache-control": "private, no-store" } },
+      );
+    },
+  };
+  const watch = new WorkshopWatch({
+    sponsorId: scope.sponsor_id,
+    fellowId: scope.fellow_id,
+    problemId: scope.problem_id,
+    renderedCursor: 7,
+    runtime,
+    onState: (state) => states.push(state),
+    onRefresh: (reason) => {
+      refreshes.push(reason);
+      return true;
+    },
+  });
+  watch.start();
+  await settle();
+  assert.equal(sockets.length, 1);
+  const socket = sockets[0];
+  assert.ok(socket);
+  return {
+    clock,
+    watch,
+    socket,
+    sockets,
+    calls,
+    states,
+    refreshes,
+    authority,
+    cursorReads: () => calls.filter(({ url }) => url.endsWith("/cursor")),
+  };
+}
+
+describe("private workshop socket liveness", () => {
+  test("a connection that never opens recovers through authoritative polling and ignores late frames", async () => {
+    const f = await liveWorkshopFixture();
+    const socket = f.socket;
+    f.authority.cursor = 8;
+    assert.equal(f.states.at(-1)?.status, "checking");
+    await f.clock.advance(WORKSHOP_WATCH_TIMEOUT_MS - 1);
+    assert.equal(f.watch.transport, "ws");
+    assert.equal(f.cursorReads().length, 0);
+    await f.clock.advance(1);
+    assert.equal(f.watch.transport, "poll");
+    assert.equal(socket.closed, true);
+    assert.equal(f.cursorReads().length, 1);
+    assert.equal(f.cursorReads()[0]?.init.credentials, "same-origin");
+    assert.equal(f.cursorReads()[0]?.init.cache, "no-store");
+    assert.deepEqual(f.refreshes, ["change"]);
+    socket.emit("open");
+    socket.emit("message", { data: "pong" });
+    workshopNotice(socket, { workshop_cursor: 9 });
+    socket.emit("error");
+    socket.emit("close");
+    await settle();
+    assert.deepEqual(socket.sent, []);
+    assert.deepEqual(f.refreshes, ["change"]);
+    assert.equal(f.cursorReads().length, 1);
+    assert.equal(f.states.at(-1)?.status, "refreshing");
+    f.watch.stop();
+    assert.equal(f.clock.timers.size, 0);
+  });
+
+  test("opening and pre-auth pongs cannot postpone authentication or bypass an authoritative access refusal", async () => {
+    const f = await liveWorkshopFixture();
+    const socket = f.socket;
+    f.authority.status = 403;
+    await f.clock.advance(3_000);
+    socket.emit("open");
+    socket.emit("message", { data: "pong" });
+    socket.emit("message", { data: "invalid JSON" });
+    workshopNotice(socket, { fellow_id: "fellow-other" });
+    workshopNotice(socket, { problem_id: "P-OTHER" });
+    workshopNotice(socket, { workshop_cursor: Number.MAX_SAFE_INTEGER + 1 });
+    await f.clock.advance(WORKSHOP_WATCH_TIMEOUT_MS - 3_000);
+    assert.equal(f.watch.transport, "poll");
+    assert.equal(socket.closed, true);
+    assert.equal(f.cursorReads().length, 1);
+    assert.equal(f.states.at(-1)?.status, "access-ended");
+    assert.deepEqual(f.refreshes, ["access"]);
+    assert.equal(f.clock.timers.size, 0);
+    socket.emit("message", { data: "pong" });
+    workshopNotice(socket);
+    await f.clock.advance(WORKSHOP_WATCH_HEARTBEAT_MS * 2);
+    assert.equal(f.cursorReads().length, 1);
+    assert.deepEqual(f.refreshes, ["access"]);
+    f.watch.stop();
+  });
+
+  for (const response of ["pong", "scoped update"] as const) {
+    test(`a ${response} keeps an authenticated room live; an unanswered heartbeat falls back`, async () => {
+      const f = await liveWorkshopFixture();
+      const socket = f.socket;
+      socket.emit("open");
+      // Repeating the rendered cursor still acknowledges ticket verification.
+      workshopNotice(socket);
+      assert.equal(f.states.at(-1)?.status, "current");
+      await f.clock.advance(WORKSHOP_WATCH_HEARTBEAT_MS);
+      assert.equal(socket.sent.at(-1), "ping");
+      await f.clock.advance(WORKSHOP_WATCH_TIMEOUT_MS - 1);
+      assert.equal(f.watch.transport, "ws");
+      if (response === "pong") socket.emit("message", { data: "pong" });
+      else workshopNotice(socket);
+      await f.clock.advance(1);
+      assert.equal(f.watch.transport, "ws");
+      assert.equal(f.cursorReads().length, 0);
+      assert.deepEqual(f.refreshes, []);
+
+      await f.clock.advance(WORKSHOP_WATCH_HEARTBEAT_MS - WORKSHOP_WATCH_TIMEOUT_MS);
+      assert.equal(socket.sent.filter((frame) => frame === "ping").length, 2);
+      socket.emit("message", { data: "invalid JSON" });
+      workshopNotice(socket, { problem_id: "P-OTHER" });
+      workshopNotice(socket, { fellow_id: "fellow-other" });
+      workshopNotice(socket, { workshop_cursor: -1 });
+      workshopNotice(socket, { workshop_cursor: Number.MAX_SAFE_INTEGER + 1 });
+      await f.clock.advance(WORKSHOP_WATCH_TIMEOUT_MS);
+      assert.equal(f.watch.transport, "poll");
+      assert.equal(socket.closed, true);
+      assert.equal(f.cursorReads().length, 1);
+      assert.equal(f.states.at(-1)?.status, "current");
+      await f.clock.advance(WORKSHOP_WATCH_HEARTBEAT_MS);
+      assert.equal(socket.sent.filter((frame) => frame === "ping").length, 2);
+      assert.equal(f.calls.filter(({ url }) => url.endsWith("/room-ticket")).length, 1);
+      f.watch.stop();
+      assert.equal(f.clock.timers.size, 0);
+    });
+  }
+
+  for (const phase of ["connection", "heartbeat"] as const) {
+    test(`pausing clears the ${phase} deadline and late callbacks cannot affect a resumed room`, async () => {
+      const f = await liveWorkshopFixture();
+      const original = f.socket;
+      if (phase === "heartbeat") {
+        original.emit("open");
+        workshopNotice(original);
+        await f.clock.advance(WORKSHOP_WATCH_HEARTBEAT_MS);
+      }
+      const expired = [...f.clock.timers.values()].find(
+        ({ at }) => at === f.clock.now + WORKSHOP_WATCH_TIMEOUT_MS,
+      );
+      assert.ok(expired);
+      f.watch.setActive(false);
+      assert.equal(original.closed, true);
+      assert.equal(f.clock.timers.size, 0);
+      await f.clock.advance(WORKSHOP_WATCH_HEARTBEAT_MS * 2);
+      assert.equal(f.calls.length, 1);
+      assert.equal(f.states.at(-1)?.status, "paused");
+      f.watch.setActive(true);
+      await settle();
+      const replacement = f.sockets[1];
+      assert.ok(replacement);
+      const sentBefore = [...original.sent];
+      original.emit("open");
+      original.emit("message", { data: "pong" });
+      workshopNotice(original, { workshop_cursor: 9 });
+      original.emit("error");
+      expired.cb();
+      assert.deepEqual(original.sent, sentBefore);
+      assert.equal(f.watch.transport, "ws");
+      assert.equal(replacement.closed, false);
+      assert.equal(f.states.at(-1)?.status, "checking");
+      assert.deepEqual(f.refreshes, []);
+      await f.clock.advance(WORKSHOP_WATCH_TIMEOUT_MS);
+      assert.equal(replacement.closed, true);
+      assert.equal(f.watch.transport, "poll");
+      assert.equal(f.cursorReads().length, 1);
+      f.watch.stop();
+      assert.equal(f.clock.timers.size, 0);
+    });
+  }
+
+  test("stopping an authenticated room cancels its pending heartbeat deadline and recovery", async () => {
+    const f = await liveWorkshopFixture();
+    const socket = f.socket;
+    socket.emit("open");
+    workshopNotice(socket);
+    await f.clock.advance(WORKSHOP_WATCH_HEARTBEAT_MS);
+    const pending = [...f.clock.timers.values()];
+    assert.equal(pending.length, 2);
+    f.watch.stop();
+    assert.equal(socket.closed, true);
+    assert.equal(f.clock.timers.size, 0);
+    for (const callback of pending) callback.cb();
+    socket.emit("message", { data: "pong" });
+    workshopNotice(socket, { workshop_cursor: 9 });
+    await f.clock.advance(WORKSHOP_WATCH_HEARTBEAT_MS * 2);
+    assert.equal(f.calls.length, 1);
+    assert.deepEqual(f.refreshes, []);
+    assert.equal(f.clock.timers.size, 0);
+  });
+});
 
 describe("Agora Herald progressive WS -> SSE -> Poll upgrade (kfag)", () => {
   test("PublicLedgerWatch upgrades to WS, acknowledges resync, refreshes via HEAD without /cursor polling, and degrades WS -> SSE -> Poll", async () => {
