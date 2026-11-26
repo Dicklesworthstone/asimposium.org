@@ -1,6 +1,8 @@
 import {
   PublicLedgerProblemIdSchema,
   type SynthesisAnchor,
+  type SynthesisDraftCursor,
+  SynthesisDraftCursorSchema,
   SynthesisIdSchema,
   type SynthesisItem,
 } from "@asimposium/contracts";
@@ -35,6 +37,24 @@ export function parseSynthesisTarget(value: unknown): string | null {
 
 export function synthesisPagePath(problem: string, target: string): string {
   return `/p/${encodeURIComponent(problem)}/syntheses/${encodeURIComponent(target)}`;
+}
+
+export function parseDraftQueueQuery(query: Readonly<Record<string, unknown>>): {
+  readonly after?: SynthesisDraftCursor;
+} | null {
+  if (Object.keys(query).length === 0) return {};
+  if (Object.keys(query).some((key) => key !== "after_created_at" && key !== "after_synthesis")) return null;
+  const cursor = SynthesisDraftCursorSchema.safeParse({
+    created_at: query.after_created_at, synthesis_id: query.after_synthesis,
+  });
+  return cursor.success ? { after: cursor.data } : null;
+}
+
+export function synthesisDraftsPath(problem: string, after?: SynthesisDraftCursor): string {
+  const base = `/console/problems/${encodeURIComponent(problem)}/syntheses`;
+  if (after === undefined) return base;
+  const query = new URLSearchParams({ after_created_at: after.created_at, after_synthesis: after.synthesis_id });
+  return `${base}?${query}`;
 }
 
 export function synthesisConsolePath(

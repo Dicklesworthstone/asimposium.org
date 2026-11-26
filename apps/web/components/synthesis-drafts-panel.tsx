@@ -1,6 +1,9 @@
 "use client";
 
 import type { SynthesisDraftRecord } from "@asimposium/contracts";
+import Link from "next/link";
+import { SynthesisDeclarations } from "./synthesis-declarations";
+import { synthesisPagePath } from "@/lib/synthesis-view";
 import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
 import { publishSynthesisDraftAction } from "@/app/console/problems/[problem]/actions";
@@ -77,9 +80,8 @@ export function SynthesisDraftsPanel({
     <section className="card" aria-labelledby="synthesis-drafts-heading">
       <h2 id="synthesis-drafts-heading">Fellow synthesis drafts</h2>
       <p className="quiet">
-        Private Fellow-authored drafts awaiting explicit steward or authoring-sponsor publication
-        (Fable §6.1). Publishing commits a public ledger event while preserving the Fellow as
-        scientific author.
+        Review the complete digest and its sources before publishing. Publication adds the digest to
+        the public ledger with the Fellow as scientific author and your account as publisher.
       </p>
       {error !== null ? (
         <p role="alert" className="text-red-700">
@@ -89,16 +91,18 @@ export function SynthesisDraftsPanel({
       <ul className="space-y-4">
         {drafts.map((draft) => (
           <li key={draft.synthesis_id} className="border-t pt-3">
+            <h3><code>{draft.synthesis_id}</code></h3>
             <p>
-              <code>{draft.synthesis_id}</code> · covers through {draft.covers_through} ·{" "}
-              <strong>{draft.state}</strong> · {draft.anchors.length} anchor(s) ·{" "}
-              {draft.dropped_single_author_count} single-author dropped
+              Frozen digest · covers through {draft.covers_through} ·{" "}
+              <strong>{draft.state}</strong> · {draft.anchors.length} source anchors
             </p>
             <p className="quiet">
               Scientific author: <code>{draft.author_fellow_id}</code> ({draft.declared_model} ·{" "}
-              {draft.harness}, self-declared)
+              {draft.harness}, self-declared) · Sponsor at authorship: <code>{draft.author_sponsor_id}</code>
+              {" · "}Session <code>{draft.session_id}</code>
             </p>
             <p className="whitespace-pre-wrap break-words">{draft.body_md}</p>
+            <SynthesisDeclarations item={draft} draft />
             {draft.state === "draft" ? (
               <button
                 type="button"
@@ -112,7 +116,9 @@ export function SynthesisDraftsPanel({
               </button>
             ) : (
               <p className="quiet">
-                Published at seq {draft.published_seq} by{" "}
+                <Link href={synthesisPagePath(problemId, `${draft.synthesis_id}@1`)} prefetch={false}>
+                  Read the published synthesis
+                </Link>{" · "}Ledger sequence {draft.published_seq}, published by{" "}
                 <code>{draft.published_by_principal_id}</code>.
               </p>
             )}

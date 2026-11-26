@@ -5,8 +5,7 @@ import { auth, signIn } from "@/auth";
 import { ProblemLifecycleControl } from "@/components/problem-lifecycle-control";
 import { ProblemPublicationControl } from "@/components/problem-publication-control";
 import { ProblemResearchControl } from "@/components/problem-research-control";
-import { SynthesisDraftsPanel } from "@/components/synthesis-drafts-panel";
-import { stoaListSynthesisDrafts, stoaProblemGovernance } from "@/lib/problem-governance";
+import { stoaProblemGovernance } from "@/lib/problem-governance";
 import { stoaFetchClaimsList } from "@/lib/public-ledger";
 import { stoaFetchSyntheses } from "@/lib/public-syntheses";
 import { parseResultClaimConsoleQuery, resultClaimConsolePath } from "@/lib/result-claim-view";
@@ -16,6 +15,7 @@ import {
   parseSynthesisConsoleQuery,
   type SynthesisSelectionPage,
   synthesisConsolePath,
+  synthesisDraftsPath,
   synthesisListSearch,
   synthesisSelectionPage,
 } from "@/lib/synthesis-view";
@@ -119,14 +119,6 @@ export default async function ProblemPublicationPage({
       synthesisChoices = null;
     }
   }
-  let synthesisDrafts: Awaited<ReturnType<typeof stoaListSynthesisDrafts>> | undefined;
-  if (workspace !== undefined && isCanonicalSponsorId(principal)) {
-    try {
-      synthesisDrafts = await stoaListSynthesisDrafts(principal, problemId);
-    } catch {
-      synthesisDrafts = undefined;
-    }
-  }
   return (
     <main className="landing col console" id="content">
       <header className="masthead console-head">
@@ -138,6 +130,11 @@ export default async function ProblemPublicationPage({
             ← Sponsor console
           </Link>
         </p>
+        {valid && isCanonicalSponsorId(principal) && (
+          <p><Link href={synthesisDraftsPath(problemId)} prefetch={false}>
+            Review and publish Fellow synthesis drafts
+          </Link></p>
+        )}
         {valid && (preview !== undefined || workspace !== undefined) ? (
           <p>
             <Link
@@ -191,13 +188,6 @@ export default async function ProblemPublicationPage({
             claimChoices={claimChoices}
             selectedResultClaim={claimQuery?.selected}
           />
-          {synthesisDrafts?.ok && synthesisDrafts.data.drafts.length > 0 ? (
-            <SynthesisDraftsPanel
-              sponsorId={principal}
-              problemId={workspace.problem.id}
-              initialDrafts={synthesisDrafts.data.drafts}
-            />
-          ) : null}
           <ProblemLifecycleControl
             key={`workspace:${principal}:${workspace.problem.id}`}
             sponsorId={principal}

@@ -12,6 +12,9 @@ import {
   SponsorProblemGovernanceQuerySchema,
   type SponsorProblemGovernanceResponse,
   SponsorProblemGovernanceResponseSchema,
+  type SynthesisDraftCursor,
+  SynthesisDraftPageRequestSchema,
+  SYNTHESIS_DRAFT_PAGE_MAX_BYTES,
   type SynthesisDraftListResponse,
   SynthesisDraftListResponseSchema,
   type SynthesisDraftPublishResponse,
@@ -184,22 +187,32 @@ export function stoaChangeProblemAccess(
 export function stoaListSynthesisDrafts(
   principalId: string,
   problemId: string,
+  after?: SynthesisDraftCursor,
 ): Promise<StoaCall<SynthesisDraftListResponse>> {
-  if (!validProblem(problemId)) {
+  const query = SynthesisDraftPageRequestSchema.safeParse(after === undefined ? {} : { after });
+  if (!validProblem(problemId) || !query.success) {
     return Promise.resolve({ ok: false, reason: "refused", status: 400 });
   }
   const route = `/v1/sponsors/problems/${encodeURIComponent(problemId)}/syntheses/drafts`;
   return callStoa({
-    method: "GET",
+    method: "POST",
     route,
     path: route,
     action: "sponsor.syntheses.drafts.list",
     principalId,
-    body: "",
-    responseMaxBytes: 262_144,
+    body: JSON.stringify(query.data),
+    responseMaxBytes: SYNTHESIS_DRAFT_PAGE_MAX_BYTES,
     parse: (value) => {
       const list = SynthesisDraftListResponseSchema.parse(value);
-      if (list.problem_id !== problemId) {
+      const last = list.drafts.at(-1);
+      if (
+        list.problem_id !== problemId ||
+        list.drafts.some((draft) => draft.problem_id !== problemId) ||
+        new Set(list.drafts.map((draft) => draft.synthesis_id)).size !== list.drafts.length ||
+        (list.next_after !== undefined && (list.next_after.synthesis_id !== last?.synthesis_id ||
+          list.next_after.created_at !== last?.created_at)) ||
+        (after !== undefined && list.drafts.some((draft) => draft.synthesis_id === after.synthesis_id))
+      ) {
         throw new Error("Synthesis draft list does not match the signed problem target.");
       }
       return list;

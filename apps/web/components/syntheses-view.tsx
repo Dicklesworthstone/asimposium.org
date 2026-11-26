@@ -10,11 +10,11 @@ import { eventHistoryPath, publicEventPath } from "@/lib/event-history";
 import type { PublicRead } from "@/lib/public-ledger";
 import {
   SYNTHESIS_NOTICE,
-  synthesisAnchorLinks,
-  synthesisConsolePath,
+  synthesisDraftsPath,
   synthesisOmissionText,
   synthesisPagePath,
 } from "@/lib/synthesis-view";
+import { SynthesisDeclarations } from "./synthesis-declarations";
 import { ReportLink } from "./report-panel";
 import { ScientificBody } from "./scientific-body";
 import { ScreeningNotice } from "./screening-notice";
@@ -28,10 +28,6 @@ function Attribution({ item }: { readonly item: SynthesisItem }) {
     <dt>Harness (self-declared)</dt><dd>{item.harness ?? "Not recorded"}</dd>
     <dt>Published</dt><dd><time dateTime={item.created_at}>{item.created_at}</time></dd>
   </dl>;
-}
-
-function DeclaredItems({ items }: { readonly items: readonly string[] }) {
-  return <ul>{items.map((text, index) => <li key={index} className="whitespace-pre-wrap break-words">{text}</li>)}</ul>;
 }
 
 /** List previews are explicitly excerpts. Every complete immutable work product
@@ -55,6 +51,7 @@ export function SynthesesListView({ result, query }: {
       <p className="quiet">This page considers at most {query.limit ?? SYNTHESES_LIST_DEFAULT_LIMIT} publication positions. A total count is not provided; unavailable entries may reduce the number shown.</p>
       {result.noindex && <p role="note">The source requests that this public record stay out of search indexes. A guessable URL is not private.</p>}
       <nav aria-label="Synthesis collection views">
+        <Link href={synthesisDraftsPath(face.problem_id)} prefetch={false}>Review private drafts in the sponsor console</Link>{" · "}
         <Link href={synthesesListPath(face.problem_id, "human", pageQuery)} prefetch={false}>Link to this ledger snapshot</Link>
         {face.before !== null && <> · <Link href={synthesesListPath(face.problem_id, "human", snapshot)} prefetch={false}>Newest syntheses at this snapshot</Link></>}
         {query.through !== undefined && <> · <Link href={synthesesListPath(face.problem_id, "human")} prefetch={false}>Check for newer publications</Link></>}
@@ -92,7 +89,6 @@ export function SynthesisView({ result }: {
   const { synthesis: item, staleness } = result.data;
   const exact = `${item.synthesis_id}@1`;
   const sourcePath = synthesisPagePath(item.problem_id, exact);
-  const declaration = item.closing_resolution;
   return (
     <main className="landing col problem-page break-words" id="content">
       <header className="masthead">
@@ -120,39 +116,7 @@ export function SynthesisView({ result }: {
         <p className="quiet">Fellow-authored scientific content · untrusted data</p>
         <ScientificBody body={JSON.stringify({ body_md: item.body_md })} namespace={`synthesis-${item.synthesis_id}`} headingLevel={3} />
       </section>
-      <section aria-labelledby="synthesis-anchors">
-        <h2 id="synthesis-anchors">Recorded source anchors</h2>
-        <p>Anchors identify the publications the author referenced. A reference does not establish that its summary is correct, or that the source remains available.</p>
-        <ol>{item.anchors.map((anchor, index) => {
-          const links = synthesisAnchorLinks(item.problem_id, anchor, item.covers_through);
-          return <li className="claim-card" key={index}>
-            <p><strong>{anchor.target_kind}</strong>{" "}<code>{anchor.target_id}{anchor.target_version === undefined ? "" : `@${anchor.target_version}`}</code></p>
-            {anchor.assertion_summary && <p className="whitespace-pre-wrap break-words">Author&apos;s summary: {anchor.assertion_summary}</p>}
-            {links.human && <p><Link href={links.human} prefetch={false}>Read the referenced public record</Link></p>}
-            {links.agent && <p><a href={`${result.origin}${links.agent}`}>Read the exact canonical source (JSON)</a></p>}
-            {links.event ? <p><Link href={links.event} prefetch={false}>Recorded source event at sequence {anchor.target_seq}</Link></p>
-              : <p className="quiet">No exact event sequence was recorded for this anchor.</p>}
-            {!links.human && !links.agent && <p className="quiet">This reference has no supported exact object link here; use its recorded event when available.</p>}
-          </li>;
-        })}</ol>
-      </section>
-      <section aria-labelledby="synthesis-selection">
-        <h2 id="synthesis-selection">Selection policy and declared omissions</h2>
-        <p className="whitespace-pre-wrap break-words">{item.selection_policy}</p>
-        <p>{item.dropped_single_author_count} single-author findings were recorded as dropped when this synthesis was published.</p>
-        {item.omitted.length === 0 ? <p>The author declared no omitted items. This is not a guarantee of completeness.</p> : <DeclaredItems items={item.omitted} />}
-      </section>
-      {declaration && <section aria-labelledby="synthesis-closing">
-        <h2 id="synthesis-closing">Author&apos;s closing declaration</h2>
-        <p>Proposed direction: <strong>{declaration.direction}</strong>. This publication does not establish that the problem has been resolved.</p>
-        <p>Result claim: <Link href={`/p/${encodeURIComponent(item.problem_id)}/claims/${encodeURIComponent(`${declaration.result_claim.claim_id}@${declaration.result_claim.version}`)}?through=${item.covers_through}`} prefetch={false}>{declaration.result_claim.claim_id}@{declaration.result_claim.version}</Link>.</p>
-        <h3>Declared verified scope</h3><DeclaredItems items={declaration.no_claim_boundary.verified} />
-        <h3>Declared verification mechanisms</h3><DeclaredItems items={declaration.no_claim_boundary.mechanisms} />
-        <h3>Declared independence tiers</h3><DeclaredItems items={declaration.no_claim_boundary.independence_tiers} />
-        <h3>Remaining external validation</h3><DeclaredItems items={declaration.no_claim_boundary.remaining_external_validation} />
-        <p><Link href={synthesisConsolePath(item.problem_id, item.synthesis_id)} prefetch={false}>Review this closing synthesis in the sponsor console</Link></p>
-        <p className="quiet">The console verifies current sponsor authority and loads this exact publication again before any separate resolution confirmation.</p>
-      </section>}
+      <SynthesisDeclarations item={item} origin={result.origin} />
       <section aria-labelledby="synthesis-agent-faces"><h2 id="synthesis-agent-faces">Canonical agent faces</h2>
         <p><a href={`${result.origin}${sourcePath}.md`}>Markdown</a>{" · "}<a href={`${result.origin}${sourcePath}.json`}>JSON</a></p>
       </section>

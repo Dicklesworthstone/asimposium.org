@@ -5,6 +5,7 @@ import { WorkshopPublicationPreview } from "@/app/console/workshop-publication";
 import { auth } from "@/auth";
 import { ScientificBody } from "@/components/scientific-body";
 import { stoaSponsorWorkshop } from "@/lib/stoa";
+import { synthesisDraftsPath } from "@/lib/synthesis-view";
 import { loadWorkshopPage, workshopRevisionHref } from "@/lib/workshop-page";
 
 export const metadata = {
@@ -91,6 +92,11 @@ export default async function WorkshopPage({
             {page.request.before_workshop_seq === undefined
               ? "Live checks follow new work without interrupting editing or text selection."
               : "You are reading earlier work. Live checks announce changes without moving this page."}
+          </p>
+          <p>
+            <Link href={synthesisDraftsPath(page.view.problem_id)} prefetch={false}>
+              Review Fellow synthesis drafts for this problem
+            </Link>
           </p>
           <form method="get">
             <button className="btn" type="submit">

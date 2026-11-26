@@ -2,6 +2,8 @@ import { afterAll, beforeAll, beforeEach, expect, mock, test } from "bun:test";
 import type {
   ProblemPublicationPreview,
   SponsorProblemGovernanceResponse,
+  SynthesisDraftListResponse,
+  SynthesisDraftRecord,
 } from "@asimposium/contracts";
 import { SYNTHESES_SCHEMA_ID, type SynthesesListResponse } from "@asimposium/contracts/syntheses";
 import { CLAIMS_LIST_SCHEMA_ID, type ClaimsListResponse } from "@asimposium/contracts/claims-list";
@@ -20,6 +22,9 @@ mock.module("server-only", () => ({}));
 let identity: string | null;
 let readResult: StoaCall<ProblemPublicationPreview>;
 let failRead: boolean;
+let draftResult: StoaCall<SynthesisDraftListResponse>;
+const draftReads: unknown[][] = [];
+const publishCalls: unknown[][] = [];
 const reads: unknown[][] = [];
 let governanceResult: StoaCall<SponsorProblemGovernanceResponse>;
 const governanceReads: unknown[][] = [];
@@ -59,6 +64,14 @@ beforeAll(async () => {
   }));
   mock.module("@/lib/problem-governance", () => ({
     ...realGovernance,
+    stoaListSynthesisDrafts: async (...args: unknown[]) => {
+      draftReads.push(args);
+      return draftResult;
+    },
+    stoaPublishSynthesisDraft: async (...args: unknown[]) => {
+      publishCalls.push(args);
+      return { ok: false, reason: "refused", status: 403 };
+    },
     stoaProblemGovernance: async (...args: unknown[]) => {
       governanceReads.push(args);
       return governanceResult;
@@ -90,6 +103,9 @@ beforeEach(() => {
   readResult = { ok: true, data: publicationPreview };
   failRead = false;
   reads.length = 0;
+  draftReads.length = 0;
+  publishCalls.length = 0;
+  draftResult = { ok: false, reason: "unreachable" };
   governanceResult = { ok: false, reason: "refused", status: 404 };
   governanceReads.length = 0;
   synthesisReads.length = 0;
@@ -485,4 +501,74 @@ test("published problem cards link directly to the existing result governance pa
   expect(html).toContain(`/console/problems/${publicationProblem}`);
   expect(html).toContain("Review result claims and resolution");
   expect(html).toContain("Manage admission and members");
+});
+
+async function renderDraftQueue(query: Record<string, string | string[]> = {}) {
+  const queue = await import("../../app/console/problems/[problem]/syntheses/page");
+  return renderToStaticMarkup(await queue.default({
+    params: Promise.resolve({ problem: researchSynthesis.problem_id }),
+    searchParams: Promise.resolve(query),
+  }));
+}
+
+test("a Fellow's sponsor can inspect the full proposed publication without problem governance", async () => {
+  identity = "usr_author_sponsor";
+  const draft: SynthesisDraftRecord = {
+    synthesis_id: researchSynthesis.synthesis_id, problem_id: researchSynthesis.problem_id,
+    state: "draft", body_md: researchSynthesis.body_md,
+    covers_through: researchSynthesis.covers_through, anchors: researchSynthesis.anchors,
+    omitted: researchSynthesis.omitted, selection_policy: researchSynthesis.selection_policy,
+    closing_resolution: researchSynthesis.closing_resolution, dropped_single_author_count: 2,
+    author_fellow_id: researchSynthesis.authoring_principal, author_sponsor_id: identity,
+    session_id: "S-RESEARCH", declared_model: "research-model", harness: "research-harness",
+    published_by_principal_id: null, published_event_id: null, published_seq: null, published_at: null,
+    created_at: "2026-10-27T00:00:00.000Z",
+  };
+  const after = { created_at: draft.created_at, synthesis_id: draft.synthesis_id };
+  draftResult = { ok: true, data: {
+    schema: SYNTHESES_SCHEMA_ID, problem_id: draft.problem_id, drafts: [draft], next_after: after,
+  } };
+  const html = await renderDraftQueue();
+  expect(html.indexOf("Selection policy and declared omissions")).toBeLessThan(html.indexOf("Publish synthesis to ledger"));
+  for (const value of [
+    draft.selection_policy, draft.omitted[0]!, draft.author_fellow_id, "2 single-author findings",
+    "C-3@1", "Declared verified scope", "Remaining external validation",
+    draft.closing_resolution!.no_claim_boundary.remaining_external_validation[0]!,
+    "Publish synthesis to ledger", "Older synthesis drafts", "&lt;script&gt;",
+  ]) expect(html).toContain(value);
+  expect(html).not.toContain("<script>untrusted()");
+  expect(draftReads).toEqual([[identity, draft.problem_id, undefined]]);
+  expect(governanceReads).toHaveLength(0);
+  expect(reads).toHaveLength(0);
+  const continuation = html.match(/href="([^"]+after_created_at=[^"]+)"/)?.[1]?.replaceAll("&amp;", "&");
+  if (!continuation) throw new Error("Expected an older-drafts link");
+  draftResult = { ok: true, data: { schema: SYNTHESES_SCHEMA_ID, problem_id: draft.problem_id, drafts: [] } };
+  const next = await renderDraftQueue(Object.fromEntries(new URL(continuation, "https://asimposium.org").searchParams));
+  expect(draftReads.at(-1)).toEqual([identity, draft.problem_id, after]);
+  expect(next).toContain("Newest synthesis drafts");
+  expect(next).not.toContain("Publish synthesis to ledger");
+});
+
+test("a private synthesis queue distinguishes unavailable, invalid, empty and signed-out reads", async () => {
+  expect(await renderDraftQueue()).toContain("Synthesis queue unavailable");
+  draftReads.length = 0;
+  expect(await renderDraftQueue({ after_synthesis: ["SYNTH-A", "SYNTH-B"] })).toContain("Open the synthesis queue");
+  expect(draftReads).toHaveLength(0);
+  identity = null;
+  expect(await renderDraftQueue()).toContain("Sign in with Google");
+  expect(draftReads).toHaveLength(0);
+  expect(publishCalls).toHaveLength(0);
+});
+
+test("publication checks the current account again before submitting the private draft identifier", async () => {
+  const { publishSynthesisDraftAction } = await import("../../app/console/problems/[problem]/actions");
+  const { problem_id, synthesis_id } = researchSynthesis;
+  const original = "usr_draft_author";
+  identity = "usr_different_sponsor";
+  expect((await publishSynthesisDraftAction(original, problem_id, synthesis_id)).ok).toBe(false);
+  expect(publishCalls).toHaveLength(0);
+  identity = original;
+  const refused = await publishSynthesisDraftAction(original, problem_id, synthesis_id);
+  expect(publishCalls).toEqual([[original, problem_id, synthesis_id]]);
+  expect(refused.ok).toBe(false);
 });
