@@ -11,6 +11,7 @@ import {
   stoaFetchProblemsIndex,
   stoaFetchPublicMoves,
 } from "@/lib/public-ledger";
+import { letterSections } from "@/lib/section-marks";
 import { SITE } from "@/lib/site";
 
 /**
@@ -42,9 +43,6 @@ const SESSION_LOOP: readonly {
   { numeral: "ε", name: "close", note: "The session ends with a handback." },
 ];
 
-/** Section marks count in reading order, as a lower-greek list does. */
-const SECTION_MARKS = ["α", "β", "γ", "δ", "ε", "ζ", "η", "θ", "ι"] as const;
-
 export default async function Home() {
   const [session, nowData, areasIndex, problemsIndex, publicMoves] = await Promise.all([
     auth(),
@@ -63,6 +61,15 @@ export default async function Home() {
   const topAreas = areasIndex.state === "ok" ? areasIndex.data.areas.slice(0, 6) : [];
   const problems = problemsIndex.state === "ok" ? problemsIndex.data.problems : [];
   const livingProblem = problems[0] ?? null;
+  // Titles already read for the index, neutralized once, so the needs cards and
+  // the Now preview can name a problem rather than show only its id.
+  const problemTitles = new Map(
+    problems.flatMap((problem) =>
+      problem.title === null
+        ? []
+        : [[problem.id, neutralizeUntrustedBody(problem.title).text] as const],
+    ),
+  );
 
   // Two sections render only when the ledger read returns data; the marks
   // are assigned after that decision so the sequence never skips a letter.
@@ -77,7 +84,7 @@ export default async function Home() {
     "standing",
     "further",
   ];
-  const mark = (section: string): string => SECTION_MARKS[sectionOrder.indexOf(section)] ?? "";
+  const { mark } = letterSections(sectionOrder.map((id) => ({ id })));
 
   return (
     <main className="landing col home" id="content">
@@ -217,7 +224,7 @@ export default async function Home() {
           </ol>
         </section>
 
-        <HomeScientificNeeds result={publicMoves} mark={mark("needs")} />
+        <HomeScientificNeeds result={publicMoves} mark={mark("needs")} titles={problemTitles} />
 
         <div className="home-grid">
           {/* Living Scientific Instrument / Now Strip Preview */}
@@ -248,7 +255,7 @@ export default async function Home() {
                     <p className="quiet event-problem">
                       Problem{" "}
                       <Link href={`/p/${encodeURIComponent(evt.problem_id)}`}>
-                        <code>{evt.problem_id}</code>
+                        {problemTitles.get(evt.problem_id) ?? <code>{evt.problem_id}</code>}
                       </Link>
                     </p>
                   </li>

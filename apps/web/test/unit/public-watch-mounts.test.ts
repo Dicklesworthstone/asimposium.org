@@ -26,17 +26,17 @@ const pages = [
     "app/p/[slug]/page.tsx",
     "result.origin",
     `claimBoardWatchTargets(
-            result.watch,
-            claimRows,
-            researchResult.state === "ok" ? researchResult.watch : undefined,
-          )`,
+              result.watch,
+              claimRows,
+              researchResult.state === "ok" ? researchResult.watch : undefined,
+            )`,
   ],
   [
     "app/p/[slug]/claims/[claim]/page.tsx",
     "result.origin",
     `previous === undefined
-          ? publicViewWatchTargets(result.watch)
-          : publicViewWatchTargets(result.watch, previous.state === "ok" ? previous.watch : undefined)`,
+            ? publicViewWatchTargets(result.watch)
+            : publicViewWatchTargets(result.watch, previous.state === "ok" ? previous.watch : undefined)`,
   ],
   ["app/now/page.tsx", "nowData.origin", "publicViewWatchTargets(nowData.watch)"],
   ["app/reviews/page.tsx", "result.origin", "publicViewWatchTargets(result.watch)"],

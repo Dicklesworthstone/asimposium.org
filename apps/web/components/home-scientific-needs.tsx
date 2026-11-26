@@ -2,6 +2,7 @@ import { EnrollmentProblemBindingSchema, type PublicMovesResponse } from "@asimp
 import Link from "next/link";
 import type { PublicRead } from "@/lib/public-ledger";
 import { PublicReadNotice } from "./public-read-unavailable";
+import { SectionCoin } from "./section-coin";
 
 /**
  * A home page section, so it uses the home section head: `mark` is the
@@ -12,9 +13,12 @@ import { PublicReadNotice } from "./public-read-unavailable";
 export function HomeScientificNeeds({
   result,
   mark,
+  titles,
 }: {
   readonly result: PublicRead<PublicMovesResponse>;
   readonly mark?: string;
+  /** Neutralized Fellow-supplied titles the page already read, by problem id. */
+  readonly titles?: ReadonlyMap<string, string>;
 }) {
   const face = result.state === "ok" && !result.noindex ? result.data : undefined;
   const discovery = face?.discovery;
@@ -30,11 +34,7 @@ export function HomeScientificNeeds({
     <section aria-labelledby="scientific-needs-heading">
       <header className="section-head">
         <h2 id="scientific-needs-heading">
-          {mark ? (
-            <span className="gr" aria-hidden="true">
-              {mark}
-            </span>
-          ) : null}
+          <SectionCoin mark={mark} />
           Problems needing help
         </h2>
         <Link href="/moves" prefetch={false} className="btn-quiet">
@@ -51,29 +51,37 @@ export function HomeScientificNeeds({
           )}
           {needs.length > 0 ? (
             <ol className="claims-list needs-list">
-              {needs.map(({ problem_id, primary_move, captured_cursor }) => (
-                <li className="claim-card need-card" key={problem_id}>
-                  <p className="need-move">{face.moves[primary_move.move].title}</p>
-                  <h3>
-                    <Link href={`/p/${encodeURIComponent(problem_id)}`} prefetch={false}>
-                      {problem_id}
-                    </Link>
-                  </h3>
-                  <p className="need-why">{primary_move.why}</p>
-                  <div className="need-foot">
-                    <span className="quiet">Selected at problem ledger seq {captured_cursor}</span>
-                    {EnrollmentProblemBindingSchema.safeParse(problem_id).success && (
-                      <Link
-                        className="btn-quiet"
-                        href={`/console?problem=${encodeURIComponent(problem_id)}#onboard-title`}
-                        prefetch={false}
-                      >
-                        Onboard a Fellow<span className="sr-only"> for {problem_id}</span>
+              {needs.map(({ problem_id, primary_move, captured_cursor }) => {
+                const title = titles?.get(problem_id);
+                return (
+                  <li className="claim-card need-card" key={problem_id}>
+                    <p className="need-move">{face.moves[primary_move.move].title}</p>
+                    <h3>
+                      <Link href={`/p/${encodeURIComponent(problem_id)}`} prefetch={false}>
+                        {title ?? problem_id}
                       </Link>
+                    </h3>
+                    {title !== undefined && (
+                      <p className="quiet need-id">
+                        <code>{problem_id}</code> · Fellow-supplied title
+                      </p>
                     )}
-                  </div>
-                </li>
-              ))}
+                    <p className="need-why">{primary_move.why}</p>
+                    <div className="need-foot">
+                      <span className="quiet">Selected at problem ledger seq {captured_cursor}</span>
+                      {EnrollmentProblemBindingSchema.safeParse(problem_id).success && (
+                        <Link
+                          className="btn-quiet"
+                          href={`/console?problem=${encodeURIComponent(problem_id)}#onboard-title`}
+                          prefetch={false}
+                        >
+                          Onboard a Fellow<span className="sr-only"> for {problem_id}</span>
+                        </Link>
+                      )}
+                    </div>
+                  </li>
+                );
+              })}
             </ol>
           ) : (
             <p>{nothingListed

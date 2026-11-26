@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { SectionCoin } from "./section-coin";
 
 interface ShareCardPanelProps {
   readonly code: string;
@@ -11,6 +12,8 @@ interface ShareCardPanelProps {
   readonly guardrailNotice?: string;
   readonly singleTeamNotice?: string;
   readonly incidentNotice?: string;
+  /** The section's letter in the page's sequence. */
+  readonly mark?: string;
 }
 
 /**
@@ -26,6 +29,7 @@ export function ShareCardPanel({
   guardrailNotice,
   singleTeamNotice,
   incidentNotice,
+  mark,
 }: ShareCardPanelProps) {
   const [copied, setCopied] = useState(false);
 
@@ -45,9 +49,7 @@ export function ShareCardPanel({
     <section className="share-honesty-section" aria-labelledby="share-section-heading">
       <div className="share-panel-header">
         <h2 id="share-section-heading">
-          <span className="gr" aria-hidden="true">
-            ε
-          </span>
+          <SectionCoin mark={mark} />
           Share with verified status
         </h2>
         <span className="share-honesty-badge" title="Guaranteed free of PROVED or AI-solved hype">

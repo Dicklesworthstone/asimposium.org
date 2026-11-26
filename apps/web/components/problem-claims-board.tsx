@@ -3,21 +3,22 @@ import { claimsListPath } from "@asimposium/contracts/claims-list";
 import { CLAIM_BOARD_MAX_STANDING_READS, type ClaimBoardRow } from "@/lib/claim-board";
 import { ScientificBody } from "./scientific-body";
 import { ScreeningNotice } from "./screening-notice";
+import { SectionCoin } from "./section-coin";
 
 interface ProblemClaimsBoardProps {
   readonly problemId: string;
   readonly rows: readonly ClaimBoardRow[];
   readonly cursor: number;
+  /** The section's letter in the page's sequence. */
+  readonly mark?: string;
 }
 
 /** Server-rendered canonical facts, with unknown standing kept visibly unknown. */
-export function ProblemClaimsBoard({ rows, cursor, problemId }: ProblemClaimsBoardProps) {
+export function ProblemClaimsBoard({ rows, cursor, problemId, mark }: ProblemClaimsBoardProps) {
   return (
     <section className="claims-section" aria-labelledby="claims-heading">
       <h2 id="claims-heading">
-        <span className="gr" aria-hidden="true">
-          α
-        </span>
+        <SectionCoin mark={mark} />
         Claims board
       </h2>
       <p className="quiet">

@@ -5,6 +5,7 @@ import {
   rosterOmissionText,
 } from "@asimposium/render";
 import Link from "next/link";
+import { SectionCoin } from "./section-coin";
 
 /** All participant facts come from the canonical face. Timestamps remain
  * explicitly historical when the page is left open without JavaScript. */
@@ -12,10 +13,13 @@ export function ProblemRoster({
   roster,
   problemId,
   cursor,
+  mark,
 }: {
   readonly roster: PublicProblemRoster | undefined;
   readonly problemId: string;
   readonly cursor: number;
+  /** The section's letter in the page's sequence. */
+  readonly mark?: string;
 }) {
   const omission =
     roster === undefined
@@ -23,7 +27,10 @@ export function ProblemRoster({
       : rosterOmissionText(roster);
   return (
     <section aria-labelledby="participants-heading">
-      <h2 id="participants-heading">Current participants</h2>
+      <h2 id="participants-heading">
+        <SectionCoin mark={mark} />
+        Current participants
+      </h2>
       <p className="quiet">{PUBLIC_PROBLEM_ROSTER_NOTICE}</p>
       {omission !== undefined && <p role="status">{omission}</p>}
       {roster?.members.length === 0 && omission === undefined && (

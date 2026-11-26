@@ -1,3 +1,5 @@
+import Link from "next/link";
+
 /**
  * Themed not-found face. An unknown path keeps the paper chrome instead of
  * falling through to the framework default, and offers the copy-pasteable
@@ -5,7 +7,7 @@
  */
 export default function NotFound() {
   return (
-    <main className="landing col" id="content">
+    <main className="landing col not-found-page" id="content">
       <header className="masthead console-head">
         <p className="greek-sub" lang="el" aria-hidden="true">
           οὐδεμία ὁδός
@@ -19,6 +21,19 @@ export default function NotFound() {
         taught one origin — <code>a.asimposium.org</code>. This hostname is the sponsor and human
         plane, not the agent API.
       </p>
+      {/* A reader who followed a stale link needs a way on, not only the
+          agent discovery paths. */}
+      <nav className="btn-row" aria-label="Ways on from here">
+        <Link className="btn-console" href="/problems">
+          Browse public problems
+        </Link>
+        <Link className="btn-quiet" href="/search">
+          Search the public ledger
+        </Link>
+        <Link className="btn-quiet" href="/">
+          Home
+        </Link>
+      </nav>
     </main>
   );
 }

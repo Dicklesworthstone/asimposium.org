@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { ScientificBody } from "@/components/scientific-body";
 import { ScreeningNotice } from "@/components/screening-notice";
+import { SectionCoin } from "@/components/section-coin";
 import type {
   ClaimProofObligationView,
   ClaimProofObligationsView,
@@ -54,8 +55,11 @@ export function ClaimHonestyBadges({
 
 export function WhyThisStatusPanel({
   whyThisStatus,
+  mark,
 }: {
   readonly whyThisStatus: WhyThisStatusViewModel;
+  /** The section's letter in the page's sequence. */
+  readonly mark?: string;
 }) {
   return (
     <section
@@ -63,7 +67,10 @@ export function WhyThisStatusPanel({
       id="why-this-status"
       aria-labelledby="why-this-status-heading"
     >
-      <h2 id="why-this-status-heading">Why this status?</h2>
+      <h2 id="why-this-status-heading">
+        <SectionCoin mark={mark} />
+        Why this status?
+      </h2>
       <p className="lede">{whyThisStatus.summary}</p>
       <ul className="why-reasons-list">
         {whyThisStatus.reasons.map((reason, index) => (
@@ -94,8 +101,11 @@ export function WhyThisStatusPanel({
 
 export function WhatRemainsUnverifiedPanel({
   whatRemainsUnverified,
+  mark,
 }: {
   readonly whatRemainsUnverified: WhatRemainsUnverifiedViewModel;
+  /** The section's letter in the page's sequence. */
+  readonly mark?: string;
 }) {
   return (
     <section
@@ -103,7 +113,10 @@ export function WhatRemainsUnverifiedPanel({
       id="what-remains-unverified"
       aria-labelledby="what-remains-unverified-heading"
     >
-      <h2 id="what-remains-unverified-heading">What remains unverified?</h2>
+      <h2 id="what-remains-unverified-heading">
+        <SectionCoin mark={mark} />
+        What remains unverified?
+      </h2>
       <ClaimProofObligations obligations={whatRemainsUnverified.proofObligations} />
       <p className="quiet">
         Other recorded verification conditions, independence tiers, and evidence bounds:
@@ -310,13 +323,19 @@ function ClaimProofObligations({
 export function ClaimDependencyGraphTable({
   dependencies,
   problem,
+  mark,
 }: {
   readonly dependencies: readonly DependencyRow[];
   readonly problem: string;
+  /** The section's letter in the page's sequence. */
+  readonly mark?: string;
 }) {
   return (
     <section className="dependencies-section" aria-labelledby="dependencies-heading">
-      <h2 id="dependencies-heading">Premises and dependency relations</h2>
+      <h2 id="dependencies-heading">
+        <SectionCoin mark={mark} />
+        Premises and dependency relations
+      </h2>
       {dependencies.length === 0 ? (
         <p className="quiet">
           No premise records are displayed. Missing, withheld, or budget-omitted dependencies do not
@@ -406,10 +425,20 @@ export function ClaimDependencyGraphTable({
   );
 }
 
-export function ClaimTimeline({ timeline }: { readonly timeline: readonly TimelineEntry[] }) {
+export function ClaimTimeline({
+  timeline,
+  mark,
+}: {
+  readonly timeline: readonly TimelineEntry[];
+  /** The section's letter in the page's sequence. */
+  readonly mark?: string;
+}) {
   return (
     <section className="timeline-section" aria-labelledby="timeline-heading">
-      <h2 id="timeline-heading">Scientific transition timeline</h2>
+      <h2 id="timeline-heading">
+        <SectionCoin mark={mark} />
+        Scientific transition timeline
+      </h2>
       <p className="quiet">
         Published records in ledger order. Evidence and review links open the exact publication with
         current visibility; surrounding public context may be newer than this snapshot.
@@ -448,12 +477,18 @@ export function ClaimTimeline({ timeline }: { readonly timeline: readonly Timeli
 
 export function IndependenceTierExplainer({
   tierExplainer,
+  mark,
 }: {
   readonly tierExplainer: TierExplainerViewModel;
+  /** The section's letter in the page's sequence. */
+  readonly mark?: string;
 }) {
   return (
     <section className="tier-explainer-section" aria-labelledby="tier-explainer-heading">
-      <h2 id="tier-explainer-heading">Independence tiers & review basis</h2>
+      <h2 id="tier-explainer-heading">
+        <SectionCoin mark={mark} />
+        Independence tiers & review basis
+      </h2>
       <p className="quiet">
         Tiers are computed and pinned at review time from recorded sponsors, self-declared model
         families and the review method. Later transfers do not upgrade earlier reviews. A tier
@@ -545,15 +580,21 @@ export function IndependenceTierExplainer({
 export function ClaimCitationBox({
   citations,
   exactTarget,
+  mark,
 }: {
   readonly citations: ClaimPageViewModel["citations"];
   readonly exactTarget: string;
+  /** The section's letter in the page's sequence. */
+  readonly mark?: string;
 }) {
   if (!citations.hasBibtex && !citations.hasCsl) return null;
 
   return (
     <section className="citation-section" aria-labelledby="citation-heading">
-      <h2 id="citation-heading">Cite this statement version</h2>
+      <h2 id="citation-heading">
+        <SectionCoin mark={mark} />
+        Cite this statement version
+      </h2>
       <p className="quiet">
         Every version has a permanent content digest and canonical citation record:
       </p>

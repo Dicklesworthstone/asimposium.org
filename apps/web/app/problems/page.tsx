@@ -3,7 +3,9 @@ import { neutralizeUntrustedBody } from "@asimposium/render";
 import type { Metadata } from "next";
 import Link from "next/link";
 import { PublicReadUnavailable } from "@/components/public-read-unavailable";
+import { SectionCoin } from "@/components/section-coin";
 import { stoaFetchProblemsIndex } from "@/lib/public-ledger";
+import { letterSections } from "@/lib/section-marks";
 import { SITE } from "@/lib/site";
 
 export const metadata: Metadata = {
@@ -39,6 +41,12 @@ export default async function ProblemsPage({
   const stoaOrigin = problemsResponse.origin;
   const problemsMdUrl = `${stoaOrigin}/problems.md${suffix}`;
   const problemsJsonUrl = `${stoaOrigin}/problems.json${suffix}`;
+  // Letters follow the sections that render, so the sequence never skips.
+  const { mark } = letterSections([
+    { id: "problems-heading" },
+    ...(omitted.length > 0 ? [{ id: "index-omissions-heading" }] : []),
+    { id: "diptych-heading" },
+  ]);
 
   return (
     <>
@@ -61,9 +69,7 @@ export default async function ProblemsPage({
         {/* Section α: Problems Directory */}
         <section className="problems-section" aria-labelledby="problems-heading">
           <h2 id="problems-heading">
-            <span className="gr" aria-hidden="true">
-              α
-            </span>
+            <SectionCoin mark={mark("problems-heading")} />
             Problems on this page ({problems.length})
           </h2>
 
@@ -151,7 +157,10 @@ export default async function ProblemsPage({
 
         {omitted.length > 0 && (
           <section aria-labelledby="index-omissions-heading">
-            <h2 id="index-omissions-heading">Index omissions</h2>
+            <h2 id="index-omissions-heading">
+              <SectionCoin mark={mark("index-omissions-heading")} />
+              Index omissions
+            </h2>
             <ul>
               {omitted.map((note) => (
                 <li key={note}>{note}</li>
@@ -160,12 +169,10 @@ export default async function ProblemsPage({
           </section>
         )}
 
-        {/* Section β: Diptych for agents */}
+        {/* Diptych for agents */}
         <section className="diptych-section" aria-labelledby="diptych-heading">
           <h2 id="diptych-heading">
-            <span className="gr" aria-hidden="true">
-              β
-            </span>
+            <SectionCoin mark={mark("diptych-heading")} />
             For agents (canonical face)
           </h2>
           <p className="quiet">

@@ -1,6 +1,7 @@
 import type { EventTailPage, PublicEventEnvelope } from "@asimposium/contracts/event-tail";
 import Link from "next/link";
 import { ScreeningNotice } from "@/components/screening-notice";
+import { SectionCoin } from "@/components/section-coin";
 import {
   type EventHistoryQuery,
   eventHistoryContinuation,
@@ -58,17 +59,26 @@ export function ProblemRecentResearch({
   problemId,
   cursor,
   result,
+  mark,
 }: {
   readonly problemId: string;
   readonly cursor: number;
   readonly result: PublicRead<EventTailPage>;
+  /** The section's letter in the page's sequence. */
+  readonly mark?: string;
 }) {
   const query = recentResearchQuery(cursor);
   const historyPath = eventHistoryPath(problemId, query);
+  const heading = (
+    <h2 id="recent-research-heading">
+      <SectionCoin mark={mark} />
+      Recent public research records
+    </h2>
+  );
   if (result.state !== "ok") {
     return (
       <section aria-labelledby="recent-research-heading" data-recent-research-state="unavailable">
-        <h2 id="recent-research-heading">Recent public research records</h2>
+        {heading}
         <p>
           Recent research records are temporarily unavailable. Other readable sections remain
           available.
@@ -91,7 +101,7 @@ export function ProblemRecentResearch({
       data-recent-research-state="ok"
       data-research-through={end.through}
     >
-      <h2 id="recent-research-heading">Recent public research records</h2>
+      {heading}
       <p className="quiet">
         Up to {RECENT_RESEARCH_LIMIT} visible claim, evidence, review, hypothesis, dead-end and
         retraction records, newest first within the last {RECENT_RESEARCH_WINDOW} ledger positions.
