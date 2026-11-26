@@ -6,6 +6,13 @@ import {
   UNAVAILABLE_UNTIL_DEPLOYED,
 } from "../../../../packages/contracts/src/stats.ts";
 import type { Env } from "../env.ts";
+import { PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL } from "../krater/public-content.ts";
+import { ScientificInputError } from "../ledger/scientific-checks.ts";
+import {
+  foldScientificRows,
+  prepareScientificDispositions,
+  type ScientificRow,
+} from "../ledger/scientific-disposition.ts";
 import { assertObservabilityBoundary } from "../observability/telemetry.ts";
 
 type D1Database = NonNullable<Env["DB"]>;
@@ -52,6 +59,83 @@ async function scalarInt(db: D1Database, sql: string): Promise<number> {
   return Number.isFinite(num) && num >= 0 ? Math.trunc(num) : 0;
 }
 
+// A stats request can fold at most 16 current public claim histories. Lookahead
+// is unnecessary: the exact public total and selection share one SQL snapshot.
+// Anything outside the bounded sample remains explicitly unassessed.
+const STATS_CLAIM_LIMIT = 16;
+const STATS_HISTORY_BUDGET = {
+  maxRows: 128,
+  maxPayloadBytes: 16 * 1024,
+  maxTotalPayloadBytes: 128 * 1024,
+};
+
+async function measureClaimStandings(db: D1Database, tables: ReadonlySet<string>) {
+  if (!tables.has("claims")) throw new Error("The public claim inventory is unavailable.");
+  const result = {
+    total: 0,
+    assessed: 0,
+    independentlyReviewed: 0,
+    awaitingIndependence: 0,
+    buckets: {} as Record<string, number>,
+  };
+  // A legacy projection can measure its inventory, but cannot establish
+  // standing from review rows without the digest-bound event history.
+  if (!tables.has("events") && !tables.has("event_content") && !tables.has("content_controls")) {
+    result.total = await scalarInt(
+      db,
+      `SELECT COUNT(*) AS value FROM claims
+      JOIN problems p ON p.id = claims.problem_id
+      WHERE p.status <> 'private-draft' AND p.unlisted = 0`,
+    );
+    if (result.total) result.buckets.unassessed = result.total;
+    return result;
+  }
+
+  const selected = await db
+    .prepare(`SELECT claims.problem_id, claims.id, p.public_seq,
+      publication.object_version AS version, COUNT(*) OVER () AS total
+    FROM claims JOIN problems p ON p.id = claims.problem_id
+    JOIN events publication ON publication.problem_id = claims.problem_id AND publication.seq = claims.source_seq
+    WHERE p.status <> 'private-draft' AND p.unlisted = 0 AND ${PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL}
+    ORDER BY claims.problem_id, claims.id LIMIT ?`)
+    .bind(STATS_CLAIM_LIMIT)
+    .all<{ problem_id: string; id: string; public_seq: number; version: number; total: number }>();
+  if (!selected.success) throw new Error("The public claim inventory is unavailable.");
+  result.total = selected.results[0]?.total ?? 0;
+  for (const head of selected.results) {
+    const history = await prepareScientificDispositions(
+      db,
+      head.problem_id,
+      head.public_seq,
+      1,
+      { claimId: head.id, version: head.version },
+      STATS_HISTORY_BUDGET,
+    ).all<ScientificRow>();
+    if (!history.success) throw new Error("Scientific history is unavailable.");
+    try {
+      const fold = await foldScientificRows(
+        history.results.filter((row) => row.target_version <= head.version),
+      );
+      if (fold.currentVersion !== head.version || fold.stale) continue;
+      result.assessed++;
+      result.buckets[fold.disposition] = (result.buckets[fold.disposition] ?? 0) + 1;
+      const independentReviews = fold.context.verified_reviews.filter(
+        (review) => review.tier === "T2" || review.tier === "T3",
+      );
+      if (independentReviews.length > 0) result.independentlyReviewed++;
+      if (
+        fold.disposition === "corroborated" &&
+        !independentReviews.some((review) => review.finding === "support")
+      )
+        result.awaitingIndependence++;
+    } catch (error) {
+      if (!(error instanceof ScientificInputError)) throw error;
+    }
+  }
+  if (result.assessed < result.total) result.buckets.unassessed = result.total - result.assessed;
+  return result;
+}
+
 /**
  * Computes the live measured `/stats` face from bounded read-only D1 aggregate
  * queries covering all 5 Fable §13.3 health families.
@@ -68,7 +152,6 @@ export async function loadPlatformStats(
   const hasProblems = tables.has("problems");
   const hasSessions = tables.has("sessions");
   const hasFellows = tables.has("enrollment_fellows");
-  const hasClaims = tables.has("claims");
   const hasReviews = tables.has("reviews");
   const hasEvidence = tables.has("evidence");
   const hasDeadEnds = tables.has("dead_ends");
@@ -78,13 +161,15 @@ export async function loadPlatformStats(
   const hasReports = tables.has("reports");
   const hasAppeals = tables.has("screening_case_appeals");
   const hasSponsorAppeals = tables.has("sponsor_screening_case_appeals");
-  const hasRetractions = tables.has("retractions");
-  const hasClaimVersions = tables.has("claim_versions");
 
   const problemCols = hasProblems ? await listColumns(db, "problems") : new Set<string>();
   const hasProblemStatus = problemCols.has("status");
   const hasProblemSponsor = problemCols.has("sponsor_id");
   const hasProblemUnlisted = problemCols.has("unlisted");
+
+  if (!hasProblems || !hasProblemStatus || !hasProblemUnlisted) {
+    throw new Error("Public problem visibility is unavailable.");
+  }
 
   // 1. Collaboration family (strictly scoped to listed public problems per Rule A2)
   const publicProblemFilter = [
@@ -173,129 +258,7 @@ export async function loadPlatformStats(
     : 0;
 
   // 2. Quality & Review-Supply Depth family (strictly scoped to listed public problems)
-  const claimsTotal = hasClaims ? await scalarInt(db, publicScopedCount("claims", "c")) : 0;
-
-  // Compute claim disposition distribution from recorded reviews/retractions/claims
-  // (aggregate only, never per actor; assertion-only reviews without capable_of_failure move nothing per P5).
-  const claimsByDisposition: Record<string, number> = {};
-  let independentlyReviewedClaims = 0;
-  let corroboratedAwaitingIndependence = 0;
-  if (hasClaims) {
-    const retractedTargets = new Set<string>();
-    if (hasRetractions) {
-      const retractionRows = await db
-        .prepare(
-          hasProblems
-            ? `SELECT r.problem_id, r.target_object
-               FROM retractions r
-               JOIN problems p ON p.id = r.problem_id
-               WHERE ${publicProblemFilterAliased}
-               LIMIT 4000`
-            : `SELECT problem_id, target_object
-               FROM retractions
-               LIMIT 4000`,
-        )
-        .all<{ problem_id: string; target_object: string }>();
-      for (const row of retractionRows.results ?? []) {
-        retractedTargets.add(`${row.problem_id}\u0000${row.target_object}`);
-      }
-    }
-
-    const headVersionJoin = hasClaimVersions
-      ? `LEFT JOIN (
-           SELECT problem_id, claim_id, MAX(version) AS head_version
-           FROM claim_versions
-           GROUP BY problem_id, claim_id
-         ) cv ON cv.problem_id = c.problem_id AND cv.claim_id = c.id`
-      : "";
-
-    if (hasReviews) {
-      const reviewCols = await listColumns(db, "reviews");
-      const substantiveCheck = reviewCols.has("capable_of_failure")
-        ? "AND r.capable_of_failure IS NOT NULL AND length(trim(r.capable_of_failure)) > 0"
-        : "";
-      const pinCurrentVersion = hasClaimVersions && reviewCols.has("target_version");
-      const versionPinClause = pinCurrentVersion
-        ? "AND (cv.head_version IS NULL OR r.target_version = cv.head_version)"
-        : "";
-      const claimReviewStats = await db
-        .prepare(
-          `SELECT c.problem_id, c.id,
-                  ${hasClaimVersions ? "cv.head_version" : "NULL AS head_version"},
-                  SUM(CASE WHEN r.verdict IN ('confirm', 'reproduces') AND r.tier IN ('T2', 'T3') ${substantiveCheck} THEN 1 ELSE 0 END) AS high_tier_confirms,
-                  SUM(CASE WHEN r.verdict IN ('confirm', 'reproduces') AND r.tier = 'T1' ${substantiveCheck} THEN 1 ELSE 0 END) AS t1_confirms,
-                  SUM(CASE WHEN r.verdict IN ('refute', 'fails-to-reproduce') THEN 1 ELSE 0 END) AS refutes,
-                  SUM(CASE WHEN r.verdict IN ('refute', 'fails-to-reproduce') AND r.tier IN ('T2', 'T3') THEN 1 ELSE 0 END) AS high_tier_refutes,
-                  COUNT(r.review_id) AS total_reviews
-           FROM claims c
-           ${hasProblems ? `JOIN problems p ON p.id = c.problem_id` : ""}
-           ${headVersionJoin}
-           LEFT JOIN reviews r ON r.problem_id = c.problem_id AND r.target_claim_id = c.id ${versionPinClause}
-           ${hasProblems ? `WHERE ${publicProblemFilterAliased}` : ""}
-           GROUP BY c.problem_id, c.id
-           LIMIT 2000`,
-        )
-        .all<{
-          problem_id: string;
-          id: string;
-          head_version: number | null;
-          high_tier_confirms: number;
-          t1_confirms: number;
-          refutes: number;
-          high_tier_refutes: number;
-          total_reviews: number;
-        }>();
-      for (const row of claimReviewStats.results ?? []) {
-        const highConf = Number(row.high_tier_confirms ?? 0);
-        const t1Conf = Number(row.t1_confirms ?? 0);
-        const refutes = Number(row.refutes ?? 0);
-        const highRefutes = Number(row.high_tier_refutes ?? 0);
-        const isRetracted =
-          retractedTargets.has(`${row.problem_id}\u0000${row.id}`) ||
-          (row.head_version !== null &&
-            row.head_version !== undefined &&
-            retractedTargets.has(`${row.problem_id}\u0000${row.id}@${row.head_version}`));
-        let bucket = "open";
-        if (isRetracted) {
-          bucket = "retracted";
-        } else if (refutes > 0 && highConf + t1Conf > 0) {
-          bucket = "disputed";
-        } else if (refutes > 0) {
-          bucket = "refuted";
-        } else if (highConf >= 2) {
-          bucket = "strongly-supported";
-        } else if (highConf >= 1 || t1Conf >= 1) {
-          bucket = "corroborated";
-          if (highConf === 0) corroboratedAwaitingIndependence += 1;
-        }
-        claimsByDisposition[bucket] = (claimsByDisposition[bucket] ?? 0) + 1;
-        if (highConf > 0 || highRefutes > 0) {
-          independentlyReviewedClaims += 1;
-        }
-      }
-    } else if (claimsTotal > 0) {
-      const claimRows = await db
-        .prepare(
-          `SELECT c.problem_id, c.id, ${hasClaimVersions ? "cv.head_version" : "NULL AS head_version"}
-           FROM claims c
-           ${hasProblems ? `JOIN problems p ON p.id = c.problem_id` : ""}
-           ${headVersionJoin}
-           ${hasProblems ? `WHERE ${publicProblemFilterAliased}` : ""}
-           LIMIT 2000`,
-        )
-        .all<{ problem_id: string; id: string; head_version: number | null }>();
-      for (const row of claimRows.results ?? []) {
-        const isRetracted =
-          retractedTargets.has(`${row.problem_id}\u0000${row.id}`) ||
-          (row.head_version !== null &&
-            row.head_version !== undefined &&
-            retractedTargets.has(`${row.problem_id}\u0000${row.id}@${row.head_version}`));
-        const bucket = isRetracted ? "retracted" : "open";
-        claimsByDisposition[bucket] = (claimsByDisposition[bucket] ?? 0) + 1;
-      }
-    }
-  }
-
+  const science = await measureClaimStandings(db, tables);
   // Review-supply depth: distinct active Fellows with a DIFFERENT sponsor than the problem owner per active problem.
   const reviewSupplyDepths: number[] = [];
   if (hasProblems && hasFellows) {
@@ -460,11 +423,11 @@ export async function loadPlatformStats(
       handback_completion_rate: buildRate(sessionsWithHandback, sessionsClosed),
     },
     quality: {
-      claims_total: claimsTotal,
-      claims_by_disposition: claimsByDisposition,
+      claims_total: science.total,
+      claims_by_disposition: science.buckets,
       consequential_claims_independent_review_coverage: buildRate(
-        independentlyReviewedClaims,
-        claimsTotal,
+        science.independentlyReviewed,
+        science.assessed,
       ),
       review_supply_depth: {
         problems_measured: reviewSupplyDepths.length,
@@ -472,7 +435,7 @@ export async function loadPlatformStats(
         min_eligible_independent_fellows:
           reviewSupplyDepths.length === 0 ? null : Math.min(...reviewSupplyDepths),
       },
-      corroborated_awaiting_independence_count: corroboratedAwaitingIndependence,
+      corroborated_awaiting_independence_count: science.awaitingIndependence,
       reproduction_pass_rate: buildRate(reproPass, reproPass + reproFail),
       dead_ends_recorded: deadEndsRecorded,
       dead_ends_with_retry_predicate: deadEndsWithRetry,
@@ -500,6 +463,11 @@ export async function loadPlatformStats(
       edge_cache_hit_ratio: UNAVAILABLE_UNTIL_DEPLOYED,
     },
     omitted: [
+      ...(science.assessed < science.total
+        ? [
+            "Standing checks cover up to 16 claims ordered by problem and claim id. Review coverage and corroborated-awaiting-independence counts cover assessed claims only.",
+          ]
+        : []),
       "actor names, leaderboards, streaks, and model-family comparisons are omitted by Rule A10 / ADR-19",
       "private workshop drafts, sponsor directives, and unlisted/private-draft problems are excluded by Rule A2",
       "external edge-cache, Sentry, usability, and hosted Workers AI telemetry remain unavailable_until_deployed",

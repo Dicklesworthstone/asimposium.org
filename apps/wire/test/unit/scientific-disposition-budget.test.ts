@@ -14,6 +14,8 @@ import {
   type ScientificRow,
 } from "../../src/ledger/scientific-disposition.ts";
 
+import { loadPlatformStats } from "../../src/stats/service.ts";
+
 const BUDGET = { maxRows: 128, maxPayloadBytes: 16_384, maxTotalPayloadBytes: 131_072 };
 const hash = (text: string) => createHash("sha256").update(text).digest("hex");
 const bytes = (text: string | null) => (text === null ? 0 : new TextEncoder().encode(text).length);
@@ -209,6 +211,36 @@ test("a complete bounded history retains the canonical rows and fold", async () 
     expect(bounded).toEqual(original);
     expect(await foldScientificRows(bounded)).toEqual(await foldScientificRows(original));
     expect((await foldScientificRows(bounded)).disposition).toBe("disputed");
+  } finally {
+    f.sql.close();
+  }
+});
+
+test("platform stats fold current, visible scientific history within budget", async () => {
+  const f = await fixture();
+  try {
+    f.sql.exec(`
+      CREATE TABLE claims (problem_id TEXT, id TEXT, source_seq INTEGER, payload_sha256 TEXT);
+      INSERT INTO claims SELECT problem_id, object_id, seq, payload_sha256 FROM events;
+    `);
+    const counts = async () => (await loadPlatformStats(f.db)).quality.claims_by_disposition;
+    expect(await counts()).toEqual({ open: 1 });
+    f.evidence("A counterexample to the first version.", "refutes");
+    expect(await counts()).toEqual({ disputed: 1 });
+    await f.revision(2);
+    f.sql.exec(`UPDATE claims SET source_seq = (SELECT MAX(seq) FROM events),
+      payload_sha256 = (SELECT payload_sha256 FROM events ORDER BY seq DESC LIMIT 1)`);
+    expect(await counts()).toEqual({ open: 1 });
+    for (let i = 0; i < BUDGET.maxRows; i++) {
+      f.evidence("Repeat a bounded public observation.", "supports", {
+        kind: "claim",
+        id: "C-1",
+        version: 2,
+      });
+    }
+    expect(await counts()).toEqual({ unassessed: 1 });
+    f.sql.exec("INSERT INTO content_controls VALUES('P-DEMO','C-1@2','hidden',1)");
+    expect(await counts()).toEqual({});
   } finally {
     f.sql.close();
   }

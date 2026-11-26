@@ -187,11 +187,11 @@ describe("Measured /stats.{json,md} face (asimposiumorg-rc-stats-runbooks-cost-m
       });
       expect(parsed.quality.claims_total).toBe(3);
       expect(parsed.quality.claims_by_disposition).toEqual({
-        "strongly-supported": 1,
-        corroborated: 1,
-        open: 1,
+        unassessed: 3,
       });
-      expect(parsed.quality.corroborated_awaiting_independence_count).toBe(1);
+      expect(parsed.quality.corroborated_awaiting_independence_count).toBe(0);
+      expect(parsed.quality.consequential_claims_independent_review_coverage.rate).toBeNull();
+      expect(parsed.omitted.join(" ")).toContain("assessed claims only");
       expect(parsed.quality.review_supply_depth).toEqual({
         problems_measured: 2,
         median_eligible_independent_fellows: 2,
@@ -428,8 +428,7 @@ describe("Measured /stats.{json,md} face (asimposiumorg-rc-stats-runbooks-cost-m
       });
       expect(stats.quality.claims_total).toBe(2);
       expect(stats.quality.claims_by_disposition).toEqual({
-        open: 1,
-        retracted: 1,
+        unassessed: 2,
       });
       expect(stats.quality.reproduction_pass_rate).toEqual({
         numerator: 1,
@@ -444,7 +443,7 @@ describe("Measured /stats.{json,md} face (asimposiumorg-rc-stats-runbooks-cost-m
     }
   });
 
-  test("REGRESSION (Rule P9 version pinning): reviews on @1 do not elevate revised @2 claim in /stats", async () => {
+  test("legacy reviews on @1 cannot establish standing of a revised @2 claim", async () => {
     const sql = new Database(":memory:");
     try {
       sql.exec(`
@@ -491,13 +490,13 @@ describe("Measured /stats.{json,md} face (asimposiumorg-rc-stats-runbooks-cost-m
 
       const stats = await loadPlatformStats(sqliteAsD1(sql));
       expect(stats.quality.claims_total).toBe(1);
-      expect(stats.quality.claims_by_disposition).toEqual({ open: 1 });
+      expect(stats.quality.claims_by_disposition).toEqual({ unassessed: 1 });
     } finally {
       sql.close();
     }
   });
 
-  test("REGRESSION (ADR-9 independence + exact-version retraction): T1 same-sponsor refute does not count as independent review and C-1@head retraction classifies as retracted", async () => {
+  test("legacy review and retraction projections alone cannot establish standing or independent coverage", async () => {
     const sql = new Database(":memory:");
     try {
       sql.exec(`
@@ -547,7 +546,7 @@ describe("Measured /stats.{json,md} face (asimposiumorg-rc-stats-runbooks-cost-m
           ('P-ADR9', 'C-1', 1),
           ('P-ADR9', 'C-2', 1), ('P-ADR9', 'C-2', 2),
           ('P-ADR9', 'C-3', 1), ('P-ADR9', 'C-3', 2);
-        -- Same-sponsor T1 refute moves disposition to refuted, but MUST NOT inflate independent (T2/T3) coverage.
+        -- An unverified projection must not classify the current claim.
         INSERT INTO reviews VALUES
           ('P-ADR9', 'R-T1-REF', 'C-1', 1, 'T1', 'refute', 'Same-sponsor counterexample');
         -- Exact head-version retraction for C-2@2; older @1 retraction for C-3@1; non-claim E-1 retraction.
@@ -560,15 +559,13 @@ describe("Measured /stats.{json,md} face (asimposiumorg-rc-stats-runbooks-cost-m
       const stats = await loadPlatformStats(sqliteAsD1(sql));
       expect(stats.quality.claims_total).toBe(3);
       expect(stats.quality.claims_by_disposition).toEqual({
-        refuted: 1,
-        retracted: 1,
-        open: 1,
+        unassessed: 3,
       });
-      // T1 refute is NOT sponsor-independent (T2/T3) -> independent coverage stays 0/3!
+      // No scientific history could be assessed.
       expect(stats.quality.consequential_claims_independent_review_coverage).toEqual({
         numerator: 0,
-        denominator: 3,
-        rate: 0,
+        denominator: 0,
+        rate: null,
       });
     } finally {
       sql.close();
