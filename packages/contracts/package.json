@@ -22,6 +22,7 @@
     "./event-tail": "./src/event-tail.ts",
     "./formal-records": "./src/formal-records.ts",
     "./formalization-friction": "./src/formalization-friction.ts",
+    "./herald-room-model": "./src/herald-room-model.ts",
     "./hypotheses": "./src/hypotheses.ts",
     "./integrity-cases": "./src/integrity-cases.ts",
     "./proof-gaps": "./src/proof-gaps.ts",

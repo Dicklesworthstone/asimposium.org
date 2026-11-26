@@ -1,5 +1,7 @@
 import { describe, test } from "bun:test";
 import assert from "node:assert/strict";
+import { HERALD_ROOM_LIMITS } from "@asimposium/contracts/herald-room-model";
+import { PUBLIC_WATCH_REQUEST_TIMEOUT_MS } from "@asimposium/contracts/public-watch";
 import {
   PublicLedgerWatch,
   type PublicWatchEventSource,
@@ -339,6 +341,126 @@ describe("private workshop socket liveness", () => {
 });
 
 describe("Agora Herald progressive WS -> SSE -> Poll upgrade (kfag)", () => {
+  function publicRoom(fetch: PublicWatchRuntime["fetch"]) {
+    const clock = new FakeClock();
+    const sockets: FakeSocket[] = [];
+    const sources: FakeEventSource[] = [];
+    let refreshes = 0;
+    const watch = new PublicLedgerWatch({
+      origin: "https://a.asimposium.org",
+      targets: [{ path: "/p/P-DEMO.json", etag: '"p1"' }],
+      onState: () => {},
+      onRefresh: () => {
+        refreshes++;
+      },
+      runtime: {
+        setTimer: clock.setTimer,
+        clearTimer: clock.clearTimer,
+        random: () => 0,
+        fetch,
+        openWebSocket(url, protocol) {
+          const socket = new FakeSocket(url, protocol, true);
+          sockets.push(socket);
+          return socket;
+        },
+        openEventSource(url) {
+          const source = new FakeEventSource(url);
+          sources.push(source);
+          return source;
+        },
+      },
+    });
+    watch.start();
+    return { clock, watch, sockets, sources, refreshes: () => refreshes };
+  }
+
+  const notice = { data: JSON.stringify({ control: "resync", through: 2 }) };
+
+  test("silent handshakes fall through both transports, then poll exact validators", async () => {
+    const f = publicRoom(async (url, init) => {
+      if (String(url).endsWith("/cursor")) return new Response("100");
+      assert.equal(new Headers(init?.headers).get("if-none-match"), '"p1"');
+      return new Response(null, { headers: { etag: '"p2"' } });
+    });
+    const socket = f.sockets[0]!;
+    socket.emit("open");
+    socket.emit("message", { data: "pong" });
+    await f.clock.advance(PUBLIC_WATCH_REQUEST_TIMEOUT_MS);
+    assert.equal(f.watch.transport, "sse");
+    socket.emit("close");
+    socket.emit("message", notice);
+    f.sources[0]!.emit("resync", { data: "{}" });
+    await f.clock.advance(PUBLIC_WATCH_REQUEST_TIMEOUT_MS);
+    assert.equal(f.watch.transport, "poll");
+    assert.equal(f.refreshes(), 1);
+    assert.equal(f.sources.length, 1);
+    assert.ok(f.sources[0]!.closed);
+
+    f.watch.setActive(false);
+    f.watch.setActive(true);
+    assert.match(f.sockets[1]!.url, /since=0$/, "global cursor cannot resume a scoped room");
+    f.watch.stop();
+    await f.clock.advance(120_000);
+    assert.equal(f.sources.length, 1);
+    assert.equal(f.clock.timers.size, 0);
+  });
+
+  test("valid pongs keep a room live; a missed heartbeat and a lost SSE terminal event recover", async () => {
+    const calls: string[] = [];
+    const f = publicRoom(async (url) => {
+      calls.push(String(url));
+      return String(url).endsWith("/cursor")
+        ? new Response("30")
+        : new Response(null, { status: 304, headers: { etag: '"p1"' } });
+    });
+    const socket = f.sockets[0]!;
+    socket.emit("open");
+    socket.emit("message", notice);
+    await f.clock.advance(HERALD_ROOM_LIMITS.heartbeatSeconds * 1000);
+    assert.equal(socket.sent.at(-1), "ping");
+    socket.emit("message", { data: "pong" });
+    await f.clock.advance(HERALD_ROOM_LIMITS.heartbeatSeconds * 1000);
+    assert.equal(f.watch.transport, "ws");
+    await f.clock.advance(PUBLIC_WATCH_REQUEST_TIMEOUT_MS);
+    assert.equal(f.watch.transport, "sse");
+    const source = f.sources[0]!;
+    assert.match(source.url, /since=2$/);
+    source.emit("resync", notice);
+    await f.clock.advance(HERALD_ROOM_LIMITS.sseLifetimeMs);
+    assert.equal(f.watch.transport, "sse");
+    assert.ok(calls.every((url) => !url.endsWith("/cursor")));
+    await f.clock.advance(PUBLIC_WATCH_REQUEST_TIMEOUT_MS);
+    assert.equal(f.watch.transport, "poll");
+    assert.ok(calls.some((url) => url.endsWith("/cursor")));
+    assert.equal(f.refreshes(), 0);
+    f.watch.stop();
+    assert.equal(f.clock.timers.size, 0);
+  });
+
+  test("losing both transports during a HEAD check hands off to continuous polling", async () => {
+    const held = Promise.withResolvers<Response>();
+    let heads = 0;
+    let polls = 0;
+    const f = publicRoom(async (url) => {
+      if (String(url).endsWith("/cursor")) return new Response(String(++polls));
+      if (++heads === 1) return held.promise;
+      return new Response(null, { headers: { etag: '"p2"' } });
+    });
+    f.sockets[0]!.emit("message", notice);
+    f.sockets[0]!.emit("error");
+    f.sources[0]!.emit("error");
+    assert.equal(f.watch.transport, "poll");
+    assert.equal(heads, 1);
+    held.resolve(new Response(null, { status: 304, headers: { etag: '"p1"' } }));
+    await settle();
+    assert.equal(polls, 1);
+    assert.equal(f.refreshes(), 1);
+    await f.clock.advance(10_000);
+    assert.equal(polls, 2);
+    f.watch.stop();
+    assert.equal(f.clock.timers.size, 0);
+  });
+
   test("PublicLedgerWatch upgrades to WS, acknowledges resync, refreshes via HEAD without /cursor polling, and degrades WS -> SSE -> Poll", async () => {
     const clock = new FakeClock();
     const sockets: FakeSocket[] = [];

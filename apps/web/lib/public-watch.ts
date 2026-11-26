@@ -1,3 +1,4 @@
+import { HERALD_ROOM_LIMITS, HERALD_ROOM_PROTOCOL } from "@asimposium/contracts/herald-room-model";
 import {
   PUBLIC_WATCH_INTERVAL_MS,
   PUBLIC_WATCH_MAX_BACKOFF_MS,
@@ -66,8 +67,7 @@ const browserRuntime: PublicWatchRuntime = {
       : undefined,
 };
 
-const HERALD_WS_PROTOCOL = "asimposium.room.v1";
-const HERALD_WS_HEARTBEAT_MS = 20_000;
+const HERALD_WS_HEARTBEAT_MS = HERALD_ROOM_LIMITS.heartbeatSeconds * 1_000;
 const HERALD_WS_FALLBACK_COOLDOWN_MS = 30_000;
 
 function singleProblemId(targets: readonly PublicWatchTarget[]): string | undefined {
@@ -271,6 +271,7 @@ export class PublicLedgerWatch {
   private immediate = false;
   private forceProbe = true;
   private cursorValue: number | undefined;
+  private roomCursor = 0;
   private checkedCursor: number | undefined;
   private quietPolls = 0;
   private pendingChange: string | undefined;
@@ -280,6 +281,7 @@ export class PublicLedgerWatch {
   private socket: PublicWatchSocket | undefined;
   private eventSource: PublicWatchEventSource | undefined;
   private heartbeatTimer: Timer | undefined;
+  private liveDeadline: Timer | undefined;
   private reconnectTimer: Timer | undefined;
   private liveTransport: PublicWatchTransport = "poll";
 
@@ -339,6 +341,15 @@ export class PublicLedgerWatch {
     this.refreshAttempts = 0;
     this.failures = 0;
     const nextProblem = singleProblemId(this.targets);
+    if (previousProblem !== nextProblem) {
+      this.roomCursor = 0;
+      this.invalidate();
+      this.forceProbe = true;
+      if (this.running && this.active && this.configured) {
+        this.connectLiveOrPoll();
+        return;
+      }
+    }
     // Keep an already-open live WS/SSE room alive across same-problem refreshes
     // (such as Next.js router.refresh()) instead of tearing it down to polling.
     if (
@@ -384,6 +395,7 @@ export class PublicLedgerWatch {
   }
 
   private closeLiveTransports(): void {
+    this.clearLiveDeadline();
     if (this.heartbeatTimer !== undefined) {
       this.runtime.clearTimer(this.heartbeatTimer);
       this.heartbeatTimer = undefined;
@@ -422,6 +434,7 @@ export class PublicLedgerWatch {
   }
 
   private connectLiveOrPoll(): void {
+    this.immediate = false;
     const problem = singleProblemId(this.targets);
     if (problem !== undefined && this.runtime.openWebSocket !== undefined) {
       if (this.tryOpenWebSocket(problem)) return;
@@ -429,23 +442,41 @@ export class PublicLedgerWatch {
     if (problem !== undefined && this.runtime.openEventSource !== undefined) {
       if (this.tryOpenEventSource(problem)) return;
     }
-    this.liveTransport = "poll";
-    if (!this.polling) {
-      this.immediate = false;
-      void this.poll();
-    }
+    this.startPolling();
   }
 
-  private scheduleHeartbeat(sock: PublicWatchSocket, generation: number): void {
+  private startPolling(): void {
+    this.forceProbe = true;
+    this.liveTransport = "poll";
+    this.immediate = this.polling;
+    if (!this.polling) void this.poll();
+  }
+
+  private clearLiveDeadline(): void {
+    if (this.liveDeadline !== undefined) this.runtime.clearTimer(this.liveDeadline);
+    this.liveDeadline = undefined;
+  }
+
+  private armLiveDeadline(onTimeout: () => void, delay = PUBLIC_WATCH_REQUEST_TIMEOUT_MS): void {
+    this.clearLiveDeadline();
+    this.liveDeadline = this.runtime.setTimer(onTimeout, delay);
+  }
+
+  private scheduleHeartbeat(
+    sock: PublicWatchSocket,
+    generation: number,
+    onFailure: () => void,
+  ): void {
     if (this.heartbeatTimer !== undefined) this.runtime.clearTimer(this.heartbeatTimer);
     this.heartbeatTimer = this.runtime.setTimer(() => {
       if (!this.running || !this.active || this.generation !== generation || this.socket !== sock)
         return;
       try {
+        this.armLiveDeadline(onFailure);
         sock.send("ping");
-        this.scheduleHeartbeat(sock, generation);
+        this.scheduleHeartbeat(sock, generation, onFailure);
       } catch {
-        this.fallbackAfterWsFailure(generation);
+        onFailure();
       }
     }, HERALD_WS_HEARTBEAT_MS);
   }
@@ -453,7 +484,7 @@ export class PublicLedgerWatch {
   private tryOpenWebSocket(problem: string): boolean {
     const openWs = this.runtime.openWebSocket;
     if (!openWs) return false;
-    const since = this.cursorValue ?? 0;
+    const since = this.roomCursor;
     const url = wsUrlForOrigin(
       this.options.origin,
       `/p/${encodeURIComponent(problem)}/room?since=${since}`,
@@ -462,38 +493,44 @@ export class PublicLedgerWatch {
     const generation = this.generation;
     let sock: PublicWatchSocket;
     try {
-      sock = openWs(url, HERALD_WS_PROTOCOL);
+      sock = openWs(url, HERALD_ROOM_PROTOCOL);
     } catch {
       return false;
     }
     this.socket = sock;
     this.liveTransport = "ws";
-    let settledFailure = false;
+    let receivedNotice = false;
     const failToNext = () => {
-      if (settledFailure || !this.running || !this.active || this.generation !== generation) return;
-      settledFailure = true;
+      if (this.socket !== sock) return;
       this.fallbackAfterWsFailure(generation);
     };
+    // Establish liveness with the initial cursor notice, not merely an open socket.
+    this.armLiveDeadline(failToNext);
     sock.addEventListener("open", () => {
       if (!this.running || !this.active || this.generation !== generation || this.socket !== sock)
         return;
       this.failures = 0;
-      this.scheduleHeartbeat(sock, generation);
+      this.scheduleHeartbeat(sock, generation, failToNext);
     });
     sock.addEventListener("message", (event) => {
       if (!this.running || !this.active || this.generation !== generation || this.socket !== sock)
         return;
       const data = (event as { data?: unknown })?.data;
-      if (data === "pong") return;
+      if (data === "pong") {
+        if (receivedNotice) this.clearLiveDeadline();
+        return;
+      }
       const through = parseResyncThrough(data);
       if (through === undefined) return;
+      receivedNotice = true;
+      this.clearLiveDeadline();
       try {
         sock.send(JSON.stringify({ ack: through }));
       } catch {
         failToNext();
         return;
       }
-      this.cursorValue = through;
+      this.roomCursor = through;
       this.forceProbe = true;
       if (!this.polling) void this.probeTargetsOnly(generation);
     });
@@ -509,15 +546,13 @@ export class PublicLedgerWatch {
     if (problem !== undefined && this.runtime.openEventSource !== undefined) {
       if (this.tryOpenEventSource(problem)) return;
     }
-    this.liveTransport = "poll";
-    this.forceProbe = true;
-    if (!this.polling) void this.poll();
+    this.startPolling();
   }
 
   private tryOpenEventSource(problem: string): boolean {
     const openEs = this.runtime.openEventSource;
     if (!openEs) return false;
-    const since = this.cursorValue ?? 0;
+    const since = this.roomCursor;
     const url = `${this.options.origin}/p/${encodeURIComponent(problem)}/room/sse?since=${since}`;
     const generation = this.generation;
     let es: PublicWatchEventSource;
@@ -528,15 +563,13 @@ export class PublicLedgerWatch {
     }
     this.eventSource = es;
     this.liveTransport = "sse";
-    let dropped = false;
+    let receivedNotice = false;
     const dropToPolling = () => {
-      if (dropped || !this.running || !this.active || this.generation !== generation) return;
-      dropped = true;
+      if (this.eventSource !== es) return;
       this.closeLiveTransports();
-      this.liveTransport = "poll";
-      this.forceProbe = true;
-      if (!this.polling) void this.poll();
+      this.startPolling();
     };
+    this.armLiveDeadline(dropToPolling);
     es.addEventListener("resync", (event) => {
       if (
         !this.running ||
@@ -547,14 +580,22 @@ export class PublicLedgerWatch {
         return;
       const through = parseResyncThrough((event as { data?: unknown })?.data);
       if (through === undefined) return;
-      this.cursorValue = through;
+      if (!receivedNotice) {
+        receivedNotice = true;
+        // EventSource hides keepalive comments. Even a quiet stream sends a
+        // terminal event at the server's lifetime limit.
+        this.armLiveDeadline(
+          dropToPolling,
+          HERALD_ROOM_LIMITS.sseLifetimeMs + PUBLIC_WATCH_REQUEST_TIMEOUT_MS,
+        );
+      }
+      this.roomCursor = through;
       this.forceProbe = true;
       if (!this.polling) void this.probeTargetsOnly(generation);
     });
     es.addEventListener("closed", dropToPolling);
     es.addEventListener("reconnect", () => {
-      if (dropped || !this.running || !this.active || this.generation !== generation) return;
-      dropped = true;
+      if (this.eventSource !== es) return;
       this.closeLiveTransports();
       this.reconnectTimer = this.runtime.setTimer(() => {
         this.reconnectTimer = undefined;
@@ -596,7 +637,6 @@ export class PublicLedgerWatch {
           break;
         }
       }
-      this.checkedCursor = this.cursorValue;
       if (changed === undefined) {
         this.pendingChange = undefined;
         this.refreshAttempts = 0;
@@ -623,8 +663,13 @@ export class PublicLedgerWatch {
     } finally {
       this.polling = false;
       if (this.controller === controller) this.controller = undefined;
-      if (valid() && this.configured && this.forceProbe && this.liveTransport !== "poll") {
-        void this.probeTargetsOnly(generation);
+      if (this.running && this.active && this.configured) {
+        if (this.liveTransport === "poll" && this.immediate) {
+          this.immediate = false;
+          void this.poll();
+        } else if (this.liveTransport !== "poll" && this.forceProbe) {
+          void this.probeTargetsOnly(this.generation);
+        }
       }
     }
   }
@@ -744,6 +789,8 @@ export class PublicLedgerWatch {
         const immediate = this.immediate;
         this.immediate = false;
         this.schedule(immediate ? 0 : delay);
+      } else if (this.running && this.active && this.configured && this.forceProbe) {
+        void this.probeTargetsOnly(this.generation);
       }
     }
   }
