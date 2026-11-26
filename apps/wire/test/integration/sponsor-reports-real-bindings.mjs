@@ -117,7 +117,7 @@ await runLocalWorkerJourney(
     const fellow = ReportResponseSchema.parse(
       await call(
         "/v1/reports",
-        { problem_id: problems[1], target: "problem", reason: "integrity", note: privateNotes[1] },
+        { problem_id: problems[1], target: "problem", reason: "privacy", note: privateNotes[1] },
         reporter,
         201,
       ),
@@ -145,7 +145,7 @@ await runLocalWorkerJourney(
     const duplicate = await sponsorCall(owner, "POST", "/v1/sponsors/reports", "sponsor.report", {
       problem_id: problems[1],
       target: "problem",
-      reason: "integrity",
+      reason: "privacy",
     });
     assert.equal(duplicate.report_id, fellow.report_id);
     assert.equal(duplicate.deduplicated, true, "human/Fellow reports share one sponsor family");

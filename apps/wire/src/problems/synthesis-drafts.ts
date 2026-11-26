@@ -12,11 +12,11 @@
 import {
   type ClosingSynthesisDeclaration,
   ClosingSynthesisDeclarationSchema,
-  SYNTHESIS_DRAFT_PAGE_MAX_BYTES,
   SYNTHESES_SCHEMA_ID,
-  type SynthesisDraftCursor,
+  SYNTHESIS_DRAFT_PAGE_MAX_BYTES,
   type SynthesisAnchor,
   SynthesisAnchorSchema,
+  type SynthesisDraftCursor,
   type SynthesisDraftListResponse,
   SynthesisDraftListResponseSchema,
   type SynthesisDraftPublishResponse,
@@ -189,8 +189,9 @@ export async function listSynthesisDraftsForSponsor(
   const after = page?.after;
   // Check current ownership, stewardship, and erasure in the same read as the
   // private bodies. A continuation carries a position and grants no access.
-  const { results: rows } = await db.prepare(
-    `SELECT d.* FROM synthesis_drafts d
+  const { results: rows } = await db
+    .prepare(
+      `SELECT d.* FROM synthesis_drafts d
      JOIN problems p ON p.id = d.problem_id
      JOIN sponsors s ON s.sponsor_id = ? AND s.tombstoned_at IS NULL
      WHERE d.problem_id = ?
@@ -202,8 +203,14 @@ export async function listSynthesisDraftsForSponsor(
        AND NOT EXISTS (SELECT 1 FROM private_draft_erasures e WHERE e.problem_id = d.problem_id)
        ${after ? "AND (d.created_at, d.synthesis_id) < (?, ?)" : ""}
      ORDER BY d.created_at DESC, d.synthesis_id DESC LIMIT ?`,
-  ).bind(sponsorId, problemId, ...(after ? [after.created_at, after.synthesis_id] : []),
-    page ? DRAFT_PAGE_LIMIT + 1 : 50).all<DraftRow>();
+    )
+    .bind(
+      sponsorId,
+      problemId,
+      ...(after ? [after.created_at, after.synthesis_id] : []),
+      page ? DRAFT_PAGE_LIMIT + 1 : 50,
+    )
+    .all<DraftRow>();
 
   const face: SynthesisDraftListResponse = {
     schema: SYNTHESES_SCHEMA_ID,

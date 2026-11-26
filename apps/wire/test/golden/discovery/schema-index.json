@@ -497,7 +497,7 @@
       "id": "reports",
       "url": "https://a.asimposium.org/schemas/reports.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 19902,
+      "body_bytes": 19944,
       "slice_url_template": "https://a.asimposium.org/schemas/reports.v1/{property}.json",
       "slices": [
         "report_request",

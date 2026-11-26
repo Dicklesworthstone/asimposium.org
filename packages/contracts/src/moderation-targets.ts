@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { CitationIdSchema } from "./citations.ts";
+import { CommentaryIdSchema } from "./commentary.ts";
 import { ConflictIdSchema } from "./conflicts.ts";
 import { DeadEndIdSchema } from "./dead-ends.ts";
 import { PublicHypothesisIdSchema } from "./hypotheses.ts";
@@ -13,8 +14,8 @@ import { SynthesisIdSchema } from "./syntheses.ts";
 /** These publications have complete current-control enforcement on their
  * canonical readers. Identity validation is shared by the human form and
  * Worker admission; database publication authority remains Worker-only.
- * Relations cite events rather than their composite storage IDs. Sponsor,
- * commentary and standalone artifact controls have separate authority paths. */
+ * Relations cite events rather than their composite storage IDs. Sponsor
+ * and standalone artifact controls have separate authority paths. */
 export const MODERATION_LEDGER_TARGETS = [
   { kind: "claim", label: "Claim (all versions)", id: ClaimIdSchema, created: "claim.created" },
   {
@@ -50,6 +51,14 @@ export const MODERATION_LEDGER_TARGETS = [
   { kind: "conflict", label: "Conflict", id: ConflictIdSchema, created: "conflict.normalized" },
   { kind: "synthesis", label: "Synthesis", id: SynthesisIdSchema, created: "synthesis.created" },
   { kind: "retraction", label: "Retraction", id: RetractionIdSchema, created: "object.retracted" },
+  {
+    kind: "commentary",
+    label: "Sponsor commentary",
+    id: CommentaryIdSchema,
+    created: "commentary.posted",
+    // A replacement is a new immutable entry, not another version of its predecessor.
+    alsoCreated: "commentary.superseded",
+  },
 ] as const;
 
 export type ModerationLedgerTargetKind = (typeof MODERATION_LEDGER_TARGETS)[number]["kind"];

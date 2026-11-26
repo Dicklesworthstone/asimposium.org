@@ -1,0 +1,6 @@
+{
+  "problem_id": "P-4DSP",
+  "target": "COMM-0123456789abcdef0123456789abcdef@2",
+  "reason": "privacy",
+  "note": "Commentary replacements have their own IDs, not claim-style version pins."
+}

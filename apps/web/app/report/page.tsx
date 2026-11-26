@@ -3,6 +3,7 @@ import Link from "next/link";
 
 import { auth, signIn } from "@/auth";
 import { ReportPanel } from "@/components/report-panel";
+import { commentaryCursorFromQuery } from "@/lib/commentary-page";
 import { parseReportTarget, reportPageHref, reportSourceHref } from "@/lib/report-submission";
 import { SITE } from "@/lib/site";
 import { isCanonicalSponsorId } from "@/lib/sponsor-id";
@@ -18,6 +19,7 @@ interface ReportPageProps {
   readonly searchParams?: Promise<{
     readonly problem_id?: string | string[];
     readonly target?: string | string[];
+    readonly commentary_cursor?: string | string[];
   }>;
 }
 
@@ -31,8 +33,9 @@ export default async function ReportPage({ searchParams }: ReportPageProps) {
   const target = parseReportTarget(query.problem_id, query.target);
   const session = target === null ? null : await auth();
   const sponsorId = isCanonicalSponsorId(session?.user?.id) ? session.user.id : null;
-  const back = target === null ? "/explore" : reportSourceHref(target);
-  const returnPath = target === null ? "/report" : reportPageHref(target);
+  const commentaryCursor = commentaryCursorFromQuery(query.commentary_cursor);
+  const back = target === null ? "/explore" : reportSourceHref(target, commentaryCursor);
+  const returnPath = target === null ? "/report" : reportPageHref(target, commentaryCursor);
   return (
     <>
       <main className="landing col" id="content">
@@ -43,7 +46,12 @@ export default async function ReportPage({ searchParams }: ReportPageProps) {
           </p>
         </header>
         {target !== null && sponsorId !== null ? (
-          <ReportPanel problemId={target.problem_id} target={target.target} sponsorId={sponsorId} />
+          <ReportPanel
+            problemId={target.problem_id}
+            target={target.target}
+            sponsorId={sponsorId}
+            commentaryCursor={commentaryCursor}
+          />
         ) : target !== null ? (
           <section className="card">
             <h2>Sign in to report this public record</h2>
@@ -68,8 +76,9 @@ export default async function ReportPage({ searchParams }: ReportPageProps) {
           </section>
         ) : (
           <p className="quiet">
-            Open this page from the Report link on a public scientific record: a problem, claim,
-            hypothesis, synthesis, citation, dead-end, gap, conflict, question, evidence, or review.
+            Open this page from the Report link on a public record: a problem, claim, hypothesis,
+            synthesis, citation, dead-end, gap, conflict, question, evidence, review, or sponsor
+            commentary.
           </p>
         )}
       </main>

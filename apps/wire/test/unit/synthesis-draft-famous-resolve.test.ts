@@ -518,7 +518,7 @@ for (const decision of ["quarantine", "reject", "provider-error", "wrong-digest"
             decision:
               decision === "reject" ? "reject" : decision === "quarantine" ? "quarantine" : "pass",
             coarse_category:
-              decision === "reject" || decision === "quarantine" ? "abuse" : "benign-context",
+              decision === "reject" || decision === "quarantine" ? "harassment" : "benign-context",
             provider_status: decision === "provider-error" ? "error" : "ok",
           });
           return decision === "wrong-digest"
@@ -572,7 +572,7 @@ test("a steward's held synthesis stays in the author's sponsor review queue", as
       draftScreening(f.db, steward, (input) =>
         syntheticScreeningObservation(input, {
           decision: "quarantine",
-          coarse_category: "abuse",
+          coarse_category: "harassment",
           provider_status: "ok",
         }),
       ),
@@ -633,7 +633,7 @@ test("draft publication stores its contextual warning and replays without screen
       category: "off-topic",
       action: "published-with-warning",
       notice: "off-scope",
-    };
+    } as const;
     expect(provenance.public_action).toEqual(notice);
     const page = await readSynthesisPage(f.db, PROBLEM, {}, (value) =>
       SynthesisItemSchema.parse(value),
@@ -888,7 +888,10 @@ test("Fable §6.1: draft synthesis stays private until steward/sponsor publishes
       return app.fetch(
         new Request(`https://a.asimposium.org${path}`, {
           method,
-          headers: { ...serviceEnvelopeHeaders(envelope), ...(body ? { "content-type": "application/json" } : {}) },
+          headers: {
+            ...serviceEnvelopeHeaders(envelope),
+            ...(body ? { "content-type": "application/json" } : {}),
+          },
           ...(body ? { body } : {}),
         }),
         env,
@@ -932,7 +935,13 @@ test("Fable §6.1: draft synthesis stays private until steward/sponsor publishes
     // larger than the old 256 KiB transport ceiling. No row may be clipped.
     const path = `/v1/sponsors/problems/${PROBLEM}/syntheses/drafts`;
     const draftPage = (body: unknown, principal = SPONSOR) =>
-      signedSponsorReq("POST", path, "sponsor.syntheses.drafts.list", principal, JSON.stringify(body));
+      signedSponsorReq(
+        "POST",
+        path,
+        "sponsor.syntheses.drafts.list",
+        principal,
+        JSON.stringify(body),
+      );
     const copy = f.sql.query(`INSERT INTO synthesis_drafts
       (synthesis_id, problem_id, covers_through, body_md, anchors_json, omitted_json, selection_policy,
        closing_resolution_json, dropped_single_author_count, author_fellow_id, author_sponsor_id,
@@ -944,8 +953,12 @@ test("Fable §6.1: draft synthesis stays private until steward/sponsor publishes
     for (let n = 1; n <= 51; n++) {
       const id = `SYNTH-${String(n).padStart(26, "0")}`;
       expected.add(id);
-      copy.run(id, n === 51 ? "∑".repeat(60_000) : "Bounded result.",
-        n === 51 ? JSON.stringify(Array(20).fill("∑".repeat(1900))) : "[]", draftJson.synthesis_id);
+      copy.run(
+        id,
+        n === 51 ? "∑".repeat(60_000) : "Bounded result.",
+        n === 51 ? JSON.stringify(Array(20).fill("∑".repeat(1900))) : "[]",
+        draftJson.synthesis_id,
+      );
     }
     let after: { created_at: string; synthesis_id: string } | undefined;
     const seen: string[] = [];
@@ -954,21 +967,36 @@ test("Fable §6.1: draft synthesis stays private until steward/sponsor publishes
       expect(res.status).toBe(200);
       const bytes = await res.arrayBuffer();
       expect(bytes.byteLength).toBeLessThanOrEqual(2 * 1024 * 1024);
-      const current = SynthesisDraftListResponseSchema.parse(JSON.parse(new TextDecoder().decode(bytes)));
+      const current = SynthesisDraftListResponseSchema.parse(
+        JSON.parse(new TextDecoder().decode(bytes)),
+      );
       if (bytes.byteLength > 256 * 1024) expect(current.drafts).toHaveLength(1);
       for (const row of current.drafts) {
-        if (row.synthesis_id === `SYNTH-${"51".padStart(26, "0")}`) expect(row.body_md.length).toBe(60_000);
+        if (row.synthesis_id === `SYNTH-${"51".padStart(26, "0")}`)
+          expect(row.body_md.length).toBe(60_000);
         seen.push(row.synthesis_id);
       }
       if (current.next_after) {
         const last = current.drafts.at(-1);
-        expect(current.next_after).toEqual({ created_at: last?.created_at, synthesis_id: last?.synthesis_id });
+        if (last === undefined) throw new Error("A draft continuation requires a final row.");
+        expect(current.next_after).toEqual({
+          created_at: last.created_at,
+          synthesis_id: last.synthesis_id,
+        });
       }
       after = current.next_after;
       expect(seen.length).toBeLessThanOrEqual(expected.size);
     } while (after);
     expect(seen).toEqual([...expected].sort().reverse());
-    const unrelated = await draftPage({ after: { created_at: parsedList.drafts[0]?.created_at, synthesis_id: draftJson.synthesis_id } }, OTHER_SPONSOR);
+    const unrelated = await draftPage(
+      {
+        after: {
+          created_at: parsedList.drafts[0]?.created_at,
+          synthesis_id: draftJson.synthesis_id,
+        },
+      },
+      OTHER_SPONSOR,
+    );
     expect(SynthesisDraftListResponseSchema.parse(await unrelated.json()).drafts).toEqual([]);
     expect((await draftPage({ after: { synthesis_id: draftJson.synthesis_id } })).status).toBe(422);
 

@@ -12,10 +12,12 @@ export function ReportPanel({
   problemId,
   target,
   sponsorId,
+  commentaryCursor,
 }: {
   readonly problemId: string;
   readonly target: string;
   readonly sponsorId: string;
+  readonly commentaryCursor?: number;
 }) {
   const label = target === "problem" ? "this problem" : target;
   return (
@@ -28,7 +30,11 @@ export function ReportPanel({
         content. Disagreement belongs in reviews and evidence. Reports are private; reports from
         three independent sponsors hide content pending trained review, which is not a verdict.
       </p>
-      <ReportForm sponsorId={sponsorId} target={{ problem_id: problemId, target }} />
+      <ReportForm
+        sponsorId={sponsorId}
+        target={{ problem_id: problemId, target }}
+        commentaryCursor={commentaryCursor}
+      />
     </section>
   );
 }
@@ -37,16 +43,18 @@ export function ReportPanel({
 export function ReportLink({
   problemId,
   target,
+  commentaryCursor,
 }: {
   readonly problemId: string;
   readonly target: string;
+  readonly commentaryCursor?: number;
 }) {
   const parsed = parseReportTarget(problemId, target);
   if (parsed === null) return null;
   return (
     <p className="report-link quiet">
       Conduct concern (not a scientific disagreement)?{" "}
-      <Link href={reportPageHref(parsed)} rel="nofollow" prefetch={false}>
+      <Link href={reportPageHref(parsed, commentaryCursor)} rel="nofollow" prefetch={false}>
         Report {target === "problem" ? "this problem" : target}
       </Link>
     </p>

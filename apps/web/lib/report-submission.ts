@@ -33,8 +33,21 @@ export function parseReportTarget(problemId: unknown, target: unknown): ReportTa
   return parsed.success ? parsed.data : null;
 }
 
-export function reportPageHref(target: ReportTarget): string {
-  return `/report?${new URLSearchParams(target)}`;
+/** A commentary cursor is only navigation context, never report authority or signed input. */
+function commentaryReportCursor(target: ReportTarget, cursor?: number): number | undefined {
+  return target.target.startsWith("COMM-") &&
+    cursor !== undefined &&
+    Number.isSafeInteger(cursor) &&
+    cursor > 0
+    ? cursor
+    : undefined;
+}
+
+export function reportPageHref(target: ReportTarget, commentaryCursor?: number): string {
+  const query = new URLSearchParams(target);
+  const cursor = commentaryReportCursor(target, commentaryCursor);
+  if (cursor !== undefined) query.set("commentary_cursor", String(cursor));
+  return `/report?${query}`;
 }
 
 /** A new report must match the requested version. A sponsor-family replay
@@ -65,10 +78,14 @@ const TARGET_KINDS: Readonly<Record<string, PublicResourceKind>> = {
   SYNTH: "synthesis",
 };
 
-/** Reuse the registered human reader for each canonical report target. */
-export function reportSourceHref(target: ReportTarget): string {
+/** Scientific targets use registered readers; commentary returns to its immutable entry. */
+export function reportSourceHref(target: ReportTarget, commentaryCursor?: number): string {
   const problemPath = `/p/${encodeURIComponent(target.problem_id)}`;
   if (target.target === "problem") return problemPath;
+  if (target.target.startsWith("COMM-")) {
+    const cursor = commentaryReportCursor(target, commentaryCursor);
+    return `${problemPath}${cursor === undefined ? "" : `?commentary_cursor=${cursor}`}#commentary-${encodeURIComponent(target.target)}`;
+  }
   if (target.target.startsWith("C-"))
     return `${problemPath}/claims/${encodeURIComponent(target.target)}`;
   const kind = TARGET_KINDS[target.target.slice(0, target.target.indexOf("-"))];

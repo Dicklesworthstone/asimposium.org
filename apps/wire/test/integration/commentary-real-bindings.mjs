@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import {
+  AdminReportDetailSchema,
   CommentaryItemSchema,
   CommentaryListResponseSchema,
   ProblemDocumentSchema,
+  ReportResponseSchema,
   ScreeningPromotionDeniedResponseSchema,
   ScreeningPromotionHoldResponseSchema,
 } from "@asimposium/contracts";
@@ -416,6 +418,141 @@ await runLocalWorkerJourney(async (context) => {
   assert.equal(superResult.supersedes_commentary_id, comm1Id);
   const comm2Id = superResult.commentary_id;
 
+  // Reports identify the exact human entry: replacing it never rewrites its
+  // source, and a sponsor plus that sponsor's Fellow remain one reporting voice.
+  const sponsorC = "usr_commentary_reporter_c";
+  const sponsorD = "usr_commentary_reporter_d";
+  await enroll("commentary-reporter-c", sponsorC);
+  await enroll("commentary-reporter-d", sponsorD);
+  const reportNote = "PRIVATE_COMMENTARY_REPORT_NOTE: inspect the identified entry.";
+  const reportBody = (target) => ({
+    problem_id: problemId,
+    target,
+    reason: "privacy",
+    note: reportNote,
+  });
+  const report = async (sponsor, target, expected = 201) =>
+    ReportResponseSchema.parse(
+      await sponsorCall(
+        sponsor,
+        "POST",
+        "/v1/sponsors/reports",
+        "sponsor.report",
+        reportBody(target),
+        expected,
+      ),
+    );
+  const originalReport = await report(sponsorB, comm1Id);
+  const replacementReport = await report(sponsorB, comm2Id);
+  assert.notEqual(originalReport.report_id, replacementReport.report_id);
+  const sameFamily = ReportResponseSchema.parse(
+    await call("/v1/reports", reportBody(comm2Id), authorB, 200),
+  );
+  assert.equal(sameFamily.report_id, replacementReport.report_id);
+  assert.equal(sameFamily.deduplicated, true);
+  assert.equal(sameFamily.target_hidden, false);
+  assert.equal((await report(sponsorC, comm2Id)).target_hidden, false);
+  const previousFace = await worker.fetch(`${origin}/p/${problemId}/commentary.json`);
+  const previousTag = previousFace.headers.get("etag");
+  assert.equal((await report(sponsorD, comm2Id)).target_hidden, true);
+  for (const path of commentaryPaths) {
+    const response = await worker.fetch(`${origin}${path}`);
+    assert.equal(response.status, 200);
+    const body = await response.text();
+    assert.ok(body.includes(postResult.body), "the original entry remains readable");
+    assert.ok(!body.includes(superResult.body), "the reported replacement is held on every face");
+    assert.ok(!body.includes(reportNote));
+  }
+  const conditional = await worker.fetch(`${origin}/p/${problemId}/commentary.json`, {
+    headers: { "If-None-Match": previousTag ?? "" },
+  });
+  assert.equal(conditional.status, 200, "a visibility hold invalidates the earlier representation");
+  assert.ok(!(await conditional.text()).includes(superResult.body));
+
+  const reportDetail = async (reportId) =>
+    AdminReportDetailSchema.parse(
+      await operatorCall(
+        "GET",
+        `/v1/operators/reports/${reportId}`,
+        "operator.reports.read",
+        undefined,
+        200,
+        "/v1/operators/reports/:reportId",
+      ),
+    );
+  for (const [receipt, item, type] of [
+    [originalReport, postResult, "commentary.posted"],
+    [replacementReport, superResult, "commentary.superseded"],
+  ]) {
+    const detail = await reportDetail(receipt.report_id);
+    assert.equal(detail.report.target_kind, "commentary");
+    assert.equal(detail.target_ref, item.commentary_id);
+    assert.equal(detail.note, reportNote);
+    assert.equal(detail.source.state, "available");
+    assert.equal(detail.source.event_type, type);
+    assert.equal(detail.source.object_id, item.commentary_id);
+    assert.equal(detail.source.sponsor_id, sponsorA);
+    assert.equal(detail.source.fellow_id, null);
+    assert.equal(detail.source.session_id, null);
+    assert.equal(JSON.parse(detail.source.payload_json).body, item.body);
+  }
+  const reportHistory = await sponsorCall(
+    sponsorB,
+    "POST",
+    "/v1/sponsors/reports/list",
+    "sponsor.reports.list",
+    {},
+  );
+  for (const target of [comm1Id, comm2Id])
+    assert.ok(reportHistory.reports.some((entry) => entry.target === target));
+  const reportsQueue = await operatorCall("GET", "/v1/operators/reports", "operator.reports.list");
+  assert.ok(!JSON.stringify(reportsQueue).includes(reportNote));
+  assert.ok(!JSON.stringify(reportsQueue).includes(superResult.body));
+
+  await operatorCall(
+    "POST",
+    "/v1/operators/reports/resolution",
+    "operator.reports.resolve",
+    {
+      report_id: replacementReport.report_id,
+      resolution: "dismiss",
+      reason: "The retained commentary does not justify this hold.",
+    },
+    200,
+    "/v1/operators/reports/resolution",
+    "commentary-report-dismiss",
+  );
+  assert.equal((await reportDetail(originalReport.report_id)).report.status, "pending");
+  assert.equal((await reportDetail(replacementReport.report_id)).report.status, "dismissed");
+  assert.ok(
+    (await (await worker.fetch(`${origin}/p/${problemId}/commentary.json`)).text()).includes(
+      superResult.body,
+    ),
+  );
+  for (const action of ["hide", "restore"]) {
+    await operatorCall(
+      "POST",
+      "/v1/operators/content-control",
+      "operator.content.control",
+      {
+        target_id: `${problemId}/${comm2Id}`,
+        target_kind: "commentary",
+        action,
+        reason: "Reviewed this exact replacement commentary entry.",
+      },
+      200,
+      "/v1/operators/content-control",
+      `commentary-control-${action}`,
+    );
+    const publicBody = await (
+      await worker.fetch(`${origin}/p/${problemId}/commentary.json`)
+    ).text();
+    assert.equal(publicBody.includes(superResult.body), action === "restore");
+    assert.ok(publicBody.includes(postResult.body));
+  }
+  const malformedReport = await call("/v1/reports", reportBody(`${comm2Id}@1`), authorB, 422);
+  assert.equal(ProblemDocumentSchema.parse(malformedReport).code, "REPORT_BODY_INVALID");
+
   // Attempting to supersede an already superseded commentary -> 409 conflict
   const alreadySuperResult = await sponsorCall(
     sponsorA,
@@ -779,13 +916,26 @@ await runLocalWorkerJourney(async (context) => {
   assert.deepEqual(await publicState(), afterDelete);
   assert.equal(await fixtures.screeningCalls(), screensAfterDelete);
 
-  // Genuine source redaction wins over retained commentary bytes and old replay.
+  // Genuine source redaction wins over retained commentary bytes, report review, and old replay.
+  const retainedReport = await report(sponsorC, historical.commentary_id);
   const historicalEvent = await env.DB.prepare(
     "SELECT event_id FROM problem_commentaries WHERE id=?",
   )
     .bind(historical.commentary_id)
     .first();
   await fixtures.redactPublicContent(historicalEvent.event_id);
+  const redactedReport = await reportDetail(retainedReport.report_id);
+  assert.deepEqual(redactedReport.source, { state: "unavailable", reason: "redacted" });
+  assert.ok(!JSON.stringify(redactedReport).includes(historicalBody.body));
+  const redactedIntake = await sponsorCall(
+    sponsorD,
+    "POST",
+    "/v1/sponsors/reports",
+    "sponsor.report",
+    reportBody(historical.commentary_id),
+    404,
+  );
+  assert.equal(ProblemDocumentSchema.parse(redactedIntake).code, "REPORT_TARGET_NOT_FOUND");
   for (const path of commentaryPaths) {
     const response = await worker.fetch(`${origin}${path}`);
     assert.equal(response.status, 200);

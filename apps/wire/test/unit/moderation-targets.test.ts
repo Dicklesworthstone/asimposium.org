@@ -35,6 +35,8 @@ const TARGETS = [
   ["conflict", "CF-1", "conflict.normalized"],
   ["synthesis", "SYNTH-1", "synthesis.created"],
   ["retraction", "R-2", "object.retracted"],
+  ["commentary", "COMM-0123456789abcdef", "commentary.posted"],
+  ["commentary", "COMM-abcdef0123456789", "commentary.superseded"],
 ] as const;
 type Target = (typeof TARGETS)[number];
 type Fixture = Awaited<ReturnType<typeof directiveDisclosureFixture>>;
@@ -144,38 +146,35 @@ function report(f: Fixture, target: Target, identity: Reporter) {
   });
 }
 
-describe("published scientific target moderation", () => {
+describe("published scientific and commentary target moderation", () => {
   for (const target of TARGETS) {
     const [kind, id] = target;
-    test(
-      kind + ": audited hide and restore retain immutable publications and receipt replay",
-      async () => {
-        const f = await fixture();
-        await admit(f, target);
-        const publications = publishedRows(f);
-        const hidden = await control(f, target, "hide", "hide-target");
-        expect(hidden.status).toBe(200);
-        const receipt = await hidden.text();
-        expect((await currentContentControl(f.db, DISCLOSURE_PROBLEM, id))?.visibility).toBe(
-          "hidden",
-        );
-        expect((await control(f, target, "restore", "restore-target")).status).toBe(200);
-        const before = counts(f);
-        const replay = await control(f, target, "hide", "hide-target");
-        expect(replay.status).toBe(200);
-        expect(await replay.text()).toBe(receipt);
-        expect((await currentContentControl(f.db, DISCLOSURE_PROBLEM, id))?.visibility).toBe(
-          "visible",
-        );
-        expect(counts(f)).toEqual(before);
-        expect(counts(f)).toMatchObject({ audits: 2, receipts: 2, controls: 2, logs: 2 });
-        expect(publishedRows(f)).toEqual(publications);
-        const log = JSON.stringify(f.sql.query("SELECT * FROM moderation_log").all());
-        expect(log).not.toContain("PRIVATE-");
-      },
-    );
+    test(kind + " " + id + ": audited controls preserve publications and replay", async () => {
+      const f = await fixture();
+      await admit(f, target);
+      const publications = publishedRows(f);
+      const hidden = await control(f, target, "hide", "hide-target");
+      expect(hidden.status).toBe(200);
+      const receipt = await hidden.text();
+      expect((await currentContentControl(f.db, DISCLOSURE_PROBLEM, id))?.visibility).toBe(
+        "hidden",
+      );
+      expect((await control(f, target, "restore", "restore-target")).status).toBe(200);
+      const before = counts(f);
+      const replay = await control(f, target, "hide", "hide-target");
+      expect(replay.status).toBe(200);
+      expect(await replay.text()).toBe(receipt);
+      expect((await currentContentControl(f.db, DISCLOSURE_PROBLEM, id))?.visibility).toBe(
+        "visible",
+      );
+      expect(counts(f)).toEqual(before);
+      expect(counts(f)).toMatchObject({ audits: 2, receipts: 2, controls: 2, logs: 2 });
+      expect(publishedRows(f)).toEqual(publications);
+      const log = JSON.stringify(f.sql.query("SELECT * FROM moderation_log").all());
+      expect(log).not.toContain("PRIVATE-");
+    });
 
-    test(kind + ": independent sponsors can hold and review the publication", async () => {
+    test(kind + " " + id + ": independent sponsors hold and review", async () => {
       const f = await fixture();
       await admit(f, target);
       const first = await report(f, target, reporter("family-one"));
@@ -227,6 +226,8 @@ describe("published scientific target moderation", () => {
     await publish(f, "hypothesis", "H-1", "hypothesis.created");
     await publish(f, "hypothesis", "H-2", "hypothesis.deferred");
     await publish(f, "hypothesis", "H-3", "hypothesis.created", 2);
+    await publish(f, "commentary", "COMM-0000000000000001", "commentary.tombstoned");
+    await publish(f, "commentary", "COMM-0000000000000002", "commentary.posted", 2);
     const before = counts(f);
     for (const [target, kind] of [
       ["C-1@1", "claim"],
@@ -235,6 +236,9 @@ describe("published scientific target moderation", () => {
       ["H-2", "hypothesis"],
       ["H-3", "hypothesis"],
       ["H-999", "hypothesis"],
+      ["COMM-0000000000000001", "commentary"],
+      ["COMM-0000000000000002", "commentary"],
+      ["COMM-0000000000000003", "commentary"],
     ] as const) {
       const result = await operatorContentControl(
         f.db,

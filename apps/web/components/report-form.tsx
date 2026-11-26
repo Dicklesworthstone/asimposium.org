@@ -26,14 +26,16 @@ const REASON_LABELS: Readonly<Record<(typeof REPORT_REASONS)[number], string>> =
 export function ReportForm({
   sponsorId,
   target,
+  commentaryCursor,
 }: {
   readonly sponsorId: string;
   readonly target: ReportTarget;
+  readonly commentaryCursor?: number;
 }) {
   const [state, action, pending] = useActionState(
     reportContentAction.bind(null, sponsorId, target),
     INITIAL_STATE,
-    reportPageHref(target),
+    reportPageHref(target, commentaryCursor),
   );
   const [reason, setReason] = useState(state.status === "refused" ? state.draft.reason : "");
   const [note, setNote] = useState(state.status === "refused" ? state.draft.note : "");

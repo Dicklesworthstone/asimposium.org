@@ -25,9 +25,9 @@ export const REPORT_REASONS = [
 export const ReportReasonSchema = z.enum(REPORT_REASONS);
 export type ReportReason = z.infer<typeof ReportReasonSchema>;
 
-/** Public objects a report may name: the problem itself, or one ledger object on it. */
+/** Public objects a report may name: the problem, a scientific object, or sponsor commentary. */
 export const REPORT_TARGET_PATTERN =
-  /^(?:problem|C-[0-9]+(?:@[1-9][0-9]{0,8})?|(?:H|E|R|G|L|DE|Q|CF|SYNTH)-[0-9A-Za-z-]{1,78})$/;
+  /^(?:problem|C-[0-9]+(?:@[1-9][0-9]{0,8})?|(?:H|E|R|G|L|DE|Q|CF|SYNTH)-[0-9A-Za-z-]{1,78}|COMM-[a-f0-9]{16,64})$/;
 
 /**
  * POST /v1/reports. The reporter is the authenticated principal; its sponsor

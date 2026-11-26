@@ -142,6 +142,7 @@ if (process.env.ASIMPOSIUM_REPORT_ACTION_TEST_CHILD !== import.meta.path) {
         { problem_id: "../private", target: "C-1" },
         { problem_id: TARGET.problem_id, target: "W-private" },
         { problem_id: TARGET.problem_id, target: "C-1@0" },
+        { problem_id: TARGET.problem_id, target: "COMM-0123456789abcdef@1" },
       ])
         expect((await submit(SPONSOR, target, { status: "idle" }, form())).status).toBe("refused");
       expect(
@@ -173,6 +174,7 @@ if (process.env.ASIMPOSIUM_REPORT_ACTION_TEST_CHILD !== import.meta.path) {
       value.set("problem_id", "P-FORGED");
       value.set("target", "C-999");
       value.set("sponsor_id", "usr_forged");
+      value.set("commentary_cursor", "999");
       expect(await submit(SPONSOR, TARGET, { status: "idle" }, value)).toEqual({
         status: "committed",
         receipt: RECEIPT,
@@ -255,7 +257,7 @@ if (process.env.ASIMPOSIUM_REPORT_ACTION_TEST_CHILD !== import.meta.path) {
       expect(calls).toHaveLength(1);
     });
 
-    test("canonical scientific target kinds and exact claim versions reach the same report writer", async () => {
+    test("canonical scientific and commentary targets reach the same report writer", async () => {
       for (const id of [
         "problem",
         "C-1@2",
@@ -268,6 +270,7 @@ if (process.env.ASIMPOSIUM_REPORT_ACTION_TEST_CHILD !== import.meta.path) {
         "Q-1",
         "CF-1",
         "SYNTH-1",
+        "COMM-0123456789abcdef",
       ]) {
         const target: ReportTarget = { problem_id: TARGET.problem_id, target: id };
         result = { ok: true, data: { ...RECEIPT, target: id } };
@@ -275,6 +278,14 @@ if (process.env.ASIMPOSIUM_REPORT_ACTION_TEST_CHILD !== import.meta.path) {
         expect(state.status).toBe("committed");
         expect(calls.at(-1)?.request).toEqual({ ...target, reason: "spam" });
       }
+      const commentary = { problem_id: TARGET.problem_id, target: "COMM-0123456789abcdef" };
+      result = {
+        ok: true,
+        data: { ...RECEIPT, target: "COMM-abcdef0123456789", deduplicated: true },
+      };
+      const mismatched = await submit(SPONSOR, commentary, { status: "idle" }, form("spam", ""));
+      expect(mismatched.status).toBe("refused");
+      if (mismatched.status === "refused") expect(mismatched.uncertain).toBe(true);
     });
 
     test("a forged previous success cannot substitute for a new authoritative receipt", async () => {

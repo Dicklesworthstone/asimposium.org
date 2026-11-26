@@ -7,12 +7,16 @@ import {
 } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
 
-const CREATION_EVENT_SQL =
-  "CASE e.object_kind " +
-  MODERATION_LEDGER_TARGETS.map(
-    ({ kind, created }) => "WHEN '" + kind + "' THEN '" + created + "'",
-  ).join(" ") +
-  " END";
+function creationEventTypes(target: (typeof MODERATION_LEDGER_TARGETS)[number]): readonly string[] {
+  return "alsoCreated" in target ? [target.created, target.alsoCreated] : [target.created];
+}
+
+const CREATION_EVENT_SQL = MODERATION_LEDGER_TARGETS.map(
+  (target) =>
+    `(e.object_kind = '${target.kind}' AND e.type IN (${creationEventTypes(target)
+      .map((type) => `'${type}'`)
+      .join(",")}))`,
+).join(" OR ");
 
 /** Trusted SQL aliases only. Generic gap leases use the legacy proof_gap kind;
  * their three known coordination events do not create another scientific object.
@@ -78,6 +82,7 @@ export function moderationTargetGuard(
     (requirePublication && !moderationObjectIdIsValid(target.targetKind, target.targetRef))
   )
     return denied;
+  const creationTypes = creationEventTypes(descriptor);
   return {
     sql: [
       "EXISTS (SELECT 1 FROM problems control_scope",
@@ -91,7 +96,7 @@ export function moderationTargetGuard(
             "WHERE control_creation.problem_id = control_identity.problem_id",
             "AND control_creation.object_id = control_identity.object_id",
             "AND control_creation.object_kind = control_identity.object_kind",
-            "AND control_creation.object_version = 1 AND control_creation.type = ?",
+            `AND control_creation.object_version = 1 AND control_creation.type IN (${creationTypes.map(() => "?").join(",")})`,
             "AND control_creation.seq <= control_scope.public_seq)",
           ].join(" ")
         : "",
@@ -101,7 +106,7 @@ export function moderationTargetGuard(
       target.problemId,
       target.targetRef,
       target.targetKind,
-      ...(requirePublication ? [descriptor.created] : []),
+      ...(requirePublication ? creationTypes : []),
     ],
   };
 }
@@ -141,7 +146,7 @@ export async function resolveModerationTarget(
         "SELECT e.object_kind FROM events e JOIN problems p ON p.id = e.problem_id",
         "WHERE p.id = ? AND p.status <> 'private-draft' AND p.public_seq > 0",
         "AND e.object_id = ? AND e.object_version = 1 AND e.seq <= p.public_seq",
-        "AND e.type = " + CREATION_EVENT_SQL,
+        "AND (" + CREATION_EVENT_SQL + ")",
         targetKind === undefined ? "" : "AND e.object_kind = ?",
         "AND NOT " + conflictingModerationIdentitySql("e", "p.public_seq"),
         "ORDER BY e.seq ASC LIMIT 1",

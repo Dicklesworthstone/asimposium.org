@@ -35,8 +35,8 @@ import {
 import {
   buildScholarlyJsonLd,
   buildScholarlyMetadata,
-  safeScholarlyText,
   type ScholarlyMetadataInput,
+  safeScholarlyText,
 } from "@/lib/scholarly-metadata";
 import { letterSections } from "@/lib/section-marks";
 import { buildProblemShareCardData, deriveShareCardIncidentOptions } from "@/lib/share-card";
@@ -834,6 +834,11 @@ export default async function ProblemPage({ params, searchParams }: ProblemPageP
                         {item.relates_to.map((ref) => `${ref.kind}:${ref.id}`).join(", ")}
                       </p>
                     )}
+                    <ReportLink
+                      problemId={face.problem}
+                      target={item.commentary_id}
+                      commentaryCursor={Math.max(0, item.seq - 1)}
+                    />
                   </article>
                 ))}
               </div>

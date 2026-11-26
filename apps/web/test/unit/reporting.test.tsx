@@ -35,7 +35,7 @@ if (process.env.ASIMPOSIUM_REPORT_PAGE_TEST_CHILD !== import.meta.path) {
         );
       if (exitCode !== 0) throw new Error(`Report page assertions failed:\n${stdout}\n${stderr}`);
       expect(exitCode).toBe(0);
-      expect(stderr).toMatch(/\b6 pass\b/);
+      expect(stderr).toMatch(/\b7 pass\b/);
       expect(stderr).toMatch(/\b0 fail\b/);
     } finally {
       clearTimeout(deadline);
@@ -83,6 +83,7 @@ if (process.env.ASIMPOSIUM_REPORT_PAGE_TEST_CHILD !== import.meta.path) {
         "Q-1",
         "CF-1",
         "SYNTH-1",
+        "COMM-0123456789abcdef",
       ])
         expect(parseReportTarget("P-4DSP", target)).toEqual({ problem_id: "P-4DSP", target });
       for (const target of [
@@ -91,6 +92,8 @@ if (process.env.ASIMPOSIUM_REPORT_PAGE_TEST_CHILD !== import.meta.path) {
         "C-1@0",
         "//another.test",
         "E-1?note=secret",
+        "COMM-0123456789ABCDEF",
+        "COMM-0123456789abcdef@1",
       ])
         expect(parseReportTarget("P-4DSP", target)).toBeNull();
       expect(parseReportTarget(["P-4DSP"], "C-1")).toBeNull();
@@ -109,6 +112,7 @@ if (process.env.ASIMPOSIUM_REPORT_PAGE_TEST_CHILD !== import.meta.path) {
         "Q-1": "/r/p/P-4DSP/questions/Q-1",
         "CF-1": "/r/p/P-4DSP/conflicts/CF-1",
         "SYNTH-1": "/p/P-4DSP/syntheses/SYNTH-1",
+        "COMM-0123456789abcdef": "/p/P-4DSP#commentary-COMM-0123456789abcdef",
       };
       for (const [target, expected] of Object.entries(targets)) {
         const requested = { problem_id: "P-4DSP", target };
@@ -133,9 +137,9 @@ if (process.env.ASIMPOSIUM_REPORT_PAGE_TEST_CHILD !== import.meta.path) {
       expect(html).toContain("C-1@2");
     });
 
-    test("evidence and review targets present an operable form instead of the old invalid-link message", async () => {
+    test("scientific and commentary targets present an operable reporting form", async () => {
       sponsor = "usr_report_page";
-      for (const target of ["E-1", "R-1", "Q-1"]) {
+      for (const target of ["E-1", "R-1", "Q-1", "COMM-0123456789abcdef"]) {
         const html = renderToStaticMarkup(
           await Page({ searchParams: Promise.resolve({ problem_id: "P-4DSP", target }) }),
         );
@@ -156,6 +160,45 @@ if (process.env.ASIMPOSIUM_REPORT_PAGE_TEST_CHILD !== import.meta.path) {
       expect(reportPageHref({ problem_id: "P-4DSP", target: "C-1@2" })).toBe(
         "/report?problem_id=P-4DSP&target=C-1%402",
       );
+    });
+
+    test("commentary links preserve the exact paginated entry without widening report authority", async () => {
+      const target = { problem_id: "P-4DSP", target: "COMM-0123456789abcdef" };
+      const source = "/p/P-4DSP?commentary_cursor=79#commentary-COMM-0123456789abcdef";
+      const report = "/report?problem_id=P-4DSP&target=COMM-0123456789abcdef&commentary_cursor=79";
+      expect(reportSourceHref(target, 79)).toBe(source);
+      expect(reportPageHref(target, 79)).toBe(report);
+      const link = renderToStaticMarkup(
+        ReportLink({ problemId: target.problem_id, target: target.target, commentaryCursor: 79 }),
+      );
+      expect(link).toContain(report.replaceAll("&", "&amp;"));
+      expect(link).toContain("Report COMM-0123456789abcdef");
+      for (const principal of ["usr_report_page", null]) {
+        sponsor = principal;
+        const html = renderToStaticMarkup(
+          await Page({
+            searchParams: Promise.resolve({ ...target, commentary_cursor: "79" }),
+          }),
+        );
+        expect(html).toContain(`href="${source}">← Back</a>`);
+        expect(html).toContain(principal === null ? "Sign in with Google" : "File report");
+      }
+      for (const cursor of [-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, 9007199254740992]) {
+        expect(reportPageHref(target, cursor)).toBe(reportPageHref(target));
+        expect(reportSourceHref(target, cursor)).toBe(reportSourceHref(target));
+      }
+      expect(reportPageHref({ problem_id: "P-4DSP", target: "C-1@2" }, 79)).toBe(
+        "/report?problem_id=P-4DSP&target=C-1%402",
+      );
+      for (const cursor of ["../private", "9007199254740992", ["79", "80"]]) {
+        const html = renderToStaticMarkup(
+          await Page({
+            searchParams: Promise.resolve({ ...target, commentary_cursor: cursor }),
+          }),
+        );
+        expect(html).toContain(`href="${reportSourceHref(target)}">← Back</a>`);
+        expect(html).not.toContain("commentary_cursor=");
+      }
     });
 
     test("public conduct links support ledger objects and refuse private target names", () => {

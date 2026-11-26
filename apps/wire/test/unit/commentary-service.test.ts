@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   AdminQuarantineCaseDetailSchema,
   ProblemDocumentSchema,
+  ReportResponseSchema,
   ScreeningPromotionDeniedResponseSchema,
   ScreeningPromotionHoldResponseSchema,
   type SponsorCommentaryPostRequest,
@@ -19,8 +20,16 @@ import {
   sponsorScreeningCases,
   submitScreeningAppeal,
 } from "../../src/moderation/appeals-store.ts";
-import { operatorQuarantineCase } from "../../src/moderation/operator-http.ts";
 import {
+  operatorContentControl,
+  operatorQuarantineCase,
+  operatorReportResolution,
+  operatorReportsQueue,
+} from "../../src/moderation/operator-http.ts";
+import { readOperatorReportDetail } from "../../src/moderation/report-detail.ts";
+import { fileReportRequest } from "../../src/moderation/router.ts";
+import {
+  currentContentControl,
   decideScreeningCase,
   getScreeningCase,
   listPendingCases,
@@ -591,6 +600,207 @@ test("public faces and replay cannot serve a hidden or redacted retained project
     await refusal(await f.post(data, "redaction-key"), 404, "COMMENTARY_NOT_FOUND");
   }));
 
+test("commentary reports preserve sponsor authorship, exact entries, and independent holds", () =>
+  using(async (f) => {
+    const note = "PRIVATE-COMMENTARY-REPORT-NOTE: inspect this exact entry.";
+    const report = (target: string, sponsor = OTHER, fellow: string | null = null) =>
+      fileReportRequest(
+        f.db,
+        {
+          reporterClass: fellow === null ? "sponsor" : "fellow",
+          reporterSponsorId: sponsor,
+          reporterFellowId: fellow,
+        },
+        { problem_id: PROBLEM, target, reason: "privacy", note },
+      );
+    const original = await f.post(f.input({ body: "ORIGINAL_COMMENTARY_REPORT_CANARY" }));
+    assert.ok(original.ok);
+    if (!original.ok) return;
+    const initial = await report(original.item.commentary_id);
+    assert.equal(initial.status, 201);
+    const originalReceipt = ReportResponseSchema.parse(await initial.json());
+    const replacement = await f.post(
+      f.input({
+        body: "REPLACEMENT_COMMENTARY_REPORT_CANARY",
+        supersedes_commentary_id: original.item.commentary_id,
+      }),
+    );
+    assert.ok(replacement.ok);
+    if (!replacement.ok) return;
+    const replacementReport = await report(replacement.item.commentary_id);
+    assert.equal(replacementReport.status, 201);
+    const replacementReceipt = ReportResponseSchema.parse(await replacementReport.json());
+    assert.notEqual(originalReceipt.report_id, replacementReceipt.report_id);
+    assert.equal(replacementReceipt.target, replacement.item.commentary_id);
+    const publications = () =>
+      f.sql
+        .query(`SELECT e.*, c.payload_json FROM events e
+        JOIN event_content c ON c.event_id=e.id
+        WHERE e.problem_id=? AND e.object_kind='commentary' ORDER BY e.seq`)
+        .all(PROBLEM);
+    const immutable = publications();
+
+    for (const fellow of ["commentary-reporter-one", "commentary-reporter-two"]) {
+      const duplicate = await report(replacement.item.commentary_id, OTHER, fellow);
+      assert.equal(duplicate.status, 200);
+      assert.deepEqual(ReportResponseSchema.parse(await duplicate.json()), {
+        ...replacementReceipt,
+        deduplicated: true,
+      });
+    }
+    assert.equal(f.count("reports"), 2);
+    assert.equal(
+      await currentContentControl(f.db, PROBLEM, replacement.item.commentary_id),
+      undefined,
+    );
+    assert.equal(
+      (await report(replacement.item.commentary_id, "usr_commentary_reporter_c")).status,
+      201,
+    );
+    const threshold = await report(replacement.item.commentary_id, "usr_commentary_reporter_d");
+    assert.equal(threshold.status, 201);
+    assert.equal(ReportResponseSchema.parse(await threshold.json()).target_hidden, true);
+    assert.equal(
+      (await currentContentControl(f.db, PROBLEM, replacement.item.commentary_id))?.source,
+      "community-reports",
+    );
+    const hidden = await f.service.listCommentaries(PROBLEM, { cursor: 0, limit: 50 });
+    assert.deepEqual(
+      hidden?.commentaries.map((item) => item.commentary_id),
+      [original.item.commentary_id],
+    );
+    assert.ok(!JSON.stringify(hidden).includes("REPLACEMENT_COMMENTARY_REPORT_CANARY"));
+
+    for (const [entry, receipt, eventType] of [
+      [original.item, originalReceipt, "commentary.posted"],
+      [replacement.item, replacementReceipt, "commentary.superseded"],
+    ] as const) {
+      const detail = await readOperatorReportDetail(f.db, receipt.report_id);
+      assert.ok(detail);
+      assert.equal(detail.target_ref, entry.commentary_id);
+      assert.equal(detail.report.target_kind, "commentary");
+      assert.equal(detail.note, note);
+      if (detail.source.state !== "available") throw new Error("Missing commentary source.");
+      assert.equal(detail.source.event_type, eventType);
+      assert.equal(detail.source.object_id, entry.commentary_id);
+      assert.equal(detail.source.requested_target, entry.commentary_id);
+      assert.equal(detail.source.sponsor_id, SPONSOR);
+      assert.equal(detail.source.fellow_id, null);
+      assert.equal(detail.source.session_id, null);
+      const payload = JSON.parse(detail.source.payload_json);
+      assert.equal(payload.body, entry.body);
+      assert.equal(payload.supersedes_commentary_id, entry.supersedes_commentary_id);
+    }
+    const queue = JSON.stringify(await (await operatorReportsQueue(f.db)).json());
+    assert.ok(!queue.includes(note));
+    assert.ok(!queue.includes("COMMENTARY_REPORT_CANARY"));
+    const resolved = await operatorReportResolution(
+      f.db,
+      "operator",
+      {
+        report_id: replacementReceipt.report_id,
+        resolution: "dismiss",
+        reason: "The retained commentary does not justify this hold.",
+      },
+      "commentary-report-dismiss",
+    );
+    assert.equal(resolved.status, 200);
+    assert.equal(
+      (await readOperatorReportDetail(f.db, originalReceipt.report_id))?.report.status,
+      "pending",
+    );
+    assert.equal(
+      (await readOperatorReportDetail(f.db, replacementReceipt.report_id))?.report.status,
+      "dismissed",
+    );
+    assert.deepEqual(
+      (await f.service.listCommentaries(PROBLEM, { cursor: 0, limit: 50 }))?.commentaries.map(
+        (item) => item.commentary_id,
+      ),
+      [original.item.commentary_id, replacement.item.commentary_id],
+    );
+    for (const action of ["hide", "restore"] as const) {
+      const controlled = await operatorContentControl(
+        f.db,
+        "operator",
+        {
+          target_id: `${PROBLEM}/${replacement.item.commentary_id}`,
+          target_kind: "commentary",
+          action,
+          reason: "Reviewed this exact replacement commentary entry.",
+        },
+        `commentary-control-${action}`,
+      );
+      assert.equal(controlled.status, 200);
+      assert.equal(
+        (await currentContentControl(f.db, PROBLEM, replacement.item.commentary_id))?.visibility,
+        action === "hide" ? "hidden" : "visible",
+      );
+    }
+    assert.deepEqual(publications(), immutable);
+    const publicLog = JSON.stringify(f.sql.query("SELECT * FROM moderation_log").all());
+    assert.ok(!publicLog.includes(note));
+    assert.ok(!publicLog.includes("COMMENTARY_REPORT_CANARY"));
+    assert.ok(!publicLog.includes(OTHER));
+  }));
+
+test("commentary reports withhold unpublished and lawfully redacted source bytes", () =>
+  using(async (f) => {
+    const original = await f.post(f.input({ body: "WITHHELD_COMMENTARY_REPORT_CANARY" }));
+    assert.ok(original.ok);
+    if (!original.ok) return;
+    const report = (target = original.item.commentary_id, sponsor = OTHER) =>
+      fileReportRequest(
+        f.db,
+        { reporterClass: "sponsor", reporterSponsorId: sponsor, reporterFellowId: null },
+        { problem_id: PROBLEM, target, reason: "privacy" },
+      );
+    const filed = await report();
+    assert.equal(filed.status, 201);
+    const receipt = ReportResponseSchema.parse(await filed.json());
+    const unavailable = async () => {
+      const response = await report(original.item.commentary_id, "usr_fresh_commentary_reporter");
+      assert.equal(response.status, 404);
+      assert.equal(
+        ProblemDocumentSchema.parse(await response.json()).code,
+        "REPORT_TARGET_NOT_FOUND",
+      );
+      assert.equal(f.count("reports"), 1);
+    };
+    f.sql.query("UPDATE problems SET public_seq=? WHERE id=?").run(original.item.seq - 1, PROBLEM);
+    await unavailable();
+    assert.deepEqual((await readOperatorReportDetail(f.db, receipt.report_id))?.source, {
+      state: "unavailable",
+      reason: "not-public",
+    });
+    f.sql.query("UPDATE problems SET public_seq=? WHERE id=?").run(original.item.seq, PROBLEM);
+    f.sql.query("UPDATE problems SET status='private-draft' WHERE id=?").run(PROBLEM);
+    await unavailable();
+    assert.deepEqual((await readOperatorReportDetail(f.db, receipt.report_id))?.source, {
+      state: "unavailable",
+      reason: "not-public",
+    });
+    f.sql.query("UPDATE problems SET status='active' WHERE id=?").run(PROBLEM);
+    const event = f.sql
+      .query("SELECT event_id FROM problem_commentaries WHERE id=?")
+      .get(original.item.commentary_id) as { event_id: string };
+    await redactEventContent(f.db, event.event_id, "privacy", new Date().toISOString());
+    await unavailable();
+    const detail = await readOperatorReportDetail(f.db, receipt.report_id);
+    assert.deepEqual(detail?.source, { state: "unavailable", reason: "redacted" });
+    assert.ok(!JSON.stringify(detail).includes("WITHHELD_COMMENTARY_REPORT_CANARY"));
+    const replay = await report();
+    assert.equal(replay.status, 200);
+    assert.equal(ReportResponseSchema.parse(await replay.json()).report_id, receipt.report_id);
+    const missing = await report("COMM-0000000000000000");
+    assert.equal(missing.status, 404);
+    assert.equal(ProblemDocumentSchema.parse(await missing.json()).code, "REPORT_TARGET_NOT_FOUND");
+    const malformed = await report(`${original.item.commentary_id}@1`);
+    assert.equal(malformed.status, 422);
+    assert.equal(ProblemDocumentSchema.parse(await malformed.json()).code, "REPORT_BODY_INVALID");
+    assert.equal(f.count("reports"), 1);
+  }));
+
 test("all commentary read faces refuse malformed cursors and keep public visibility ahead of 304", () =>
   using(async (f) => {
     const router = createCommentaryRouter({
@@ -715,7 +925,8 @@ test("sponsor-owned commentary cases support durable hold, sealed replay, operat
     );
     assert.equal(f.count("screening_publications"), 1);
 
-    // 3. Direct model rejection records an appealable sponsor case; sponsor appeals and operator releases.
+    // 3. A model rejection retains a pending case. An operator must confirm
+    // rejection before the sponsor can request independent appeal review.
     f.screen(async () => classifications("reject", "harassment"));
     const rejectedDraft = f.input({ body: "Direct rejection candidate appealed by sponsor." });
     const denied = await f.post(rejectedDraft, "reject-key-1");
@@ -726,10 +937,45 @@ test("sponsor-owned commentary cases support durable hold, sealed replay, operat
     assert.ok(deniedBody.case_id);
     const screensAfterReject = f.screens();
 
-    // Sealed replay of rejection uses 0 AI calls.
+    // The unchanged attempt follows its pending case without another AI call.
     const sealedDenied = await f.post(rejectedDraft, "reject-key-1");
     assert.equal(sealedDenied.ok, false);
-    if (!sealedDenied.ok) assert.equal(sealedDenied.response.status, 403);
+    if (!sealedDenied.ok) {
+      assert.equal(sealedDenied.response.status, 202);
+      assert.equal(
+        ScreeningPromotionHoldResponseSchema.parse(await sealedDenied.response.json()).case_id,
+        deniedBody.case_id,
+      );
+    }
+    assert.equal((await getScreeningCase(f.db, deniedBody.case_id))?.state, "pending");
+    await assert.rejects(
+      submitScreeningAppeal(
+        f.db,
+        SPONSOR,
+        {
+          case_id: deniedBody.case_id,
+          statement: "This commentary critiques a proof method, not any person or participant.",
+        },
+        "appeal-key-1",
+      ),
+      { message: "SCREENING_APPEAL_NOT_FOUND" },
+    );
+    const confirmed = await decideScreeningCase(f.db, "op_reviewer_1", {
+      caseId: deniedBody.case_id,
+      decision: "reject",
+      reason: "The first operator confirms the classified harassment concern.",
+    });
+    assert.equal(confirmed.ok, true);
+    assert.equal((await getScreeningCase(f.db, deniedBody.case_id))?.state, "rejected");
+    const confirmedReplay = await f.post(rejectedDraft, "reject-key-1");
+    assert.equal(confirmedReplay.ok, false);
+    if (!confirmedReplay.ok) {
+      assert.equal(confirmedReplay.response.status, 403);
+      assert.equal(
+        ScreeningPromotionDeniedResponseSchema.parse(await confirmedReplay.response.json()).case_id,
+        deniedBody.case_id,
+      );
+    }
     assert.equal(f.screens(), screensAfterReject);
 
     const appeal = await submitScreeningAppeal(
