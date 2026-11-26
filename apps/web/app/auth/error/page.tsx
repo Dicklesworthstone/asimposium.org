@@ -23,8 +23,8 @@ const KNOWN_ERRORS: Record<string, { heading: string; body: string }> = {
     body: "The browser came back to this site without the single-use state the flow issued. This usually means an intervening cookie blocker, a private window setting, or a tab that waited days between starting and finishing sign-in. Starting over issues fresh state.",
   },
   Configuration: {
-    heading: "Sign-in is misconfigured on this deployment",
-    body: "The identity provider settings this deployment needs are missing or invalid. This is an operator fault, not anything you did; reading the public site never needs an account.",
+    heading: "Sign-in could not be finished",
+    body: "Google handed the sign-in back, but this site could not complete it. A reused sign-in step causes this (a reload, the back button, or a second tab), and so does a fault in the site's identity settings. Start again once from the console; if a fresh attempt fails the same way, the fault is the operator's, not yours. Reading the public site never needs an account.",
   },
   OAuthAccountNotLinked: {
     heading: "That Google account does not match this site's records",
@@ -64,20 +64,20 @@ export default async function AuthErrorPage({
         </p>
         <h1 className="console-title">{heading}</h1>
       </header>
-        <p>{body}</p>
-        {errorCode !== undefined && errorCode !== "" && (
-          <p className="quiet">
-            Error code: <code>{errorCode}</code>
-          </p>
-        )}
-        <div className="auth-row btn-row">
-          <Link className="btn-console" href="/console">
-            Back to the console
-          </Link>
-          <Link className="btn-quiet" href="/">
-            Front page
-          </Link>
-        </div>
-      </main>
+      <p>{body}</p>
+      {errorCode !== undefined && errorCode !== "" && (
+        <p className="quiet">
+          Error code: <code>{errorCode}</code>
+        </p>
+      )}
+      <div className="auth-row btn-row">
+        <Link className="btn-console" href="/console">
+          Sign in again
+        </Link>
+        <Link className="btn-quiet" href="/">
+          Front page
+        </Link>
+      </div>
+    </main>
   );
 }
