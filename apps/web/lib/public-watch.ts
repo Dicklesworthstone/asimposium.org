@@ -662,7 +662,7 @@ export class PublicLedgerWatch {
       // retry the exact rendered validators through the normal polling loop.
       this.closeLiveTransports();
       this.immediate = false;
-      this.schedule(this.recordReadFailure(failure));
+      this.schedule(this.recordReadFailure(failure.reason, failure.retryAfter));
     } finally {
       this.polling = false;
       if (this.controller === controller) this.controller = undefined;
@@ -687,13 +687,13 @@ export class PublicLedgerWatch {
     this.options.onState(state);
   }
 
-  private recordReadFailure(failure: WatchReadError): number {
+  private recordReadFailure(reason: NonNullable<PublicWatchState["reason"]>, retryAfter = 0): number {
     this.failures++;
     this.forceProbe = true;
-    this.emit({ status: "unavailable", reason: failure.reason });
+    this.emit({ status: "unavailable", reason });
     return Math.min(
       PUBLIC_WATCH_MAX_BACKOFF_MS,
-      Math.max(failure.retryAfter ?? 0, PUBLIC_WATCH_INTERVAL_MS * 2 ** Math.min(this.failures, 4)),
+      Math.max(retryAfter, PUBLIC_WATCH_INTERVAL_MS * 2 ** Math.min(this.failures, 4)),
     );
   }
 
@@ -785,7 +785,7 @@ export class PublicLedgerWatch {
       if (!valid()) return;
       const failure = error instanceof WatchReadError ? error : new WatchReadError("network");
       if (failure.reason === "cancelled") return;
-      delay = this.recordReadFailure(failure);
+      delay = this.recordReadFailure(failure.reason, failure.retryAfter);
     } finally {
       this.polling = false;
       if (this.controller === controller) this.controller = undefined;

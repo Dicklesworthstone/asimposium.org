@@ -6,7 +6,10 @@ import { externalReviewInput, externalReviewOperator, externalReviewProblem, ext
 
 mock.module("server-only", () => ({}));
 let session: OperatorSessionResult;
-let response: StoaCall<ExternalExpertReviewRecord>;
+// Model older or unrecognized error codes returned by the mocked transport.
+let response: StoaCall<ExternalExpertReviewRecord> | {
+  ok: false; reason: "refused"; status: 404; problemCode?: "NOT_FOUND" | "UNKNOWN_ROUTE";
+};
 let fail: boolean;
 const writes: unknown[][] = [];
 let actualAdmin: typeof import("../../lib/admin");
@@ -92,13 +95,13 @@ test("only a typed contract refusal settles the attempt; lost authority and ambi
 });
 
 test("only the backend's typed missing-target 404s settle an unrecorded attestation", async () => {
-  for (const problemCode of ["CLAIM_NOT_FOUND", "PROBLEM_NOT_FOUND"]) {
+  for (const problemCode of ["CLAIM_NOT_FOUND", "PROBLEM_NOT_FOUND"] as const) {
     response = { ok: false, reason: "refused", status: 404, problemCode, detail: "PRIVATE_TARGET_DETAILS" };
     const result = await actions.recordExternalReviewAction(externalReviewOperator, externalReviewProblem, externalReviewInput, "missing-target-key", true);
     expect(result).toMatchObject({ ok: false, retainAttempt: false });
     expect(JSON.stringify(result)).not.toContain("PRIVATE_TARGET_DETAILS");
   }
-  for (const problemCode of [undefined, "NOT_FOUND", "UNKNOWN_ROUTE"]) {
+  for (const problemCode of [undefined, "NOT_FOUND", "UNKNOWN_ROUTE"] as const) {
     response = { ok: false, reason: "refused", status: 404, ...(problemCode === undefined ? {} : { problemCode }) };
     expect(await actions.recordExternalReviewAction(externalReviewOperator, externalReviewProblem, externalReviewInput, "uncertain-key", true))
       .toMatchObject({ ok: false, retainAttempt: true });
