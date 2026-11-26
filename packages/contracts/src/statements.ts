@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { ProblemIndexTimestampSchema, PublicLedgerProblemIdSchema } from "./ledger.ts";
-import { completeProblemBoundaries, OptionalProblemBoundaryFields } from "./problem-boundaries.ts";
+import { completeProblemBoundaries, OptionalProblemBoundaryFields, ProposalDistinctionSchema } from "./problem-boundaries.ts";
 import { ProblemStatementAuthorSchema } from "./problems.ts";
 import { ScreeningPublicationNoticeSchema } from "./screening.ts";
 
@@ -39,6 +39,7 @@ export const PublicStatementVersionSchema = completeProblemBoundaries(
       statement: z.string().min(1).max(8192),
       falsifier: z.string().min(1).max(8192),
       motivation: z.string().min(1).max(8192),
+      distinct_because: ProposalDistinctionSchema.optional(),
       ...OptionalProblemBoundaryFields,
       updated_at: ProblemIndexTimestampSchema,
       source_fellow_id: z.string().min(1).max(128),

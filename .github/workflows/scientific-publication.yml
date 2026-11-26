@@ -126,6 +126,11 @@ jobs:
           node apps/wire/test/integration/synthesis-real-bindings.mjs
           node apps/wire/test/integration/session-shared-handoff-real-bindings.mjs
           node apps/wire/test/integration/honors-real-bindings.mjs
+      - name: Problem proposal distinctions and publication screening
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
+        run: |
+          bun test /dev/null --timeout=120000 apps/wire/test/unit/problem-proposal-commands.test.ts apps/wire/test/unit/problem-publication-preview.test.ts
+          node apps/wire/test/integration/problem-screening-real-bindings.mjs
       - name: Native questions and retractions journey
         if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
         env:

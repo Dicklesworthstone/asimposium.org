@@ -134,7 +134,7 @@ const QUERIES: Record<SponsorDataExportSection, string> = {
     "problem_statement_versions",
     "v",
     `v.problem_id, v.version,
-    v.statement, v.falsifier, v.motivation, v.scope, v.out_of_scope, v.success_criteria, v.created_at`,
+    v.statement, v.falsifier, v.motivation, v.scope, v.out_of_scope, v.success_criteria, v.distinct_because, v.created_at`,
     "p.sponsor_id = ?1 AND p.status = 'private-draft'",
     "JOIN problems p ON p.id = v.problem_id",
   ),
@@ -257,7 +257,8 @@ async function materialize(
   } else if (section === "follows") {
     data = { ...fields, following: true };
   } else if (section === "private_statements" || section === "briefs") {
-    const { scope, out_of_scope, success_criteria, ...formulation } = fields;
+    const { scope, out_of_scope, success_criteria, distinct_because, ...formulation } = fields;
+    if (distinct_because != null) formulation.distinct_because = distinct_because;
     // Legacy rows have no recorded bundle. Preserve their absence rather than
     // exporting invented empty boundaries; incomplete stored bundles fail closed.
     data =

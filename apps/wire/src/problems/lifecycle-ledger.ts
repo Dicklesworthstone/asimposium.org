@@ -958,6 +958,9 @@ export async function applyPublicProblemGovernance(
       falsifier: formulation?.falsifier,
       motivation: formulation?.motivation,
       ...problemBoundaryFields(formulation),
+      ...(reviewedPublication?.preview.problem.distinct_because === undefined
+        ? {}
+        : { distinct_because: reviewedPublication.preview.problem.distinct_because }),
       ...(action.action === "retire" ? { resolution_summary: action.reason } : {}),
       ...(resolution
         ? {

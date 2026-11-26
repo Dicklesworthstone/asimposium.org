@@ -499,11 +499,11 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
       problem.status === "private-draft"
         ? await db
             .prepare(
-              "SELECT statement, falsifier, motivation, scope, out_of_scope, success_criteria FROM problem_statement_versions WHERE problem_id = ? AND version = ?",
+              "SELECT statement, falsifier, motivation, scope, out_of_scope, success_criteria, distinct_because FROM problem_statement_versions WHERE problem_id = ? AND version = ?",
             )
             .bind(problemId, problem.current_statement_version)
             .first<
-              StoredProblemBoundaries & { statement: string; falsifier: string; motivation: string }
+              StoredProblemBoundaries & { statement: string; falsifier: string; motivation: string; distinct_because: string | null }
             >()
         : publicFormulation?.problem;
 
@@ -542,6 +542,7 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
           falsifier: statementRow?.falsifier ?? "",
           motivation: statementRow?.motivation ?? "",
           ...problemBoundaryFields(statementRow),
+          distinct_because: statementRow?.distinct_because ?? undefined,
           areas: ProblemDetailSchema.shape.areas.parse(JSON.parse(problem.areas)),
           famous_guardrail: famousGuardrail,
           resolution,
@@ -1158,6 +1159,7 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
                     candidate.scope ?? "",
                     candidate.out_of_scope ?? "",
                     candidate.success_criteria ?? "",
+                    publication?.problem.distinct_because ?? "",
                     action.action === "publish" ? (problem.famous_guardrail ?? "") : "",
                     action.action === "publish" ? problem.areas : "",
                   ]

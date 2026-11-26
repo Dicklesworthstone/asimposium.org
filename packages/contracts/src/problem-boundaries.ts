@@ -1,5 +1,8 @@
 import { z } from "zod";
 
+/** Preserve the Fellow's exact explanatory text through sponsor review. */
+export const ProposalDistinctionSchema = z.string().min(1).max(2048).regex(/\S/);
+
 /** Fable §6.1: authored research boundaries travel with the exact formulation.
  * The optional wire bundle preserves historical records without inventing
  * missing context; a partial bundle is never a complete formulation. */

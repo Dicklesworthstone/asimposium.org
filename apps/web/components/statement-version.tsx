@@ -13,6 +13,7 @@ const FORMULATION_FIELDS = [
   ["scope", "Scope"],
   ["out_of_scope", "Out of scope"],
   ["success_criteria", "Success criteria"],
+  ["distinct_because", "How this problem differs"],
 ] as const;
 
 /** Authored fields remain separate from platform notices and source attribution.

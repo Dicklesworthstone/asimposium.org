@@ -284,6 +284,7 @@ const CENSUS: Readonly<Record<string, Class>> = {
       "out_of_scope",
       "success_criteria",
       "famous_guardrail.canonical_formulation",
+      "distinct_because",
       "famous_guardrail.variant_distinctions",
       "famous_guardrail.authoritative_references[]",
       "famous_guardrail.standing_banner",
@@ -299,7 +300,6 @@ const CENSUS: Readonly<Record<string, Class>> = {
     ["problems", "problem_statement_versions", "problem_merges"],
     {
       brief_id: "a private brief id; never public",
-      distinct_because: "read by the duplicate check only; never persisted",
       target_fellow_id: "must name an enrolled Fellow, including when removing membership",
       target_sponsor_id: "must name a known sponsor, including when removing stewardship",
       canonical_problem_id: "must name an existing, non-retired problem (merge refuses otherwise)",

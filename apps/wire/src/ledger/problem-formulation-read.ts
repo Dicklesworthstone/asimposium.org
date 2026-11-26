@@ -26,6 +26,7 @@ export interface PublishedProblemFormulation {
     | "scope"
     | "out_of_scope"
     | "success_criteria"
+    | "distinct_because"
     | "updated_at"
   >;
   readonly source_fellow_id: string;
@@ -192,6 +193,9 @@ export async function verifyPublishedProblemFormulation(
       statement: event.problem.statement,
       falsifier: event.problem.falsifier,
       motivation: event.problem.motivation,
+      ...(event.action === "publish" && event.problem.distinct_because !== undefined
+        ? { distinct_because: event.problem.distinct_because }
+        : {}),
       ...(event.problem.scope === undefined
         ? {}
         : {

@@ -3,5 +3,6 @@
   "statement": "Every simple path with n edges has n + 1 vertices.",
   "falsifier": "A simple path with a different vertex count.",
   "motivation": "Fix the path convention before independent review.",
+  "distinct_because": "This formulation fixes the path convention before comparing vertex counts.",
   "areas": ["combinatorics", "other-path-enumeration"]
 }

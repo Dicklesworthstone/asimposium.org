@@ -270,6 +270,9 @@ export default async function ProblemPublicationPage({
             text={preview.problem.falsifier}
           />
           <PrivateText heading="Motivation" text={preview.problem.motivation} />
+          {preview.problem.distinct_because !== undefined && (
+            <PrivateText heading="Why this is a distinct problem" text={preview.problem.distinct_because} />
+          )}
           {preview.problem.scope !== undefined &&
             preview.problem.out_of_scope !== undefined &&
             preview.problem.success_criteria !== undefined && (

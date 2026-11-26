@@ -37,6 +37,7 @@ interface ReceiptRow {
   problem_id: string;
   problem_created_at: string;
   problem_available: number;
+  has_distinction: number;
   event_budget: number | null;
   events_recorded: number;
 }
@@ -163,6 +164,8 @@ export async function runProblemProposalCommand(
       const row = await db
         .prepare(`WITH authority AS (${problemIntentAuthoritySql(true)})
           SELECT authority.event_budget, authority.events_recorded, receipt.*,
+            EXISTS (SELECT 1 FROM problem_statement_versions v WHERE v.problem_id = receipt.problem_id
+              AND v.version = 1 AND v.distinct_because IS NOT NULL) AS has_distinction,
             (EXISTS (SELECT 1 FROM problems WHERE id = receipt.problem_id)
               AND NOT EXISTS (SELECT 1 FROM private_draft_erasures WHERE problem_id = receipt.problem_id)) AS problem_available
           FROM authority LEFT JOIN problem_proposal_command_receipts receipt
@@ -230,6 +233,7 @@ export async function runProblemProposalCommand(
           statement: request.statement,
           falsifier: request.falsifier,
           motivation: request.motivation,
+          ...(row.has_distinction ? { distinct_because: request.distinct_because } : {}),
           ...problemBoundaryFields(request),
           areas,
           ...(request.famous_guardrail === undefined
@@ -331,7 +335,7 @@ export async function runProblemProposalCommand(
           title: "A duplicate or near-duplicate problem already exists",
           detail: `The problem statement matches existing problem '${matches.id}'.`,
           fixHint:
-            "Review the existing problem or provide distinct_because explaining the material distinction.",
+            "Review the existing problem or provide distinct_because explaining the material distinction. The sponsor reviews that explanation for publication with this formulation.",
           rule: "P11",
           extensions: {
             schema: SCHEMA,
@@ -379,11 +383,11 @@ export async function runProblemProposalCommand(
       db
         .prepare(`WITH authority AS (${problemIntentAuthoritySql(true)})
         INSERT INTO problem_statement_versions
-        (problem_id,version,statement,norm_hash,falsifier,motivation,scope,out_of_scope,success_criteria,created_at,scientific_author_json)
+        (problem_id,version,statement,norm_hash,falsifier,motivation,scope,out_of_scope,success_criteria,created_at,distinct_because,scientific_author_json)
         VALUES (?5,1,CASE WHEN EXISTS (${WRITE_AUTHORITY}) AND (?6 IS NULL OR EXISTS (
           SELECT 1 FROM sponsor_problem_briefs WHERE id = ?6 AND sponsor_id = ?2 AND status = 'active'
             AND version = ?7 AND (assigned_fellow_id IS NULL OR assigned_fellow_id = ?1)
-            AND (scope IS NULL OR ?8 IS NOT NULL))) THEN ?9 ELSE NULL END,?10,?11,?12,?8,?13,?14,?15,
+            AND (scope IS NULL OR ?8 IS NOT NULL))) THEN ?9 ELSE NULL END,?10,?11,?12,?8,?13,?14,?15,?16,
           (SELECT json_object('fellow_id',fellow_id,'sponsor_id',sponsor_id,'session_id',NULL,
             'model_self_declared',model,'harness',harness) FROM authority))`)
         .bind(
@@ -399,6 +403,7 @@ export async function runProblemProposalCommand(
           request.out_of_scope ?? null,
           request.success_criteria ?? null,
           timestamp,
+          matches ? (request.distinct_because ?? null) : null,
         ),
       db
         .prepare(

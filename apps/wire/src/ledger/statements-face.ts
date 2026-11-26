@@ -19,6 +19,7 @@ function statementItems(statement: PublicStatementVersion): ProjectionItem[] {
     "scope",
     "out_of_scope",
     "success_criteria",
+    "distinct_because",
   ] as const;
   return [
     {

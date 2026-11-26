@@ -258,6 +258,7 @@ async function statementVersionRow(
     scope: nullable(problem.scope),
     out_of_scope: nullable(problem.out_of_scope),
     success_criteria: nullable(problem.success_criteria),
+    distinct_because: nullable(problem.distinct_because),
     steward_accepted_by: nullable(stewardAcceptedBy),
     created_at: createdAt,
     scientific_author_json: json(scientificAuthor),

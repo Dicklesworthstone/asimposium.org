@@ -7,6 +7,7 @@ import type { D1PreparedStatement } from "@cloudflare/workers-types";
 import { redactEventContent } from "../../src/krater/krater.ts";
 import { expireSecurityRecords, hardDeletePrivateDraft } from "../../src/krater/retention.ts";
 import { PUBLIC_EVENT_CONTENT_MAX_BYTES } from "../../src/ledger/citation-read-integrity.ts";
+import { readPublishedProblemFormulation } from "../../src/ledger/problem-formulation-read.ts";
 import { applyOperatorControl } from "../../src/moderation/store.ts";
 import { runSponsorBriefCommand } from "../../src/problems/brief-commands.ts";
 import { getProblemCreationBudget } from "../../src/problems/creation-quota.ts";
@@ -450,11 +451,20 @@ test("an unreadable creation allowance fails closed without writing a draft", as
   expect(f.sql.query("SELECT * FROM problem_proposal_command_receipts").all()).toEqual([]);
 });
 
-async function publishedDuplicateSource(f: Awaited<ReturnType<typeof fixture>>) {
-  const response = await f.propose({ ...formulation, unlisted: true }, "duplicate-source");
+async function publishedDuplicateSource(
+  f: Awaited<ReturnType<typeof fixture>>,
+  distinctBecause?: string,
+) {
+  const request = { ...formulation, unlisted: true, distinct_because: distinctBecause };
+  const response = await f.propose(request, "duplicate-source");
   expect(response.status).toBe(201);
-  const problemId = ProposeProblemResponseSchema.parse(await response.json()).problem.id;
+  const receipt = ProposeProblemResponseSchema.parse(await response.json());
+  const problemId = receipt.problem.id;
+  expect(receipt.problem.distinct_because).toBe(distinctBecause);
   const preview = await readProblemPublicationPreview(f.baseDb, problemId, f.principal.sponsorId);
+  expect(preview?.problem.distinct_because).toBe(distinctBecause);
+  expect(await readProblemPublicationPreview(f.baseDb, problemId, f.receiver.sponsorId)).toBeUndefined();
+  expect(await readPublishedProblemFormulation(f.baseDb, problemId, 0)).toBeUndefined();
   const problem = await f.baseDb
     .prepare("SELECT * FROM problems WHERE id=?")
     .bind(problemId)
@@ -475,6 +485,7 @@ async function publishedDuplicateSource(f: Awaited<ReturnType<typeof fixture>>) 
     }),
   );
   expect(published.status).toBe(200);
+  expect((await published.json() as { problem: { distinct_because?: string } }).problem.distinct_because).toBe(distinctBecause);
   const event = await f.baseDb
     .prepare(
       "SELECT id,seq,object_version FROM events WHERE problem_id=? AND type='problem.admitted'",
@@ -484,6 +495,18 @@ async function publishedDuplicateSource(f: Awaited<ReturnType<typeof fixture>>) 
   if (!event) throw new Error("Duplicate fixture has no publication event.");
   return { problemId, ...event };
 }
+
+test("a real duplicate override follows the reviewed version through publication and withdrawal", async () => {
+  const f = await fixture();
+  expect((await f.propose(formulation, "first-proposal")).status).toBe(201);
+  expect((await f.propose({ ...formulation, distinct_because: "  \n " }, "blank-override")).status).toBe(422);
+  const rationale = "We test a different boundary condition.\nOnly nonempty paths are considered.";
+  const publication = await publishedDuplicateSource(f, rationale);
+  const read = () => readPublishedProblemFormulation(f.baseDb, publication.problemId, publication.seq);
+  expect((await read())?.problem.distinct_because).toBe(rationale);
+  await redactEventContent(f.baseDb, publication.id, "privacy", new Date().toISOString());
+  expect(await read()).toBeUndefined();
+});
 
 async function foreignProposalToken(f: Awaited<ReturnType<typeof fixture>>) {
   const grant = await f.service.mint(f.receiver, { requested_scopes: ["propose-problems"] });

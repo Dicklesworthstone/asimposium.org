@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { AreaSlugSchema } from "./discovery.ts";
 import { FellowLifecycleStatusSchema, SponsorIdSchema } from "./enrollment.ts";
-import { completeProblemBoundaries, OptionalProblemBoundaryFields } from "./problem-boundaries.ts";
+import { completeProblemBoundaries, OptionalProblemBoundaryFields, ProposalDistinctionSchema } from "./problem-boundaries.ts";
 import {
   SponsorProblemHideReceiptSchema,
   SponsorProblemHideRequestSchema,
@@ -712,6 +712,7 @@ export const ProblemPublicationPreviewSchema = z
           title: z.string().min(1).max(120),
           status: z.literal("private-draft"),
           unlisted: z.boolean(),
+          distinct_because: ProposalDistinctionSchema.optional(),
           current_statement_version: z.number().int().positive(),
           statement: z.string().min(1).max(8192),
           falsifier: z.string().min(1).max(8192),
@@ -758,6 +759,7 @@ export const ProblemPublicationResponseSchema = z
           status: ProblemStatusSchema,
           current_statement_version: z.number().int().positive(),
           statement: z.string().min(1).max(8192).optional(),
+          distinct_because: ProposalDistinctionSchema.optional(),
           falsifier: z.string().min(1).max(8192).optional(),
           motivation: z.string().min(1).max(8192).optional(),
           ...OptionalProblemBoundaryFields,
@@ -782,7 +784,7 @@ export const ProposeProblemRequestSchema = completeProblemBoundaries(
       ...OptionalProblemBoundaryFields,
       areas: z.array(AreaSlugSchema).min(1).max(32),
       famous_guardrail: ProblemFamousGuardrailSchema.optional(),
-      distinct_because: z.string().min(1).max(2048).optional(),
+      distinct_because: ProposalDistinctionSchema.optional(),
       unlisted: z.boolean().optional(),
     })
     .strict(),
@@ -944,6 +946,7 @@ export {
 /** Canonical problem representation. */
 const ProblemDetailObjectSchema = z
   .object({
+    distinct_because: ProposalDistinctionSchema.optional(),
     id: PublicLedgerProblemIdSchema,
     title: z.string().min(1).max(120),
     status: ProblemStatusSchema,
@@ -1070,6 +1073,7 @@ export const ProblemGovernanceEventSchema = z
       previous_status: z.literal("private-draft"),
       problem: governanceFormulation({
         status: z.literal("sharpening"),
+        distinct_because: ProposalDistinctionSchema.optional(),
         // Rule A6 (48js): facts set before publication that the log otherwise
         // lacks, so a restore can rebuild the public problem. Optional: events
         // written before this field existed do not carry it.

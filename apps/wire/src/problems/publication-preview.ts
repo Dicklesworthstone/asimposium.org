@@ -24,6 +24,7 @@ interface PublicationRow extends StoredProblemBoundaries {
   statement: string;
   falsifier: string;
   motivation: string;
+  distinct_because: string | null;
   statement_created_at: string;
   statement_steward: string | null;
   author_name: string;
@@ -53,7 +54,7 @@ export async function loadProblemPublicationSnapshot(
 ): Promise<ProblemPublicationSnapshot | undefined> {
   const row = await db
     .prepare(`SELECT p.*, s.statement, s.falsifier, s.motivation,
-    s.scope, s.out_of_scope, s.success_criteria,
+    s.scope, s.out_of_scope, s.success_criteria, s.distinct_because,
     s.created_at AS statement_created_at, s.steward_accepted_by AS statement_steward, s.scientific_author_json,
     f.name AS author_name, f.model AS author_model, f.harness AS author_harness,
     ${STEWARDS} AS stewards_json
@@ -104,6 +105,7 @@ export async function loadProblemPublicationSnapshot(
       statement: row.statement,
       falsifier: row.falsifier,
       motivation: row.motivation,
+      ...(row.distinct_because == null ? {} : { distinct_because: row.distinct_because }),
       ...problemBoundaryFields(row),
       areas: JSON.parse(row.areas),
       famous_guardrail: row.famous_guardrail === null ? null : JSON.parse(row.famous_guardrail),
@@ -159,7 +161,7 @@ export function problemPublicationGuard(snapshot: ProblemPublicationSnapshot) {
       AND NOT EXISTS (SELECT 1 FROM events WHERE problem_id = ?)
       AND EXISTS (SELECT 1 FROM problem_statement_versions WHERE problem_id = ?
         AND version = ? AND statement = ? AND falsifier = ? AND motivation = ?
-        AND scope IS ? AND out_of_scope IS ? AND success_criteria IS ?
+        AND scope IS ? AND out_of_scope IS ? AND success_criteria IS ? AND distinct_because IS ?
         AND created_at = ? AND steward_accepted_by IS ? AND scientific_author_json IS ?)
       AND EXISTS (SELECT 1 FROM enrollment_fellows WHERE fellow_id = ?
         AND status = 'active' AND name = ? AND model = ? AND harness = ?
@@ -201,6 +203,7 @@ export function problemPublicationGuard(snapshot: ProblemPublicationSnapshot) {
       row.scope ?? null,
       row.out_of_scope ?? null,
       row.success_criteria ?? null,
+      row.distinct_because ?? null,
       row.statement_created_at,
       row.statement_steward,
       row.scientific_author_json,

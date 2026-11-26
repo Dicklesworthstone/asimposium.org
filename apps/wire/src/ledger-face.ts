@@ -371,6 +371,7 @@ function formulationCandidates(
     ["scope", "scope"],
     ["out_of_scope", "out-of-scope"],
     ["success_criteria", "success-criteria"],
+    ["distinct_because", "distinct-because"],
   ] as const) {
     const body = formulation[field];
     // Historical formulations without the authored bundle stay absent. All

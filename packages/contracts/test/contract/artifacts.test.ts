@@ -1142,6 +1142,7 @@ test("persisted problem areas use the same canonical taxonomy in Zod and generat
   for (const [file, expected] of [
     ["valid/problems-propose.json", true],
     ["invalid/problems-propose-area.json", false],
+    ["invalid/problems-propose-empty-distinction.json", false],
   ] as const) {
     const value = JSON.parse(readFileSync(new URL(`../fixtures/${file}`, import.meta.url), "utf8"));
     expect(ProposeProblemRequestSchema.safeParse(value).success).toBe(expected);

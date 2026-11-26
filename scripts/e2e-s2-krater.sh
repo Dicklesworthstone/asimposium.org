@@ -410,6 +410,7 @@ readonly -a S2_SOURCE_PATHS=(
   db/migrations/0160_transactional_email_outbox.sql
   db/migrations/0161_sponsor_commentary_screening.sql
   db/migrations/0162_external_expert_review_replays.sql
+  db/migrations/0163_problem_proposal_distinction.sql
   scripts/verify-cost-model.ts
 
   scripts/verify-cost-model.test.ts
@@ -1087,6 +1088,7 @@ readonly -a S2_EXPECTED_MIGRATION_JOURNAL=(
   0160_transactional_email_outbox.sql
   0161_sponsor_commentary_screening.sql
   0162_external_expert_review_replays.sql
+  0163_problem_proposal_distinction.sql
 )
 
 

@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { FellowIdSchema, FellowLifecycleStatusSchema, SponsorIdSchema } from "./enrollment.ts";
 import { SponsorFellowTransferManifestSchema, TransferStatusSchema } from "./lifecycle-transfer.ts";
-import { completeProblemBoundaries, OptionalProblemBoundaryFields } from "./problem-boundaries.ts";
+import { completeProblemBoundaries, OptionalProblemBoundaryFields, ProposalDistinctionSchema } from "./problem-boundaries.ts";
 import { ProblemIdSchema, SponsorWorkshopObjectSchema } from "./sessions.ts";
 
 /** Private data portability. A page is a bounded slice of one account revision;
@@ -192,6 +192,7 @@ export const SponsorDataExportRecordSchema = z.discriminatedUnion("kind", [
     famous_guardrail: nullableText,
   }),
   formulationRecord("private_statements", {
+    distinct_because: ProposalDistinctionSchema.optional(),
     problem_id: ProblemIdSchema,
     version: ordinal,
     statement: z.string().max(8192),
