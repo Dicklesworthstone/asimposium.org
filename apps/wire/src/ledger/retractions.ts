@@ -1,7 +1,11 @@
 import {
+  RETRACTIONS_LIST_DEFAULT_LIMIT,
+  RETRACTIONS_LIST_MAX_LIMIT,
+  RetractionIdSchema,
   type RetractionItem,
   RetractionItemSchema,
   type RetractionKind,
+  type RetractionsListQuery,
 } from "@asimposium/contracts";
 import {
   escapeHtml,
@@ -78,11 +82,21 @@ export async function determineRetractionKind(
   return "self-corrected";
 }
 
-export interface LoadProblemRetractionsOptions {
-  limit?: number;
+export type LoadProblemRetractionsOptions = RetractionsListQuery;
+
+export class RetractionReadError extends Error {
+  constructor(readonly code: "CURSOR_INVALID" | "SOURCE_UNAVAILABLE") {
+    super(
+      code === "CURSOR_INVALID"
+        ? "Invalid retraction selection."
+        : "Retraction source unavailable.",
+    );
+    this.name = "RetractionReadError";
+  }
 }
 
 const RETRACTION_CONTENT_BYTES = 65_536;
+const RETRACTION_READ_BYTES = 512 * 1024;
 const RETRACTION_UNAVAILABLE = "A retraction explanation is unavailable.";
 const publicProblemSql = `status <> 'private-draft'
   AND NOT ${hiddenByContentControlSql("problems.id", "'problem'")}
@@ -93,6 +107,9 @@ interface RetractionReadRow {
   problem_id: string;
   seq: number;
   publications: number;
+  object_version: number;
+  withheld: number;
+  content_limited: number;
   actor_fellow_id: string | null;
   actor_sponsor_id: string | null;
   actor_session_id: string | null;
@@ -112,27 +129,53 @@ export async function loadProblemRetractions(
   retractions: RetractionItem[];
   omitted: string[];
   problem: { id: string; unlisted: number } | null;
+  cursor: number;
+  after: number;
+  scanned_through: number;
+  next_after: number | null;
+  target: string | null;
+  target_status: "found" | "not-found" | "unavailable" | null;
 }> {
-  const limit = Math.min(Math.max(options.limit ?? 50, 1), 200);
+  const limit = options.limit ?? RETRACTIONS_LIST_DEFAULT_LIMIT;
+  const after = options.after ?? 0;
+  if (
+    !Number.isSafeInteger(limit) ||
+    limit < 1 ||
+    limit > RETRACTIONS_LIST_MAX_LIMIT ||
+    !Number.isSafeInteger(after) ||
+    after < 0 ||
+    (options.through !== undefined &&
+      (!Number.isSafeInteger(options.through) || options.through < 0 || after > options.through)) ||
+    (options.after !== undefined && options.through === undefined) ||
+    (options.target !== undefined &&
+      (!RetractionIdSchema.safeParse(options.target).success ||
+        /[\r\n\u2028\u2029]/u.test(options.target) ||
+        options.after !== undefined))
+  )
+    throw new RetractionReadError("CURSOR_INVALID");
   const omitted: string[] = [];
 
   const query = `
     WITH scope AS (
       SELECT id, public_seq FROM problems WHERE id = ? AND ${publicProblemSql}
+    ), cut AS (
+      SELECT *, COALESCE(?, public_seq) AS cursor FROM scope
     ), admissions AS (
       SELECT e.object_id, MIN(e.seq) AS first_seq, COUNT(*) AS publications
-      FROM events e JOIN scope p ON p.id = e.problem_id
+      FROM events e JOIN cut p ON p.id = e.problem_id
       WHERE e.object_kind = 'retraction' AND e.type = 'object.retracted'
-        AND e.seq <= p.public_seq
+        AND e.seq <= p.cursor AND p.cursor <= p.public_seq
+        AND (? IS NULL OR e.object_id = ?)
       GROUP BY e.object_id
     ), page AS (
-      SELECT a.* FROM admissions a ORDER BY a.first_seq LIMIT ?
-    )
+      SELECT a.* FROM admissions a WHERE a.first_seq > ? ORDER BY a.first_seq LIMIT ?
+    ), sources AS (
     SELECT
       e.object_id AS retraction_id,
       e.problem_id,
       e.seq,
       a.publications,
+      e.object_version,
       e.actor_fellow_id,
       e.actor_sponsor_id,
       e.actor_session_id,
@@ -146,31 +189,75 @@ export async function loadProblemRetractions(
       CASE WHEN screening.event_id IS NOT NULL
         THEN CASE WHEN length(CAST(screening.provenance_json AS BLOB)) <= 4096
           THEN screening.provenance_json ELSE '' END
-        END AS screening_provenance_json
-    FROM page a JOIN scope p
+        END AS screening_provenance_json,
+      CASE WHEN c.redacted_at IS NOT NULL OR ${eventContentHiddenSql("e")}
+        THEN 1 ELSE 0 END AS withheld
+    FROM page a JOIN cut p
     JOIN events e ON e.problem_id = p.id AND e.seq = a.first_seq
     LEFT JOIN event_content c ON c.event_id = e.id AND c.payload_sha256 = e.payload_sha256
     LEFT JOIN screening_publications screening ON screening.event_id = e.id
-    ORDER BY e.seq
+    ), budgeted AS (
+      SELECT *, SUM(COALESCE(length(CAST(payload_json AS BLOB)), 0)
+        + COALESCE(length(CAST(screening_provenance_json AS BLOB)), 0))
+        OVER (ORDER BY seq ROWS UNBOUNDED PRECEDING) AS content_bytes
+      FROM sources
+    )
+    SELECT retraction_id, problem_id, seq, publications, object_version,
+      actor_fellow_id, actor_sponsor_id, actor_session_id,
+      model_string_self_declared, harness, created_at, payload_sha256, withheld,
+      CASE WHEN content_bytes <= ${RETRACTION_READ_BYTES} THEN payload_json END AS payload_json,
+      CASE WHEN content_bytes <= ${RETRACTION_READ_BYTES} THEN screening_provenance_json END
+        AS screening_provenance_json,
+      content_bytes > ${RETRACTION_READ_BYTES} AS content_limited
+    FROM budgeted ORDER BY seq
   `;
   // The scope check and source selection share a snapshot. Current controls
   // apply before a caller computes ETags, even for old immutable corrections.
   const [head, rows] = await db.batch([
     db
-      .prepare(`SELECT id, unlisted FROM problems WHERE id = ? AND ${publicProblemSql}`)
+      .prepare(`SELECT id, unlisted, public_seq FROM problems WHERE id = ? AND ${publicProblemSql}`)
       .bind(problemId),
-    db.prepare(query).bind(problemId, limit + 1),
+    db
+      .prepare(query)
+      .bind(
+        problemId,
+        options.through ?? null,
+        options.target ?? null,
+        options.target ?? null,
+        after,
+        limit + 1,
+      ),
   ]);
-  if (!head?.success || !rows?.success) throw new Error("Retraction read failed.");
-  const problem = (head.results[0] ?? null) as { id: string; unlisted: number } | null;
-  if (problem === null) return { retractions: [], omitted: [], problem: null };
+  if (!head?.success || !rows?.success || head.results.length > 1)
+    throw new RetractionReadError("SOURCE_UNAVAILABLE");
+  const problem = (head.results[0] ?? null) as {
+    id: string;
+    unlisted: number;
+    public_seq: number;
+  } | null;
+  const position = {
+    cursor: options.through ?? problem?.public_seq ?? 0,
+    after,
+    scanned_through: after,
+    next_after: null as number | null,
+    target: options.target ?? null,
+    target_status:
+      options.target === undefined ? null : ("not-found" as "found" | "not-found" | "unavailable"),
+  };
+  if (problem === null) return { retractions: [], omitted: [], problem: null, ...position };
+  if (
+    problem.id !== problemId ||
+    ![0, 1].includes(problem.unlisted) ||
+    !Number.isSafeInteger(problem.public_seq) ||
+    problem.public_seq < 0
+  )
+    throw new RetractionReadError("SOURCE_UNAVAILABLE");
+  if (position.cursor > problem.public_seq) throw new RetractionReadError("CURSOR_INVALID");
   const results = rows.results as unknown as RetractionReadRow[];
+  if (results.length > limit + 1 || (options.target !== undefined && results.length > 1))
+    throw new RetractionReadError("SOURCE_UNAVAILABLE");
   const hasMore = results.length > limit;
   const sliced = hasMore ? results.slice(0, limit) : results;
-
-  if (hasMore) {
-    omitted.push(`truncated at limit of ${limit} retractions`);
-  }
 
   const retractions: RetractionItem[] = [];
   const unavailable = () => {
@@ -179,7 +266,27 @@ export async function loadProblemRetractions(
 
   for (const row of sliced) {
     if (
+      row.problem_id !== problemId ||
+      !Number.isSafeInteger(row.seq) ||
+      row.seq <= position.scanned_through ||
+      row.seq > position.cursor ||
+      (options.target !== undefined && row.retraction_id !== options.target)
+    )
+      throw new RetractionReadError("SOURCE_UNAVAILABLE");
+    if (options.target !== undefined)
+      position.target_status = row.withheld === 1 ? "not-found" : "unavailable";
+    // A byte-limited publication remains readable on the next page. Hidden or
+    // corrupt publications do advance the scan so they cannot trap a reader.
+    if (row.content_limited) {
+      if (position.scanned_through === after) throw new RetractionReadError("SOURCE_UNAVAILABLE");
+      omitted.push("content_limit");
+      position.next_after = position.scanned_through;
+      break;
+    }
+    position.scanned_through = row.seq;
+    if (
       row.publications !== 1 ||
+      row.object_version !== 1 ||
       row.payload_json === null ||
       !/^[a-f0-9]{64}$/.test(row.payload_sha256) ||
       (await sha256Hex(row.payload_json)) !== row.payload_sha256
@@ -227,10 +334,14 @@ export async function loadProblemRetractions(
     const parsed = RetractionItemSchema.safeParse(item);
     if (parsed.success) {
       retractions.push(parsed.data);
+      if (options.target !== undefined) position.target_status = "found";
     } else unavailable();
   }
 
-  return { retractions, omitted, problem };
+  if (hasMore && position.next_after === null) position.next_after = position.scanned_through;
+  if (position.next_after !== null) omitted.push("page_limit");
+  else position.scanned_through = position.cursor;
+  return { retractions, omitted, problem, ...position };
 }
 
 /** Render Diptych Markdown face: GET /p/:id/retractions.md */

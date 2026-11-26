@@ -39,6 +39,9 @@ import {
   PublicMovesResponseSchema,
   type PublicProblemMoves,
   PublicProblemMovesSchema,
+  RetractionsListQuerySchema,
+  retractionsListMatchesQuery,
+  retractionsListPath,
   type RetractionsListResponse,
   RetractionsListResponseSchema,
   type SearchQueryRequest,
@@ -838,23 +841,28 @@ export async function stoaFetchCitation(
 export async function stoaFetchRetractions(
   problemId: string,
   stoaOrigin: string | undefined = configuredStoaOrigin(),
+  query: unknown = {},
 ): Promise<PublicRead<RetractionsListResponse>> {
+  const parsed = RetractionsListQuerySchema.safeParse(query);
   if (
     typeof problemId !== "string" ||
     problemId.trim() !== problemId ||
-    !PublicLedgerProblemIdSchema.safeParse(problemId).success
+    !PublicLedgerProblemIdSchema.safeParse(problemId).success ||
+    !parsed.success
   ) {
     return { state: "unavailable", reason: "invalid_response" };
   }
   const result = await readPublic(
-    `/p/${encodeURIComponent(problemId)}/retractions.json`,
+    retractionsListPath(problemId, "json", parsed.data),
     stoaOrigin,
     RetractionsListResponseSchema,
     0,
     "PROBLEM_NOT_FOUND",
+    "CURSOR_INVALID",
+    4 * 1024 * 1024,
   );
   if (result.state !== "ok") return result;
-  return result.data.problem_id === problemId
+  return retractionsListMatchesQuery(problemId, parsed.data, result.data)
     ? result
     : { state: "unavailable", reason: "invalid_response" };
 }

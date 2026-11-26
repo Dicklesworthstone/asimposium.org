@@ -1,12 +1,29 @@
 import { afterEach, beforeEach, expect, mock, test } from "bun:test";
-import { type ClaimFaceResponse, type DeadEndsListResponse, type HypothesisEvidenceItemResponse, PRODUCTION_STOA_ORIGIN } from "@asimposium/contracts";
+import { type ClaimFaceResponse, type DeadEndsListResponse, type HypothesisEvidenceItemResponse, type RetractionsListResponse, PRODUCTION_STOA_ORIGIN } from "@asimposium/contracts";
 import { renderToStaticMarkup } from "react-dom/server";
 import { parsePublicRecord, resolvePublicRecord } from "../../lib/public-record";
 
 mock.module("server-only", () => ({}));
-const { stoaFetchDeadEnds, stoaFetchPublicRecord } = await import("../../lib/public-ledger");
+const { stoaFetchDeadEnds, stoaFetchPublicRecord, stoaFetchRetractions } = await import("../../lib/public-ledger");
 const { default: PublicRecordPage, generateMetadata } = await import("../../app/r/[...slug]/page");
 const { default: DeadEndsPage, generateMetadata: deadEndsMetadata } = await import("../../app/p/[slug]/dead-ends/page");
+
+const { default: RetractionsPage, generateMetadata: retractionsMetadata } = await import("../../app/p/[slug]/retractions/page");
+
+function retractionFace(): RetractionsListResponse {
+  return {
+    schema: "https://a.asimposium.org/schemas/retractions.v1.json",
+    problem_id: "P-DEMO", cursor: 80, after: 0, scanned_through: 80,
+    next_after: null, target: "R-55",
+    retractions: [{
+      retraction_id: "R-55", problem_id: "P-DEMO", seq: 72,
+      target_object: "C-7@3", retraction_kind: "self-corrected",
+      reason: "The exact statement omitted a boundary condition.",
+      author_fellow_id: "F-AUTHOR", created_at: "2026-10-18T12:00:00.000Z",
+    }],
+    omitted: [],
+  };
+}
 
 function deadEnd(): DeadEndsListResponse {
   return {
@@ -262,4 +279,112 @@ test("a route miss stays unavailable; canonical missing objects and source failu
   expect((await generateMetadata(props())).robots).toEqual({ index: false, follow: false });
   globalThis.fetch = mock(async () => Response.json({ status: 404, code: "PROBLEM_NOT_FOUND" }, { status: 404 })) as unknown as typeof fetch;
   expect((await stoaFetchPublicRecord(target())).state).toBe("not_found");
+});
+
+
+test("registered correction aliases redirect to their exact snapshot without fetching a generic projection", async () => {
+  const request = mock(async () => Response.json(retractionFace()));
+  globalThis.fetch = request as unknown as typeof fetch;
+  const alias = { params: Promise.resolve({ slug: ["p", "P-DEMO", "retractions", "R-55"] }) };
+  for (const [query, destination] of [
+    [{}, "/p/P-DEMO/retractions?target=R-55"],
+    [{ through: "80", limit: "1" }, "/p/P-DEMO/retractions?through=80&limit=1&target=R-55"],
+  ] as const) {
+    let digest: string | undefined;
+    try {
+      await PublicRecordPage({ ...alias, searchParams: Promise.resolve(query) });
+    } catch (error) {
+      digest = (error as { digest?: string }).digest;
+    }
+    expect(digest).toContain(destination);
+  }
+  for (const query of [{ target: "R-1" }, { through: "80", after: "0" }, { through: ["80", "81"] }]) {
+    expect(renderToStaticMarkup(await PublicRecordPage({
+      ...alias, searchParams: Promise.resolve(query),
+    }))).toContain("Invalid retraction view");
+  }
+  expect(resolvePublicRecord(["p", "P-DEMO", "retractions", "Q-1"])).toBeNull();
+  expect(request).not.toHaveBeenCalled();
+});
+
+test("exact correction pages bind the source identity and keep all canonical links at the selected cut", async () => {
+  const calls: string[] = [];
+  globalThis.fetch = mock(async (input: string | URL | Request, options?: RequestInit) => {
+    calls.push(String(input));
+    expect(options?.credentials).toBe("omit");
+    expect((options as RequestInit & { next: { revalidate: number } }).next.revalidate).toBe(0);
+    return Response.json(retractionFace(), { headers: { "x-robots-tag": "noindex, nofollow" } });
+  }) as unknown as typeof fetch;
+  const selected = {
+    params: Promise.resolve({ slug: "P-DEMO" }),
+    searchParams: Promise.resolve({ through: "80", target: "R-55" }),
+  };
+  const html = renderToStaticMarkup(await RetractionsPage(selected));
+  expect(html).toContain("The exact statement omitted a boundary condition.");
+  expect(html).toContain("Showing the exact correction R-55.");
+  expect(html).toContain("stay out of search indexes");
+  for (const face of ["md", "json"]) expect(html).toContain(
+    `href="${PRODUCTION_STOA_ORIGIN}/p/P-DEMO/retractions.${face}?through=80&amp;target=R-55"`,
+  );
+  expect(html).toContain('href="/p/P-DEMO/retractions?through=80"');
+  expect(calls).toEqual([`${PRODUCTION_STOA_ORIGIN}/p/P-DEMO/retractions.json?through=80&target=R-55`]);
+  const metadata = await retractionsMetadata(selected);
+  expect(metadata.robots).toEqual({ index: false, follow: false });
+  expect(metadata.alternates?.canonical).toBe(
+    "https://asimposium.org/p/P-DEMO/retractions?through=80&target=R-55",
+  );
+});
+
+test("empty correction pages still offer the exact bounded continuation without JavaScript", async () => {
+  globalThis.fetch = mock(async () => Response.json({
+    ...retractionFace(), target: null, after: 12, scanned_through: 20,
+    next_after: 20, retractions: [], omitted: ["page_limit"],
+  })) as unknown as typeof fetch;
+  const selected = {
+    params: Promise.resolve({ slug: "P-DEMO" }),
+    searchParams: Promise.resolve({ through: "80", after: "12", limit: "1" }),
+  };
+  const html = renderToStaticMarkup(await RetractionsPage(selected));
+  expect(html).toContain("No readable retractions were returned on this page.");
+  expect(html).toContain("More retractions in this snapshot");
+  expect(html).toContain('href="/p/P-DEMO/retractions?through=80&amp;after=20&amp;limit=1"');
+  expect(html.match(/aria-label="Retraction pages"/g)).toHaveLength(1);
+});
+
+test("correction pages reject wrong target, snapshot, problem and missing-source substitutions", async () => {
+  const selected = {
+    params: Promise.resolve({ slug: "P-DEMO" }),
+    searchParams: Promise.resolve({ through: "80", target: "R-55" }),
+  };
+  for (const patch of [
+    { problem_id: "P-OTHER" }, { target: "R-1" }, { cursor: 81, scanned_through: 81 },
+    { retractions: [] },
+    { retractions: [{ ...retractionFace().retractions[0]!, retraction_id: "R-1" }] },
+  ]) {
+    globalThis.fetch = mock(async () => Response.json({ ...retractionFace(), ...patch })) as unknown as typeof fetch;
+    expect(await stoaFetchRetractions("P-DEMO", undefined, { through: "80", target: "R-55" }))
+      .toEqual({ state: "unavailable", reason: "invalid_response" });
+    const html = renderToStaticMarkup(await RetractionsPage(selected));
+    expect(html).toContain("Public ledger data is temporarily unavailable");
+    expect(html).not.toContain("The exact statement omitted a boundary condition.");
+  }
+  globalThis.fetch = mock(async () => Response.json(
+    { status: 404, code: "PROBLEM_NOT_FOUND" }, { status: 404 },
+  )) as unknown as typeof fetch;
+  await expect(RetractionsPage(selected)).rejects.toThrow("NEXT_HTTP_ERROR_FALLBACK;404");
+});
+
+test("invalid correction selections do not fetch or silently reset the requested view", async () => {
+  const request = mock(async () => Response.json(retractionFace()));
+  globalThis.fetch = request as unknown as typeof fetch;
+  for (const query of [
+    { after: "0" }, { through: "80", after: "81" }, { through: "080" },
+    { target: ["R-55", "R-1"] }, { target: "R-55", after: "0", through: "80" },
+    { limit: "201" }, { status: "open" },
+  ]) {
+    const selected = { params: Promise.resolve({ slug: "P-DEMO" }), searchParams: Promise.resolve(query) };
+    expect(renderToStaticMarkup(await RetractionsPage(selected))).toContain("Choose a valid retraction view");
+    expect((await retractionsMetadata(selected)).robots).toEqual({ index: false, follow: false });
+  }
+  expect(request).not.toHaveBeenCalled();
 });

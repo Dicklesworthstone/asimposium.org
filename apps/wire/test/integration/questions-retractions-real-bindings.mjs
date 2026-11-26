@@ -1564,6 +1564,91 @@ await runLocalWorkerJourney(async (context) => {
     assert.equal(cached.status, 304);
   }
 
+  // Every correction has an exact public permalink, and continuations keep the
+  // first read's immutable cut even when other ledger publications exist.
+  const retractionCut = parsedRetList.data.cursor;
+  const exactRetractionPaths = new Map();
+  const exactRetractionEtags = new Map();
+  for (const format of ["json", "md", "html"]) {
+    const path = `/p/${problemId}/retractions.${format}?through=${retractionCut}&target=${retraction1Id}`;
+    const exact = await worker.fetch(`${origin}${path}`);
+    assert.equal(exact.status, 200);
+    exactRetractionPaths.set(format, path);
+    exactRetractionEtags.set(format, exact.headers.get("etag"));
+    const text = await exact.text();
+    assert.ok(text.includes("Author self-correction: found counterexample"));
+    assert.ok(!text.includes("Retracting following valid external refutation"));
+    if (format === "json") {
+      const selected = RetractionsListResponseSchema.parse(JSON.parse(text));
+      assert.equal(selected.target, retraction1Id);
+      assert.equal(selected.cursor, retractionCut);
+      assert.deepEqual(
+        selected.retractions.map((row) => row.retraction_id),
+        [retraction1Id],
+      );
+    }
+    const notYet = await worker.fetch(
+      `${origin}/p/${problemId}/retractions.${format}?target=${retraction2Id}&through=${retract2.seq - 1}`,
+    );
+    assert.equal(notYet.status, 404, "exact corrections never cross the requested historical cut");
+    const afterPublication = await worker.fetch(
+      `${origin}/p/${problemId}/retractions.${format}?target=${retraction2Id}&through=${retract2.seq}`,
+    );
+    assert.equal(afterPublication.status, 200);
+    await afterPublication.text();
+  }
+  const retractionTailResponse = await worker.fetch(
+    `${origin}/p/${problemId}/events.json?since=${retract1.seq - 1}&limit=1&through=${retractionCut}`,
+  );
+  assert.equal(retractionTailResponse.status, 200);
+  const retractionTail = await retractionTailResponse.json();
+  assert.equal(
+    retractionTail.events[0]?.event?.object_url,
+    exactRetractionPaths.get("json"),
+    "public event history links directly to the exact correction at the same snapshot",
+  );
+  const firstRetractionResponse = await worker.fetch(
+    `${origin}/p/${problemId}/retractions.json?through=${retractionCut}&limit=1`,
+  );
+  assert.equal(firstRetractionResponse.status, 200);
+  const firstRetractionPage = RetractionsListResponseSchema.parse(
+    await firstRetractionResponse.json(),
+  );
+  assert.deepEqual(
+    firstRetractionPage.retractions.map((row) => row.retraction_id),
+    [retraction1Id],
+  );
+  assert.equal(firstRetractionPage.next_after, retract1.seq);
+  const nextRetractionLink = /<([^>]+)>; rel="next"/.exec(
+    firstRetractionResponse.headers.get("link") ?? "",
+  );
+  assert.ok(nextRetractionLink, "bounded reads provide a directly followable continuation");
+  const nextRetractionResponse = await worker.fetch(`${origin}${nextRetractionLink[1]}`);
+  assert.equal(nextRetractionResponse.status, 200);
+  const nextRetractionPage = RetractionsListResponseSchema.parse(
+    await nextRetractionResponse.json(),
+  );
+  assert.equal(nextRetractionPage.cursor, retractionCut);
+  assert.deepEqual(
+    nextRetractionPage.retractions.map((row) => row.retraction_id),
+    [retraction2Id],
+  );
+  assert.equal(nextRetractionPage.next_after, null);
+  for (const query of [
+    "after=0",
+    "through=01",
+    "limit=201",
+    "target=R-1&target=R-2",
+    `through=${retractionCut + 1}`,
+    `target=${retraction1Id}&through=${retractionCut}&after=0`,
+  ]) {
+    const refusal = await worker.fetch(`${origin}/p/${problemId}/retractions.json?${query}`);
+    assert.equal(refusal.status, 400);
+    const problem = await refusal.json();
+    assert.equal(problem.code, "CURSOR_INVALID");
+    assert.ok(problem.fix_hint);
+  }
+
   // 17. Private-draft secrecy
   await env.DB.prepare(
     "INSERT INTO problems (id, status, public_seq, unlisted, created_at, updated_at) VALUES ('P-QR-PRIVATE', 'private-draft', 0, 0, '2026-09-09T00:00:00.000Z', '2026-09-09T00:00:00.000Z')",
@@ -1668,6 +1753,22 @@ await runLocalWorkerJourney(async (context) => {
     assert.ok(!text.includes("Author self-correction: found counterexample"));
     assert.ok(!text.includes("screening-warning"));
     assert.ok(!text.includes("Published with a screening context notice:"));
+  }
+
+  for (const format of ["json", "md", "html"]) {
+    for (const method of ["GET", "HEAD"]) {
+      const hidden = await worker.fetch(`${origin}${exactRetractionPaths.get(format)}`, {
+        method,
+        headers: { "If-None-Match": exactRetractionEtags.get(format) },
+      });
+      assert.equal(
+        hidden.status,
+        404,
+        "present-day redaction precedes every historical conditional read",
+      );
+      assert.ok(hidden.headers.get("cache-control").includes("no-store"));
+      assert.ok(!(await hidden.text()).includes("Author self-correction: found counterexample"));
+    }
   }
 
   // A new version preserves withdrawal and the readable original statement.

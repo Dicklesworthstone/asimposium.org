@@ -22,8 +22,6 @@ import {
   PublicClaimTargetSchema,
   PublicLedgerProblemIdSchema,
   type PublicProblemRoster,
-  RETRACTIONS_SCHEMA_ID,
-  RetractionsListResponseSchema,
   SINGLE_TEAM_PROBLEM_NOTICE,
   SponsorIdSchema,
   SYNTHESES_SCHEMA_ID,
@@ -96,11 +94,7 @@ import { readPublishedProblemFormulation } from "./ledger/problem-formulation-re
 import { readPublishedProblemResolution } from "./ledger/problem-resolution-read.ts";
 import { ProofGapReadError } from "./ledger/proof-gaps-read.ts";
 import { handleQuestionsList } from "./ledger/questions-http.ts";
-import {
-  loadProblemRetractions,
-  renderRetractionsHtmlFragment,
-  renderRetractionsMarkdown,
-} from "./ledger/retractions";
+import { handleRetractionsList } from "./ledger/retractions-http.ts";
 import { checkedScientificPayload, ScientificInputError } from "./ledger/scientific-checks";
 import { legacyStatementRedirect } from "./ledger/statements-router.ts";
 import { handleSynthesesList } from "./ledger/syntheses-list-http.ts";
@@ -2406,62 +2400,8 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
     app.on(["GET", "HEAD"], `/p/:id/questions.${format}`, (c) => handleQuestionsList(c, format));
 
   // --- W5.8d Retractions Diptych faces ---
-  app.on(["GET", "HEAD"], "/p/:id/retractions.json", async (c) => {
-    const problemId = c.req.param("id");
-    const { retractions, omitted, problem } = await loadProblemRetractions(c.env.DB, problemId);
-    if (!problem) return problemNotFound(c.req.method);
-    const body = JSON.stringify(
-      RetractionsListResponseSchema.parse({
-        schema: RETRACTIONS_SCHEMA_ID,
-        problem_id: problemId,
-        retractions,
-        omitted,
-      }),
-      null,
-      2,
-    );
-    const etag = await strongEtag("json", body);
-    const headers = {
-      "content-type": "application/json; charset=utf-8",
-      "cache-control": publicFaceCacheControl(Boolean(problem.unlisted)),
-      ...indexingHeaders(Boolean(problem.unlisted)),
-      etag,
-    };
-    if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
-    return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
-  });
-
-  app.on(["GET", "HEAD"], "/p/:id/retractions.md", async (c) => {
-    const problemId = c.req.param("id");
-    const { retractions, omitted, problem } = await loadProblemRetractions(c.env.DB, problemId);
-    if (!problem) return problemNotFound(c.req.method);
-    const body = renderRetractionsMarkdown(problemId, retractions, omitted);
-    const etag = await strongEtag("markdown", body);
-    const headers = {
-      "content-type": "text/markdown; charset=utf-8",
-      "cache-control": publicFaceCacheControl(Boolean(problem.unlisted)),
-      ...indexingHeaders(Boolean(problem.unlisted)),
-      etag,
-    };
-    if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
-    return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
-  });
-
-  app.on(["GET", "HEAD"], "/p/:id/retractions.html", async (c) => {
-    const problemId = c.req.param("id");
-    const { retractions, omitted, problem } = await loadProblemRetractions(c.env.DB, problemId);
-    if (!problem) return problemNotFound(c.req.method);
-    const body = renderRetractionsHtmlFragment(problemId, retractions, omitted);
-    const etag = await strongEtag("html", body);
-    const headers = {
-      "content-type": "text/html; charset=utf-8",
-      "cache-control": publicFaceCacheControl(Boolean(problem.unlisted)),
-      ...indexingHeaders(Boolean(problem.unlisted)),
-      etag,
-    };
-    if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
-    return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
-  });
+  for (const format of ["json", "md", "html"] as const)
+    app.on(["GET", "HEAD"], `/p/:id/retractions.${format}`, (c) => handleRetractionsList(c, format));
 
   for (const format of ["json", "md", "html"] as const)
     app.on(["GET", "HEAD"], `/p/:id/conflicts.${format}`, (c) => handleConflictsList(c, format));

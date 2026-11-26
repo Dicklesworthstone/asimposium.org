@@ -19,6 +19,19 @@ on:
       - "apps/wire/src/problems/**"
       - "apps/wire/src/sessions/**"
       - "apps/wire/src/herald/**"
+      - "apps/web/lib/public-ledger.ts"
+      - "apps/web/lib/public-record.ts"
+      - "apps/web/app/p/**/retractions/**"
+      - "apps/web/app/r/**"
+      - "apps/web/test/unit/agora-scientific-wiring.test.tsx"
+      - "apps/web/test/unit/public-record-page.test.tsx"
+      - "apps/wire/src/ledger/retractions*.ts"
+      - "apps/wire/src/ledger/event-tail-read.ts"
+      - "apps/wire/src/ledger-face.ts"
+      - "apps/wire/src/discovery/**"
+      - "apps/wire/test/unit/retractions-public-source.test.ts"
+      - "apps/wire/test/unit/discovery-generation.test.ts"
+      - "apps/wire/test/integration/questions-retractions-real-bindings.mjs"
       - "apps/wire/test/unit/herald-human-workshop-rooms.test.ts"
       - "apps/wire/src/screening/**"
       - "apps/wire/src/moderation/**"
@@ -68,12 +81,20 @@ jobs:
         if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
         run: |
           bun run --filter @asimposium/contracts test
+          bun run --filter @asimposium/contracts check:drift
           bun run --filter @asimposium/render test
       - name: Workshop ticket expiry and replay regressions
         if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
         run: |
           bunx --no-install biome check apps/wire/src/herald/room-ticket.ts apps/wire/src/herald/room.ts apps/wire/test/unit/herald-human-workshop-rooms.test.ts
           bun test /dev/null --timeout=120000 apps/wire/test/unit/herald-human-workshop-rooms.test.ts
+      - name: Immutable retraction readers and discovery regressions
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
+        run: bun test /dev/null --timeout=120000 apps/wire/test/unit/retractions-public-source.test.ts apps/wire/test/unit/discovery-generation.test.ts
+      - name: Human correction links and pagination regressions
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
+        working-directory: apps/web
+        run: bun test /dev/null --timeout=120000 test/unit/agora-scientific-wiring.test.tsx test/unit/public-record-page.test.tsx
       - name: Synthesis publication and screening regressions
         if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
         run: |
@@ -105,3 +126,8 @@ jobs:
           node apps/wire/test/integration/synthesis-real-bindings.mjs
           node apps/wire/test/integration/session-shared-handoff-real-bindings.mjs
           node apps/wire/test/integration/honors-real-bindings.mjs
+      - name: Native questions and retractions journey
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
+        env:
+          CLOUDFLARE_CF_FETCH_ENABLED: "false"
+        run: node apps/wire/test/integration/questions-retractions-real-bindings.mjs

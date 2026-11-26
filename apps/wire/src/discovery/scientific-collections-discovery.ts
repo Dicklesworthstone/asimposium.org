@@ -1,8 +1,8 @@
-/** Both public collections expose one fixed-cut selection contract for JSON,
+/** Public scientific collections expose one fixed-cut selection contract for JSON,
  * Markdown and HTML. Parameters refer to the served Zod-generated schemas. */
-function collection(path: string): "conflicts" | "questions" | undefined {
-  const match = /^\/p\/\{id\}\/(conflicts|questions)\.(?:json|md|html)$/.exec(path);
-  return match?.[0] === path ? (match[1] as "conflicts" | "questions") : undefined;
+function collection(path: string): "conflicts" | "questions" | "retractions" | undefined {
+  const match = /^\/p\/\{id\}\/(conflicts|questions|retractions)\.(?:json|md|html)$/.exec(path);
+  return match?.[0] === path ? (match[1] as "conflicts" | "questions" | "retractions") : undefined;
 }
 
 export function scientificCollectionParameters(path: string, origin: string): readonly unknown[] {
@@ -17,9 +17,13 @@ export function scientificCollectionParameters(path: string, origin: string): re
       "Maximum publication positions examined per page, from 1 to 200; defaults to 50. Complete records also share a bounded response budget. Exact targets select one record directly.",
     status:
       "Filter the recorded lifecycle state at the selected snapshot, after bounding publication positions. Keep the filter on every continuation. Cannot be combined with target. This status does not establish scientific correctness or current work availability.",
-    target: `One exact ${kind === "conflicts" ? "CF-" : "Q-"} identifier, including records beyond the first collection page. Accepts an optional through cursor and limit; cannot be combined with after or status. Missing or currently withheld exact sources return 404.`,
+    target: `One exact ${kind === "conflicts" ? "CF-" : kind === "questions" ? "Q-" : "R-"} identifier, including records beyond the first collection page. Accepts an optional through cursor and limit; cannot be combined with after${kind === "retractions" ? "" : " or status"}. Missing or currently withheld exact sources return 404.`,
   };
-  return (["through", "after", "limit", "status", "target"] as const).map((name) => ({
+  const names =
+    kind === "retractions"
+      ? (["through", "after", "limit", "target"] as const)
+      : (["through", "after", "limit", "status", "target"] as const);
+  return names.map((name) => ({
     name,
     in: "query",
     required: false,

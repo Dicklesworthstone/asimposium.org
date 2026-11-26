@@ -1,4 +1,4 @@
-import { DeadEndsListQuerySchema, PublicLedgerProblemIdSchema } from "@asimposium/contracts";
+import { DeadEndsListQuerySchema, PublicLedgerProblemIdSchema, RetractionsListQuerySchema, retractionsListPath } from "@asimposium/contracts";
 import { HypothesisItemQuerySchema } from "@asimposium/contracts/hypotheses";
 import { ConflictsListQuerySchema, conflictsListPath } from "@asimposium/contracts/conflicts";
 import { QuestionsListQuerySchema, questionsListPath } from "@asimposium/contracts/questions";
@@ -66,6 +66,7 @@ async function pageInput({ params, searchParams }: GenericDiptychPageProps) {
   const conflictQuery = target?.kind === "conflict" ? ConflictsListQuerySchema.safeParse(query) : null;
   const questionQuery = target?.kind === "question" ? QuestionsListQuerySchema.safeParse(query) : null;
   const deadEndQuery = target?.kind === "dead-end" ? DeadEndsListQuerySchema.safeParse(query) : null;
+  const retractionQuery = target?.kind === "retraction" ? RetractionsListQuerySchema.safeParse(query) : null;
   const validQuery = target?.kind === "hypothesis"
     ? hypothesisQuery.success
     : target?.kind === "proof-gap"
@@ -78,6 +79,9 @@ async function pageInput({ params, searchParams }: GenericDiptychPageProps) {
             questionQuery.data.target === undefined && questionQuery.data.status === undefined
         : target?.kind === "dead-end"
           ? deadEndQuery?.success === true && deadEndQuery.data.target === undefined
+        : target?.kind === "retraction"
+          ? retractionQuery?.success === true && retractionQuery.data.target === undefined &&
+            retractionQuery.data.after === undefined
       : Object.keys(query).length === 0;
   const redirectPath = target?.kind === "hypothesis" && hypothesisQuery.success
     ? `/p/${encodeURIComponent(target.problemId)}/hypotheses/${encodeURIComponent(target.recordId as string)}${hypothesisQuery.data.through === undefined ? "" : `?through=${hypothesisQuery.data.through}`}`
@@ -89,6 +93,8 @@ async function pageInput({ params, searchParams }: GenericDiptychPageProps) {
           ? questionsListPath(target.problemId, "human", { ...questionQuery.data, target: target.recordId })
         : target?.kind === "dead-end" && deadEndQuery?.success && validQuery
           ? deadEndsPagePath(target.problemId, { ...deadEndQuery.data, target: target.recordId })
+        : target?.kind === "retraction" && retractionQuery?.success && validQuery
+          ? retractionsListPath(target.problemId, "human", { ...retractionQuery.data, target: target.recordId })
       : null;
   return { target, path: slug.join("/"), validQuery, redirectPath };
 }
@@ -123,7 +129,7 @@ export default async function GenericDiptychFallbackPage(props: GenericDiptychPa
   if (!validQuery) {
     return (
       <main className="landing col problem-page" id="content">
-        <h1>{target.kind === "hypothesis" ? "Invalid hypothesis cursor" : target.kind === "proof-gap" ? "Invalid proof-gap view" : target.kind === "conflict" ? "Invalid conflict view" : target.kind === "question" ? "Invalid question view" : target.kind === "dead-end" ? "Invalid dead-end view" : target.kind === "problem-statement" ? "Invalid statement cursor" : "Read the current public record"}</h1>
+        <h1>{target.kind === "hypothesis" ? "Invalid hypothesis cursor" : target.kind === "proof-gap" ? "Invalid proof-gap view" : target.kind === "conflict" ? "Invalid conflict view" : target.kind === "question" ? "Invalid question view" : target.kind === "dead-end" ? "Invalid dead-end view" : target.kind === "retraction" ? "Invalid retraction view" : target.kind === "problem-statement" ? "Invalid statement cursor" : "Read the current public record"}</h1>
         <p>
           {target.kind === "hypothesis"
             ? "An exact hypothesis accepts one non-negative through cursor."
@@ -131,6 +137,7 @@ export default async function GenericDiptychFallbackPage(props: GenericDiptychPa
             : target.kind === "conflict" ? "An exact conflict accepts a non-negative through cursor and an optional page limit. Continuations, status filters and a second target are not accepted on this exact link."
             : target.kind === "question" ? "An exact question accepts a non-negative through cursor and an optional page limit. Continuations, status filters and a second target are not accepted on this exact link."
             : target.kind === "dead-end" ? "An exact dead end accepts an optional history filter. A second target, historical cursors and other filters are not accepted on this exact link."
+            : target.kind === "retraction" ? "An exact retraction accepts one nonnegative through cursor and an optional limit. A continuation or second target is not accepted on this exact link."
             : target.kind === "problem-statement" ? "An exact statement version accepts one non-negative through cursor."
             : "This record has a current public face. Historical cursors and additional filters are not supported on this item page."}
         </p>

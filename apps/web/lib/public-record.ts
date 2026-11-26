@@ -5,6 +5,7 @@ import {
   PUBLIC_RESOURCE_REGISTRY,
   PublicLedgerProblemIdSchema,
   type PublicResourceKind,
+  RetractionIdSchema,
 } from "@asimposium/contracts";
 import { PublicHypothesisIdSchema } from "@asimposium/contracts/hypotheses";
 import { ProofGapIdSchema } from "@asimposium/contracts/proof-gaps";
@@ -51,6 +52,7 @@ export function resolvePublicRecord(slug: readonly string[]): PublicRecordTarget
     if (entry.kind === "proof-gap" && !ProofGapIdSchema.safeParse(variables.gid).success) return null;
     if (entry.kind === "conflict" && !ConflictIdSchema.safeParse(variables.cid).success) return null;
     if (entry.kind === "question" && !QuestionIdSchema.safeParse(variables.qid).success) return null;
+    if (entry.kind === "retraction" && !RetractionIdSchema.safeParse(variables.rid).success) return null;
     for (const key of ["version", "seq"]) {
       const value = variables[key];
       if (value !== undefined && (!/^[1-9][0-9]{0,15}$/.test(value) || !Number.isSafeInteger(Number(value)))) return null;

@@ -22,9 +22,12 @@ import {
   RetractionIdSchema,
   RetractionItemSchema,
   RetractionKindSchema,
+  RetractionsListQuerySchema,
   RetractionsListResponseSchema,
   RetractRequestSchema,
   RetractResponseSchema,
+  retractionsListMatchesQuery,
+  retractionsListPath,
   WithdrawQuestionRequestSchema,
   WithdrawQuestionResponseSchema,
 } from "../../src/index.ts";
@@ -413,10 +416,71 @@ describe("W5.8d Questions & Retractions contracts", () => {
       const listRes = {
         schema: RETRACTIONS_SCHEMA_ID,
         problem_id: "P-100",
+        cursor: 10,
+        after: 0,
+        scanned_through: 10,
+        next_after: null,
+        target: null,
         retractions: [item],
         omitted: [],
       };
       expect(RetractionsListResponseSchema.safeParse(listRes).success).toBe(true);
+      const exact = { ...listRes, target: "R-1" };
+      expect(RetractionsListResponseSchema.safeParse(exact).success).toBe(true);
+      for (const invalid of [
+        { ...exact, target: "R-2" },
+        { ...exact, retractions: [] },
+        { ...listRes, retractions: [item, item] },
+        { ...listRes, scanned_through: 9 },
+        { ...listRes, next_after: 10, omitted: ["page_limit"] },
+        { ...listRes, retractions: [{ ...item, problem_id: "P-OTHER" }] },
+      ])
+        expect(RetractionsListResponseSchema.safeParse(invalid).success).toBe(false);
+    });
+
+    test("retraction selections preserve exact identity and snapshot pagination", async () => {
+      const valid = await Bun.file(
+        new URL("../fixtures/valid/retractions-list-query.json", import.meta.url),
+      ).json();
+      const query = RetractionsListQuerySchema.parse(valid);
+      expect(query).toEqual({ through: 80, after: 15, limit: 8 });
+      expect(retractionsListPath("P-100", "json", query)).toBe(
+        "/p/P-100/retractions.json?through=80&after=15&limit=8",
+      );
+      const invalid = await Bun.file(
+        new URL(
+          "../fixtures/invalid/retractions-list-query-without-snapshot.json",
+          import.meta.url,
+        ),
+      ).json();
+      for (const value of [
+        invalid,
+        { after: "81", through: "80" },
+        { target: "R-1", after: "0", through: "80" },
+        { target: "R-1\n" },
+        { target: ["R-1", "R-2"] },
+        { limit: "201" },
+        { through: "01" },
+        { through: "9007199254740992" },
+        { status: "open" },
+        { through: "2\n" },
+      ])
+        expect(RetractionsListQuerySchema.safeParse(value).success).toBe(false);
+      const face = RetractionsListResponseSchema.parse({
+        schema: RETRACTIONS_SCHEMA_ID,
+        problem_id: "P-100",
+        cursor: 80,
+        after: 15,
+        scanned_through: 80,
+        next_after: null,
+        target: null,
+        retractions: [],
+        omitted: [],
+      });
+      expect(retractionsListMatchesQuery("P-100", query, face)).toBe(true);
+      expect(retractionsListMatchesQuery("P-OTHER", query, face)).toBe(false);
+      expect(retractionsListMatchesQuery("P-100", { ...query, through: 81 }, face)).toBe(false);
+      expect(retractionsListMatchesQuery("P-100", { target: "R-1" }, face)).toBe(false);
     });
 
     test("public retraction notices are typed platform metadata that authors cannot set", () => {

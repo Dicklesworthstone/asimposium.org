@@ -1,4 +1,9 @@
-import { BatchEventCauseSchema, MAX_CAUSED_BY_PER_MEMBER } from "@asimposium/contracts";
+import {
+  BatchEventCauseSchema,
+  MAX_CAUSED_BY_PER_MEMBER,
+  RetractionIdSchema,
+  retractionsListPath,
+} from "@asimposium/contracts";
 import { PublicHypothesisIdSchema } from "@asimposium/contracts/hypotheses";
 import { ProofGapIdSchema } from "@asimposium/contracts/proof-gaps";
 import { SynthesisIdSchema } from "@asimposium/contracts/syntheses";
@@ -222,6 +227,9 @@ function publicObjectUrl(problemId: string, row: TailRow, through: number): stri
     return `${prefix}/hypotheses/${row.object_id}.json?through=${through}`;
   if (row.object_kind === "gap" && ProofGapIdSchema.safeParse(row.object_id).success)
     return `${prefix}/gaps.json?target=${row.object_id}&through=${through}`;
+  if (row.object_kind === "retraction" && row.object_version === 1 &&
+    RetractionIdSchema.safeParse(row.object_id).success)
+    return retractionsListPath(problemId, "json", { target: row.object_id as string, through });
   if (
     row.object_kind === "synthesis" &&
     row.object_version === 1 &&

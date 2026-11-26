@@ -1,5 +1,8 @@
 import { afterEach, expect, test } from "bun:test";
-import type { ScreeningPublicationNotice } from "@asimposium/contracts";
+import {
+  RetractionsListResponseSchema,
+  type ScreeningPublicationNotice,
+} from "@asimposium/contracts";
 import { screeningNoticeText } from "@asimposium/render";
 import type { Env } from "../../src/env.ts";
 import { sha256Hex, writeLedgerEvent } from "../../src/krater/krater.ts";
@@ -258,7 +261,7 @@ test("corrupt retraction screening provenance cannot return an unqualified expla
   );
   for (const format of formats) {
     const response = await face(f, format, { headers: { "if-none-match": etag } });
-    expect(response.status).toBe(500);
+    expect(response.status).toBe(503);
     expect(await response.text()).not.toContain(reason);
   }
 });
@@ -314,9 +317,119 @@ test("hidden retractions preserve bounded admission order and controls cannot re
   control(f, "R-1", "hidden", 1);
   const page = await loadProblemRetractions(f.db, problemId, { limit: 1 });
   expect(page.retractions).toHaveLength(0);
-  expect(page.omitted).toContain("truncated at limit of 1 retractions");
+  expect(page.omitted).toContain("page_limit");
+  expect(page.next_after).toBe(page.scanned_through);
   expect(page.omitted).toContain("A retraction explanation is unavailable.");
   const other = await fixture();
   await publish(other, "R-3", { retraction_id: "R-FORGED" });
   expect((await loadProblemRetractions(other.db, problemId)).retractions).toHaveLength(0);
+});
+
+test("exact retractions beyond the first 50 and pinned continuation remain reachable", async () => {
+  const f = await fixture();
+  for (let index = 1; index <= 55; index++)
+    await publish(f, `R-${index}`, {
+      reason: `Correction ${index}: the published bound has a finite counterexample.`,
+    });
+  const firstResponse = await face(f, "json");
+  expect(firstResponse.status).toBe(200);
+  const first = RetractionsListResponseSchema.parse(await firstResponse.json());
+  expect(first.retractions).toHaveLength(50);
+  expect(first.next_after).toBe(first.retractions.at(-1)?.seq ?? null);
+  expect(first.omitted).toContain("page_limit");
+  expect(firstResponse.headers.get("link")).toContain('rel="next"');
+  for (const format of formats) {
+    const exact = await face(f, `${format}?target=R-55&through=${first.cursor}`);
+    expect(exact.status).toBe(200);
+    const body = await exact.text();
+    expect(body).toContain("Correction 55:");
+    expect(body).not.toContain("Correction 1:");
+    expect(
+      (
+        await face(f, `${format}?target=R-55&through=${first.cursor}`, {
+          headers: { "if-none-match": exact.headers.get("etag") ?? "" },
+        })
+      ).status,
+    ).toBe(304);
+  }
+  await publish(f, "R-56");
+  const next = RetractionsListResponseSchema.parse(
+    await (await face(f, `json?through=${first.cursor}&after=${first.next_after}`)).json(),
+  );
+  expect(next.retractions.map((item) => item.retraction_id)).toEqual([
+    "R-51",
+    "R-52",
+    "R-53",
+    "R-54",
+    "R-55",
+  ]);
+  expect(next.cursor).toBe(first.cursor);
+  expect(next.next_after).toBeNull();
+  expect(next.scanned_through).toBe(first.cursor);
+  expect((await face(f, `json?target=R-56&through=${first.cursor}`)).status).toBe(404);
+  expect((await face(f, "json?target=R-56")).status).toBe(200);
+});
+
+test("withheld corrections advance pagination but exact hidden and missing targets disclose no bytes", async () => {
+  const f = await fixture();
+  await publish(f, "R-1");
+  await publish(f, "R-2", { reason: "A later correction remains independently readable." });
+  const original = await face(f, "json?target=R-1");
+  control(f, "R-1", "hidden", 1);
+  const first = RetractionsListResponseSchema.parse(await (await face(f, "json?limit=1")).json());
+  expect(first.retractions).toEqual([]);
+  expect(first.next_after).not.toBeNull();
+  const next = RetractionsListResponseSchema.parse(
+    await (await face(f, `json?through=${first.cursor}&after=${first.next_after}&limit=1`)).json(),
+  );
+  expect(next.retractions.map((item) => item.retraction_id)).toEqual(["R-2"]);
+  for (const target of ["R-1", "R-ABSENT"])
+    for (const format of formats) {
+      const response = await face(f, `${format}?target=${target}`, {
+        headers: { "if-none-match": original.headers.get("etag") ?? "" },
+      });
+      expect(response.status).toBe(404);
+      expect(await response.text()).not.toContain(reason);
+      expect(response.headers.get("cache-control")).toContain("no-store");
+    }
+  control(f, "R-1", "visible", 2);
+  expect((await face(f, "json?target=R-1")).status).toBe(200);
+});
+
+test("invalid retraction selectors teach and damaged exact sources never fall back to another correction", async () => {
+  const f = await fixture();
+  const published = await publish(f);
+  for (const query of [
+    "after=0",
+    "after=9&through=8",
+    "target=R-1&after=0&through=8",
+    "target=R-1&target=R-2",
+    "through=01",
+    "limit=201",
+    "format=csv",
+    "through=999999",
+    "target=R-1%0A",
+  ]) {
+    const response = await face(f, `json?${query}`);
+    expect(response.status).toBe(400);
+    const error = (await response.json()) as Record<string, unknown>;
+    expect(error.code).toBe("CURSOR_INVALID");
+    expect(error.rule).toBe("A5");
+    expect(error.fix_hint).toBeTruthy();
+    expect(error.schema).toContain("retractions.v1.json");
+    expect(error.example).toBeTruthy();
+  }
+  const original = await face(f, "json?target=R-1");
+  // Deliberate storage corruption below the immutable write guard.
+  f.sql.exec("DROP TRIGGER event_content_lawful_redaction_only");
+  f.sql
+    .query("UPDATE event_content SET payload_json = '{}' WHERE event_id = ?")
+    .run(published.eventId);
+  for (const format of formats) {
+    const response = await face(f, `${format}?target=R-1`, {
+      headers: { "if-none-match": original.headers.get("etag") ?? "" },
+    });
+    expect(response.status).toBe(503);
+    expect(await response.text()).not.toContain(reason);
+  }
 });

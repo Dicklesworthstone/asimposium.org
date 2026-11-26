@@ -476,6 +476,11 @@ describe("New Agora routes: /areas, /p/[slug]/retractions, /p/[slug]/moves, /sta
     const face = RetractionsListResponseSchema.parse({
       schema: RETRACTIONS_SCHEMA_ID,
       problem_id: "P-100",
+      cursor: 8,
+      after: 0,
+      scanned_through: 8,
+      next_after: null,
+      target: null,
       retractions: [
         {
           retraction_id: "R-1",
@@ -515,7 +520,7 @@ describe("New Agora routes: /areas, /p/[slug]/retractions, /p/[slug]/moves, /sta
         searchParams: Promise.resolve({ cursor: "99" }),
       }),
     );
-    expect(badQueryHtml).toContain("Retractions use the canonical problem list");
+    expect(badQueryHtml).toContain("Choose a valid retraction view");
   });
 
   test("/p/[slug]/moves renders problem-scoped moves and rejects historical query params", async () => {

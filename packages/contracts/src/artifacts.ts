@@ -170,7 +170,11 @@ import {
   QuestionsListResponseSchema,
 } from "./questions.ts";
 import { generateReadinessSchema } from "./readiness.ts";
-import { RETRACTIONS_SCHEMA_ID, RetractionsListResponseSchema } from "./retractions.ts";
+import {
+  RETRACTIONS_SCHEMA_ID,
+  RetractionsListQuerySchema,
+  RetractionsListResponseSchema,
+} from "./retractions.ts";
 import { generatedReviewQueueArtifact } from "./review-queue-artifact.ts";
 import {
   type DomainRubric,
@@ -1002,6 +1006,9 @@ export function generatedArtifacts(): readonly GeneratedArtifact[] {
         $id: RETRACTIONS_SCHEMA_ID,
         title: "ASImposium public retractions response",
         ...z.toJSONSchema(RetractionsListResponseSchema),
+        $defs: {
+          query: z.toJSONSchema(RetractionsListQuerySchema, { io: "input" }),
+        },
       }),
     },
     {
