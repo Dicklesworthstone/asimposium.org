@@ -98,6 +98,10 @@
   --glaze-muted: #c4b49c;
   --glaze-clay: #e58a5c;
   --glaze-line: #43362c;
+  /* Gilt for the small Greek inscription over a black register (8.9:1). */
+  --glaze-gilt: #d6b36f;
+  /* The kylix, as a mask: the site's mark at any size and in any ink. */
+  --kylix: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'%3E%3Cpath d='M4 13.5h32c-1 7.2-7.6 11.6-16 11.6S5 20.7 4 13.5Z'/%3E%3Cpath d='M7.2 16.2c-4.6.2-5.6-4.9-2.1-5.4M32.8 16.2c4.6.2 5.6-4.9 2.1-5.4' fill='none' stroke='%23000' stroke-width='1.8' stroke-linecap='round'/%3E%3Cpath d='M18.5 24.8h3l-.5 5.4h-2Z'/%3E%3Cpath d='M11.5 33.4c2.4-3 14.6-3 17 0-2.6 1.2-14.4 1.2-17 0Z'/%3E%3C/svg%3E");
 }
 :root[data-theme="light"] {
   color-scheme: light;
@@ -127,6 +131,7 @@
   --glaze-muted: #c2b29a;
   --glaze-clay: #ec9a70;
   --glaze-line: #4a382c;
+  --glaze-gilt: #dcbc7c;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -153,6 +158,7 @@
     --glaze-muted: #c2b29a;
     --glaze-clay: #ec9a70;
     --glaze-line: #4a382c;
+    --glaze-gilt: #dcbc7c;
   }
 }
 
@@ -247,6 +253,7 @@ body > .loading-frame {
     --glaze-muted: CanvasText;
     --glaze-clay: CanvasText;
     --glaze-line: CanvasText;
+    --glaze-gilt: CanvasText;
   }
   .claim-card,
   .participant-card,
@@ -4473,6 +4480,343 @@ body > a.sr-only.focus\:not-sr-only:focus {
   }
 }
 
+/* ── Registers: the page as a painted vase ─────────────── */
+/*
+ * The header is the vase's black-glaze neck with its key band; every page
+ * opens on a fired-black register carrying its title in cream, gilt and
+ * terracotta; a clay groundline closes the register; the record sits on the
+ * pale field below; the footer is the foot. The registers are token scopes,
+ * not new components: inside them the palette is remapped to the glaze set,
+ * so every crumb, chip, button and code span already knows how to sit on
+ * black, in both schemes, in print (where the glaze set is paper) and under
+ * forced colours (where it is Canvas).
+ */
+.site-header,
+.landing > .masthead {
+  --color-paper: var(--glaze);
+  --color-card: var(--glaze-2);
+  --color-sunk: color-mix(in srgb, #000 22%, var(--glaze));
+  --color-ink: var(--glaze-ink);
+  --color-ink2: color-mix(in srgb, var(--glaze-ink) 80%, var(--glaze-muted));
+  --color-muted: var(--glaze-muted);
+  --color-clay: var(--glaze-clay);
+  --color-bronze: var(--glaze-gilt);
+  --color-line: var(--glaze-line);
+  --color-rule: color-mix(in srgb, var(--glaze-muted) 40%, var(--glaze));
+  --wash: color-mix(in srgb, var(--glaze-clay) 16%, var(--glaze));
+  --wash-card: color-mix(in srgb, var(--glaze-clay) 12%, var(--glaze-2));
+  --shadow-1: 0 1px 2px rgb(0 0 0 / 0.35);
+  --shadow-2: 0 2px 4px rgb(0 0 0 / 0.4), 0 18px 40px -18px rgb(0 0 0 / 0.8);
+  color: var(--color-ink);
+}
+
+/* The neck: solid black glaze, its key band in fired clay. */
+.site-header {
+  border-top: 0;
+  background: color-mix(in srgb, var(--glaze) 96%, transparent);
+}
+.site-header-inner {
+  padding-block: 0.8rem 0.7rem;
+}
+.site-header .frieze {
+  height: 12px;
+  opacity: 0.85;
+}
+.site-wordmark-name {
+  letter-spacing: 0.08em;
+}
+.site-nav a {
+  color: var(--color-ink2);
+}
+.site-nav a:hover,
+.site-nav a[aria-current="page"] {
+  color: var(--color-clay);
+}
+.site-console {
+  background: var(--color-clay);
+  color: var(--color-paper);
+}
+.site-console:hover,
+.site-console[aria-current="page"] {
+  background: color-mix(in srgb, var(--color-clay) 82%, white);
+  border-color: color-mix(in srgb, var(--color-clay) 82%, white);
+}
+@media (min-width: 64.01rem) and (min-height: 40rem) {
+  .site-header {
+    box-shadow: 0 12px 28px -20px rgb(0 0 0 / 0.7);
+  }
+}
+
+/*
+ * The page's own register. Its ground runs edge to edge through a
+ * border-image outset, which is ink overflow: it never widens the scrollable
+ * page, so no viewport unit can push a phone sideways. The bottom 3px of the
+ * image are the clay groundline.
+ */
+.landing > .masthead {
+  position: relative;
+  isolation: isolate;
+  border: 0;
+  border-image: linear-gradient(to top, var(--glaze-clay) 0 3px, var(--glaze) 3px) fill 0 // 0
+    100vmax;
+  margin-bottom: clamp(1.75rem, 1.1rem + 2.2vw, 2.75rem);
+}
+.landing > .masthead:not(.hero) {
+  padding-block: clamp(2.25rem, 1.3rem + 3.4vw, 4rem) clamp(2rem, 1.2rem + 2.6vw, 3.2rem);
+}
+.landing > .masthead::after {
+  display: none;
+}
+/* Lamplight from above the title: a glow that fades inside the register. */
+.landing > .masthead:not(.hero)::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background: radial-gradient(
+    closest-side at 50% 0%,
+    color-mix(in srgb, var(--glaze-clay) 15%, transparent),
+    transparent
+  );
+  pointer-events: none;
+}
+.landing > .masthead .greek-sub {
+  color: var(--color-bronze);
+  font-size: 0.95rem;
+  letter-spacing: 0.28em;
+}
+.landing > .masthead:not(.hero) h1 {
+  font-size: clamp(2.05rem, 1.25rem + 3.3vw, 3.5rem);
+  letter-spacing: 0.035em;
+  line-height: 1.08;
+  margin: 0.55rem 0 0.85rem;
+}
+.landing > .masthead:not(.hero) > .quiet {
+  font-size: 1.04rem;
+  line-height: 1.6;
+}
+.landing > .masthead .tagline > a {
+  color: var(--color-muted);
+}
+.landing > .masthead .tagline > a:hover {
+  color: var(--color-clay);
+}
+
+/*
+ * Index and document pages carry their title as an inscription: centred,
+ * the Greek line struck between two rules. Record pages (the ones with a
+ * contents rail) keep a left edge, since their titles are long statements.
+ */
+.landing.col:not(.with-contents) > .masthead:not(.hero) {
+  text-align: center;
+}
+.landing.col:not(.with-contents) > .masthead:not(.hero) > p {
+  margin-inline: auto;
+  max-width: 42rem;
+}
+.landing.col:not(.with-contents)
+  > .masthead:not(.hero)
+  :is(.auth-row, .btn-row, .status-row, .diptych-nav, .diptych-links) {
+  justify-content: center;
+}
+.landing.col:not(.with-contents) > .masthead:not(.hero) > .greek-sub {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.9rem;
+}
+.landing.col:not(.with-contents) > .masthead:not(.hero) > .greek-sub::before,
+.landing.col:not(.with-contents) > .masthead:not(.hero) > .greek-sub::after {
+  content: "";
+  flex: 0 0 clamp(1.5rem, 1rem + 4vw, 3.5rem);
+  height: 1px;
+  background: currentColor;
+  opacity: 0.6;
+}
+/* The way back leads the inscription, above the Greek line. */
+.landing.col:not(.with-contents) > .masthead:not(.hero) {
+  display: flex;
+  flex-direction: column;
+}
+.landing.col:not(.with-contents) > .masthead:not(.hero) > .tagline:has(> a) {
+  order: -1;
+  margin-bottom: 0.9rem;
+}
+.landing.col.with-contents > .masthead h1 {
+  font-size: clamp(1.8rem, 1.2rem + 2.3vw, 2.8rem);
+}
+/* The rail starts below the register, never over its black ground. */
+@media (min-width: 72rem) {
+  .landing.col.with-contents > .record-contents {
+    grid-row: 2;
+  }
+}
+
+/* The front page's register holds the painting in a dark gallery frame. */
+.home .hero {
+  margin-bottom: clamp(1rem, 0.6rem + 1.5vw, 2rem);
+}
+.home .hero h1 {
+  color: var(--color-ink);
+  text-shadow: 0 2px 24px rgb(0 0 0 / 0.35);
+}
+.home .hero-figure a {
+  border-color: color-mix(in srgb, var(--glaze-gilt) 35%, var(--glaze-line));
+}
+.home .hero-figure a::before {
+  border-color: color-mix(in srgb, var(--glaze-gilt) 40%, transparent);
+}
+.home .hero-agents {
+  border-top-color: var(--color-line);
+}
+
+/* Further reading: a shelf of small tablets, not a list of links. */
+.home .reading-list {
+  gap: 0.9rem;
+}
+.home .reading-list li {
+  position: relative;
+  padding: 1rem 1.1rem 1.05rem;
+  border: 1px solid var(--color-line);
+  border-top: 2px solid color-mix(in srgb, var(--color-clay) 70%, var(--color-line));
+  border-radius: var(--radius-lg);
+  background: var(--color-card);
+  box-shadow: var(--shadow-1);
+}
+.home .reading-list li > a:first-child {
+  font-family: var(--font-display);
+  font-size: 1.02rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-decoration: none;
+}
+.home .reading-list li > a:first-child:hover {
+  text-decoration: underline;
+}
+@media (hover: hover) and (pointer: fine) {
+  .home .reading-list li {
+    transition:
+      border-color 0.2s ease,
+      box-shadow 0.2s ease;
+  }
+  .home .reading-list li:hover {
+    border-color: color-mix(in srgb, var(--color-clay) 40%, var(--color-line));
+    box-shadow: var(--shadow-2);
+  }
+}
+/* What exists today: a ruled ledger panel of implemented slices. */
+.home .standing-list {
+  list-style: none;
+  columns: auto;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(26rem, 100%), 1fr));
+  gap: 0;
+  margin: 1rem 0 0;
+  padding: 0.4rem 1.4rem;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-lg);
+  background: color-mix(in srgb, var(--color-card) 60%, var(--color-paper));
+}
+.home .standing-list li {
+  margin: 0;
+  padding: 0.85rem 0 0.85rem 1.4rem;
+  position: relative;
+  border-bottom: 1px solid var(--color-line);
+  font-size: 0.98rem;
+  line-height: 1.5;
+  color: var(--color-ink2);
+}
+.home .standing-list li::before {
+  content: "";
+  position: absolute;
+  left: 0.15rem;
+  top: 1.3rem;
+  width: 0.45rem;
+  height: 0.45rem;
+  transform: rotate(45deg);
+  background: var(--color-clay);
+}
+.home .standing-list li > strong:first-child {
+  color: var(--color-ink);
+}
+.home .standing-list li:last-child {
+  border-bottom: 0;
+}
+@media (min-width: 44rem) {
+  .home .standing-list {
+    column-gap: 2.4rem;
+  }
+}
+
+/* Section inscriptions: larger, so a section reads as a section. */
+.landing h2 {
+  font-size: clamp(1.08rem, 0.98rem + 0.4vw, 1.28rem);
+  letter-spacing: 0.1em;
+  margin-top: clamp(2.6rem, 2rem + 2vw, 3.6rem);
+}
+.landing > .masthead + section > h2:first-child,
+.landing > .masthead + * > h2:first-child {
+  margin-top: 0;
+}
+
+/*
+ * An empty ledger is the common case before launch, so emptiness is
+ * designed: the kylix waiting to be filled, a short inscription, then the
+ * one honest next step.
+ */
+.landing .empty-state {
+  text-align: center;
+  padding: clamp(2rem, 1.4rem + 2.2vw, 3.1rem) clamp(1.25rem, 0.8rem + 2.6vw, 3rem);
+  background:
+    radial-gradient(120% 70% at 50% 0%, var(--wash-card), transparent 72%), var(--color-card);
+  border-color: color-mix(in srgb, var(--color-clay) 20%, var(--color-line));
+}
+.landing .empty-state::before {
+  content: "";
+  display: block;
+  width: 3.25rem;
+  height: 3.25rem;
+  margin: 0 auto 0.85rem;
+  background-color: var(--color-clay);
+  opacity: 0.8;
+  -webkit-mask: var(--kylix) center / contain no-repeat;
+  mask: var(--kylix) center / contain no-repeat;
+}
+.landing .empty-state > p:first-child > strong:only-child {
+  display: block;
+  font-family: var(--font-display);
+  font-size: clamp(1.08rem, 1rem + 0.4vw, 1.25rem);
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  line-height: 1.3;
+  text-wrap: balance;
+}
+.landing .empty-state > p {
+  max-width: 36rem;
+  margin-inline: auto;
+}
+.landing .empty-state :is(ul, ol, form, pre, dl, table) {
+  text-align: left;
+}
+
+/* The ledger-watch control: one quiet line, not a dashed box. */
+.public-ledger-live {
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-lg);
+  background: color-mix(in srgb, var(--color-sunk) 55%, var(--color-paper));
+  padding: 0.4rem 0.5rem 0.4rem 1rem;
+}
+.public-ledger-live > p.quiet {
+  font-size: 0.9rem;
+  font-style: italic;
+}
+.public-ledger-live > p:last-of-type {
+  flex: 0 0 auto;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
 @media print {
   .meander,
   .frieze,
@@ -4513,6 +4857,7 @@ body > a.sr-only.focus\:not-sr-only:focus {
     --glaze-muted: #4a4238;
     --glaze-clay: #a2442a;
     --glaze-line: #ddd3c2;
+    --glaze-gilt: #7f6129;
   }
   main {
     animation: none;
