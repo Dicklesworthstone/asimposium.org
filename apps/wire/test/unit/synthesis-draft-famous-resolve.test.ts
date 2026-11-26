@@ -565,6 +565,7 @@ test("Fable §6.1: draft synthesis stays private until steward/sponsor publishes
       path: string,
       action: string,
       sponsorId: string,
+      body = "",
     ) => {
       const envelope = await mintServiceEnvelope({
         kid: "k-nkz2",
@@ -576,13 +577,14 @@ test("Fable §6.1: draft synthesis stays private until steward/sponsor publishes
         method,
         route: path,
         action,
-        body: "",
+        body,
         now: Math.floor(Date.now() / 1_000),
       });
       return app.fetch(
         new Request(`https://a.asimposium.org${path}`, {
           method,
-          headers: serviceEnvelopeHeaders(envelope),
+          headers: { ...serviceEnvelopeHeaders(envelope), ...(body ? { "content-type": "application/json" } : {}) },
+          ...(body ? { body } : {}),
         }),
         env,
       );
@@ -620,6 +622,50 @@ test("Fable §6.1: draft synthesis stays private until steward/sponsor publishes
     expect(parsedList.drafts).toHaveLength(1);
     expect(parsedList.drafts[0]?.synthesis_id).toBe(draftJson.synthesis_id);
     expect(parsedList.drafts[0]?.state).toBe("draft");
+
+    // Multiple pages, including identical timestamps and an admitted draft
+    // larger than the old 256 KiB transport ceiling. No row may be clipped.
+    const path = `/v1/sponsors/problems/${PROBLEM}/syntheses/drafts`;
+    const page = (body: unknown, principal = SPONSOR) =>
+      signedSponsorReq("POST", path, "sponsor.syntheses.drafts.list", principal, JSON.stringify(body));
+    const copy = f.sql.query(`INSERT INTO synthesis_drafts
+      (synthesis_id, problem_id, covers_through, body_md, anchors_json, omitted_json, selection_policy,
+       closing_resolution_json, dropped_single_author_count, author_fellow_id, author_sponsor_id,
+       session_id, declared_model, harness, state, created_at)
+      SELECT ?, problem_id, covers_through, ?, anchors_json, ?, selection_policy,
+       closing_resolution_json, dropped_single_author_count, author_fellow_id, author_sponsor_id,
+       session_id, declared_model, harness, state, created_at FROM synthesis_drafts WHERE synthesis_id = ?`);
+    const expected = new Set([draftJson.synthesis_id]);
+    for (let n = 1; n <= 51; n++) {
+      const id = `SYNTH-${String(n).padStart(26, "0")}`;
+      expected.add(id);
+      copy.run(id, n === 51 ? "∑".repeat(60_000) : "Bounded result.",
+        n === 51 ? JSON.stringify(Array(20).fill("∑".repeat(1900))) : "[]", draftJson.synthesis_id);
+    }
+    let after: { created_at: string; synthesis_id: string } | undefined;
+    const seen: string[] = [];
+    do {
+      const res = await page(after ? { after } : {});
+      expect(res.status).toBe(200);
+      const bytes = await res.arrayBuffer();
+      expect(bytes.byteLength).toBeLessThanOrEqual(2 * 1024 * 1024);
+      const current = SynthesisDraftListResponseSchema.parse(JSON.parse(new TextDecoder().decode(bytes)));
+      if (bytes.byteLength > 256 * 1024) expect(current.drafts).toHaveLength(1);
+      for (const row of current.drafts) {
+        if (row.synthesis_id === `SYNTH-${"51".padStart(26, "0")}`) expect(row.body_md.length).toBe(60_000);
+        seen.push(row.synthesis_id);
+      }
+      if (current.next_after) {
+        const last = current.drafts.at(-1);
+        expect(current.next_after).toEqual({ created_at: last?.created_at, synthesis_id: last?.synthesis_id });
+      }
+      after = current.next_after;
+      expect(seen.length).toBeLessThanOrEqual(expected.size);
+    } while (after);
+    expect(seen).toEqual([...expected].sort().reverse());
+    const unrelated = await page({ after: { created_at: parsedList.drafts[0]?.created_at, synthesis_id: draftJson.synthesis_id } }, OTHER_SPONSOR);
+    expect(SynthesisDraftListResponseSchema.parse(await unrelated.json()).drafts).toEqual([]);
+    expect((await page({ after: { synthesis_id: draftJson.synthesis_id } })).status).toBe(422);
 
     const cursorBeforePub = (
       f.sql.query("SELECT cursor FROM public_cursor WHERE singleton = 1").get() as {

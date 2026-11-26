@@ -156,6 +156,7 @@ export async function sponsorMutationRefusal(
       "inbox.read",
       "fellow.activity.read",
       "sponsor.reports.list",
+      "sponsor.syntheses.drafts.list",
       "lease.list",
       "sponsor.screening-appeals.submit",
       "sponsor.integrity.cases.query",

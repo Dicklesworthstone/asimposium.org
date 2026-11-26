@@ -12,7 +12,9 @@
 import {
   type ClosingSynthesisDeclaration,
   ClosingSynthesisDeclarationSchema,
+  SYNTHESIS_DRAFT_PAGE_MAX_BYTES,
   SYNTHESES_SCHEMA_ID,
+  type SynthesisDraftCursor,
   type SynthesisAnchor,
   SynthesisAnchorSchema,
   type SynthesisDraftListResponse,
@@ -155,48 +157,62 @@ async function readSponsorStanding(
   }
 }
 
+const DRAFT_PAGE_LIMIT = 8;
+const DRAFT_PAGE_TARGET_BYTES = 224 * 1024;
+
 export async function listSynthesisDraftsForSponsor(
   db: D1Database,
   problemId: string,
   sponsorId: string,
+  page?: { readonly after?: SynthesisDraftCursor | undefined },
 ): Promise<SynthesisDraftListResponse> {
-  const steward = await isProblemSteward(db, problemId, sponsorId);
-  const rows = steward
-    ? (
-        await db
-          .prepare(
-            `SELECT d.* FROM synthesis_drafts d
-             WHERE d.problem_id = ?
-               AND NOT EXISTS (
-                 SELECT 1 FROM private_draft_erasures e WHERE e.problem_id = d.problem_id
-               )
-             ORDER BY d.created_at DESC LIMIT 50`,
-          )
-          .bind(problemId)
-          .all<DraftRow>()
-      ).results
-    : (
-        await db
-          .prepare(
-            `SELECT d.* FROM synthesis_drafts d
-             JOIN problems p ON p.id = d.problem_id AND p.status <> 'private-draft'
-             JOIN enrollment_fellows f ON f.fellow_id = d.author_fellow_id
-             JOIN sponsors s ON s.sponsor_id = f.sponsor_id AND s.tombstoned_at IS NULL
-             WHERE d.problem_id = ? AND f.sponsor_id = ?
-               AND NOT EXISTS (
-                 SELECT 1 FROM private_draft_erasures e WHERE e.problem_id = d.problem_id
-               )
-             ORDER BY d.created_at DESC LIMIT 50`,
-          )
-          .bind(problemId, sponsorId)
-          .all<DraftRow>()
-      ).results;
+  const after = page?.after;
+  // Check current ownership, stewardship, and erasure in the same read as the
+  // private bodies. A continuation carries a position and grants no access.
+  const { results: rows } = await db.prepare(
+    `SELECT d.* FROM synthesis_drafts d
+     JOIN problems p ON p.id = d.problem_id
+     JOIN sponsors s ON s.sponsor_id = ? AND s.tombstoned_at IS NULL
+     WHERE d.problem_id = ?
+       AND (p.sponsor_id = s.sponsor_id
+         OR EXISTS (SELECT 1 FROM problem_stewards ps WHERE ps.problem_id = p.id AND ps.sponsor_id = s.sponsor_id)
+         OR (p.status <> 'private-draft' AND EXISTS (
+           SELECT 1 FROM enrollment_fellows f WHERE f.fellow_id = d.author_fellow_id AND f.sponsor_id = s.sponsor_id
+         )))
+       AND NOT EXISTS (SELECT 1 FROM private_draft_erasures e WHERE e.problem_id = d.problem_id)
+       ${after ? "AND (d.created_at, d.synthesis_id) < (?, ?)" : ""}
+     ORDER BY d.created_at DESC, d.synthesis_id DESC LIMIT ?`,
+  ).bind(sponsorId, problemId, ...(after ? [after.created_at, after.synthesis_id] : []),
+    page ? DRAFT_PAGE_LIMIT + 1 : 50).all<DraftRow>();
 
-  return SynthesisDraftListResponseSchema.parse({
+  const face: SynthesisDraftListResponse = {
     schema: SYNTHESES_SCHEMA_ID,
     problem_id: problemId,
-    drafts: rows.map(parseDraftRow),
-  });
+    drafts: [],
+  };
+  if (!page) {
+    face.drafts = rows.map(parseDraftRow);
+    return SynthesisDraftListResponseSchema.parse(face);
+  }
+
+  const encoder = new TextEncoder();
+  // Reserve space for the outer object and cursor. All sizes are serialized
+  // UTF-8, including JSON escapes in scientific text and selection notes.
+  let bytes = 1024;
+  for (const row of rows.slice(0, DRAFT_PAGE_LIMIT)) {
+    const draft = parseDraftRow(row);
+    const itemBytes = encoder.encode(JSON.stringify(draft)).length + 1;
+    if (face.drafts.length > 0 && bytes + itemBytes > DRAFT_PAGE_TARGET_BYTES) break;
+    if (bytes + itemBytes > SYNTHESIS_DRAFT_PAGE_MAX_BYTES)
+      throw new Error("Synthesis draft exceeds the private response limit.");
+    bytes += itemBytes;
+    face.drafts.push(draft);
+  }
+  const last = face.drafts.at(-1);
+  if (last && face.drafts.length < rows.length) {
+    face.next_after = { created_at: last.created_at, synthesis_id: last.synthesis_id };
+  }
+  return SynthesisDraftListResponseSchema.parse(face);
 }
 
 export type PublishDraftResult =

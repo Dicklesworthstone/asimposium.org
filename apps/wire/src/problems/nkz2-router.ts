@@ -11,6 +11,7 @@ import {
   PublicLedgerProblemIdSchema,
   SYNTHESES_SCHEMA_ID,
   SynthesisIdSchema,
+  SynthesisDraftPageRequestSchema,
 } from "@asimposium/contracts";
 import { Hono } from "hono";
 import { cancelUnconsumedRequestBody, parseAuthenticatedJsonBytes } from "../auth/http";
@@ -76,7 +77,7 @@ export function createSynthesisDraftsAndExternalReviewsApp(
 ) {
   const app = new Hono();
 
-  app.get("/v1/sponsors/problems/:id/syntheses/drafts", async (c) => {
+  app.on(["GET", "POST"], "/v1/sponsors/problems/:id/syntheses/drafts", async (c) => {
     if (hasQueryParams(c.req.raw)) {
       cancelUnconsumedRequestBody(c.req.raw);
       return queryNotAllowedProblem("/v1/sponsors/problems/:id/syntheses/drafts");
@@ -119,10 +120,29 @@ export function createSynthesisDraftsAndExternalReviewsApp(
         { problem_id: "P-1" },
       );
     }
+    let page: ReturnType<typeof SynthesisDraftPageRequestSchema.parse> | undefined;
+    if (c.req.method === "POST") {
+      try {
+        if (!isJsonContentType(c.req.raw) || !(authenticated.rawBody instanceof Uint8Array))
+          throw new Error("Expected signed JSON.");
+        page = SynthesisDraftPageRequestSchema.parse(parseAuthenticatedJsonBytes(authenticated.rawBody));
+      } catch {
+        return privateResponse(validatedProblem({
+          status: 422,
+          code: "SCHEMA_INVALID",
+          title: "Invalid synthesis draft page",
+          detail: "The signed JSON body must select a valid draft page.",
+          fixHint: "Send {} for the first page or { after: next_after } from the preceding page.",
+          rule: "A5",
+          extensions: { schema: SYNTHESES_SCHEMA_ID, example: { method: "POST", path: route, body: {} } },
+        }));
+      }
+    }
     const list = await listSynthesisDraftsForSponsor(
       options.db,
       problemId,
       authenticated.principal.sponsorId,
+      page,
     );
     return privateResponse(c.json(list, 200));
   });
