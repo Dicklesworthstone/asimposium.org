@@ -194,12 +194,13 @@ describe("private workshop streamed-fetch fallback", () => {
     expect(preflight.headers.has("access-control-allow-credentials")).toBe(false);
     expect(forwards).toBe(0);
     const auth = { auth: await mint() };
-    for (const headers of [
+    const rejectedHeaders: Record<string, string>[] = [
       { origin: "https://elsewhere.invalid" },
       { cookie: "session=private" },
       { authorization: "Bearer private" },
       { [SERVICE_ENVELOPE_HEADER]: "spoof" },
-    ]) {
+    ];
+    for (const headers of rejectedHeaders) {
       const response = await fetch(request(auth, headers));
       expect(response.status).toBe(401);
       expect(await response.text()).not.toContain(auth.auth);

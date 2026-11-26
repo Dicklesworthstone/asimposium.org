@@ -376,6 +376,62 @@ describe("Agora Herald progressive WS -> SSE -> Poll upgrade (kfag)", () => {
 
   const notice = { data: JSON.stringify({ control: "resync", through: 2 }) };
 
+  for (const transport of ["ws", "sse"]) {
+    test(`a single ${transport} notice recovers a failed validator read without another push`, async () => {
+      let heads = 0;
+      let polls = 0;
+      const backoff = transport === "ws" ? 20_000 : 33_000;
+      const f = publicRoom(async (url, init) => {
+        if (String(url).endsWith("/cursor")) {
+          polls++;
+          return new Response("2");
+        }
+        assert.equal(init?.method, "HEAD");
+        assert.equal(new Headers(init?.headers).get("if-none-match"), '"p1"');
+        if (++heads === 1) {
+          if (transport === "ws") throw new TypeError("Connection lost");
+          return new Response(null, { status: 429, headers: { "retry-after": "33" } });
+        }
+        return new Response(null, { headers: { etag: '"p2"' } });
+      });
+      const socket = f.sockets[0];
+      assert.ok(socket);
+      if (transport === "ws") socket.emit("message", notice);
+      else {
+        socket.emit("error");
+        const source = f.sources[0];
+        assert.ok(source);
+        source.emit("resync", notice);
+      }
+      await settle();
+      assert.equal(f.watch.transport, "poll");
+      await f.clock.advance(backoff - 1);
+      assert.deepEqual([heads, polls, f.refreshes()], [1, 0, 0]);
+      await f.clock.advance(1);
+      assert.deepEqual([heads, polls, f.refreshes()], [2, 1, 1]);
+      f.watch.stop();
+      assert.equal(f.clock.timers.size, 0);
+    });
+  }
+
+  test("pausing cancels recovery from a failed live HEAD before its backoff expires", async () => {
+    let reads = 0;
+    const f = publicRoom(async () => {
+      reads++;
+      return new Response(null, { status: 503 });
+    });
+    const socket = f.sockets[0];
+    assert.ok(socket);
+    socket.emit("message", notice);
+    await settle();
+    f.watch.setActive(false);
+    await f.clock.advance(120_000);
+    assert.equal(reads, 1);
+    assert.equal(f.clock.timers.size, 0);
+    assert.equal(f.refreshes(), 0);
+    f.watch.stop();
+  });
+
   test("silent handshakes fall through both transports, then poll exact validators", async () => {
     const f = publicRoom(async (url, init) => {
       if (String(url).endsWith("/cursor")) return new Response("100");
@@ -416,6 +472,7 @@ describe("Agora Herald progressive WS -> SSE -> Poll upgrade (kfag)", () => {
     const socket = f.sockets[0]!;
     socket.emit("open");
     socket.emit("message", notice);
+    await settle();
     await f.clock.advance(HERALD_ROOM_LIMITS.heartbeatSeconds * 1000);
     assert.equal(socket.sent.at(-1), "ping");
     socket.emit("message", { data: "pong" });
@@ -426,6 +483,7 @@ describe("Agora Herald progressive WS -> SSE -> Poll upgrade (kfag)", () => {
     const source = f.sources[0]!;
     assert.match(source.url, /since=2$/);
     source.emit("resync", notice);
+    await settle();
     await f.clock.advance(HERALD_ROOM_LIMITS.sseLifetimeMs);
     assert.equal(f.watch.transport, "sse");
     assert.ok(calls.every((url) => !url.endsWith("/cursor")));

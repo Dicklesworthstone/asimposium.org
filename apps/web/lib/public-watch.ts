@@ -658,8 +658,11 @@ export class PublicLedgerWatch {
       if (!valid()) return;
       const failure = error instanceof WatchReadError ? error : new WatchReadError("network");
       if (failure.reason === "cancelled") return;
-      this.failures++;
-      this.emit({ status: "unavailable", reason: failure.reason });
+      // A quiet room may never repeat this notice. Retire the transport and
+      // retry the exact rendered validators through the normal polling loop.
+      this.closeLiveTransports();
+      this.immediate = false;
+      this.schedule(this.recordReadFailure(failure));
     } finally {
       this.polling = false;
       if (this.controller === controller) this.controller = undefined;
@@ -682,6 +685,16 @@ export class PublicLedgerWatch {
       return;
     this.state = state;
     this.options.onState(state);
+  }
+
+  private recordReadFailure(failure: WatchReadError): number {
+    this.failures++;
+    this.forceProbe = true;
+    this.emit({ status: "unavailable", reason: failure.reason });
+    return Math.min(
+      PUBLIC_WATCH_MAX_BACKOFF_MS,
+      Math.max(failure.retryAfter ?? 0, PUBLIC_WATCH_INTERVAL_MS * 2 ** Math.min(this.failures, 4)),
+    );
   }
 
   private schedule(delay: number): void {
@@ -772,16 +785,7 @@ export class PublicLedgerWatch {
       if (!valid()) return;
       const failure = error instanceof WatchReadError ? error : new WatchReadError("network");
       if (failure.reason === "cancelled") return;
-      this.failures++;
-      this.forceProbe = true;
-      delay = Math.min(
-        PUBLIC_WATCH_MAX_BACKOFF_MS,
-        Math.max(
-          failure.retryAfter ?? 0,
-          PUBLIC_WATCH_INTERVAL_MS * 2 ** Math.min(this.failures, 4),
-        ),
-      );
-      this.emit({ status: "unavailable", reason: failure.reason });
+      delay = this.recordReadFailure(failure);
     } finally {
       this.polling = false;
       if (this.controller === controller) this.controller = undefined;
