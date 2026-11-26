@@ -822,7 +822,8 @@ pub fn credential_runs(line_text: &str, max_per_pattern: usize) -> Vec<Credentia
             } else {
                 i
             };
-            let after_key = if b.get(after_prefix..after_prefix + 21) == Some(b"authjs.session-token=")
+            let after_key = if b.get(after_prefix..after_prefix + 21)
+                == Some(b"authjs.session-token=")
             {
                 after_prefix + 21
             } else if b.get(after_prefix..after_prefix + 24) == Some(b"next-auth.session-token=") {
@@ -852,9 +853,7 @@ pub fn credential_runs(line_text: &str, max_per_pattern: usize) -> Vec<Credentia
                 return None;
             }
             let header = b"asimp-service-envelope:";
-            if i + header.len() > b.len()
-                || !b[i..i + header.len()].eq_ignore_ascii_case(header)
-            {
+            if i + header.len() > b.len() || !b[i..i + header.len()].eq_ignore_ascii_case(header) {
                 return None;
             }
             let mut pos = i + header.len();
@@ -873,7 +872,8 @@ pub fn credential_runs(line_text: &str, max_per_pattern: usize) -> Vec<Credentia
                 }
             } else {
                 let end = take_while(b, pos, |c| {
-                    c.is_ascii_alphanumeric() || matches!(c, b'+' | b'/' | b'=' | b'.' | b'_' | b'-')
+                    c.is_ascii_alphanumeric()
+                        || matches!(c, b'+' | b'/' | b'=' | b'.' | b'_' | b'-')
                 });
                 if end - pos >= 24 { Some(end) } else { None }
             }

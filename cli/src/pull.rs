@@ -234,10 +234,14 @@ pub struct PullResponse {
 
 #[derive(Debug)]
 pub enum PullFetchError {
-    Status { status: u16 },
+    Status {
+        status: u16,
+    },
     Withheld,
     NotFound,
-    BodyTooLarge { limit_bytes: u64 },
+    BodyTooLarge {
+        limit_bytes: u64,
+    },
     ProtocolMismatch(ProtocolMismatch),
     /// Gzip framing, content type, content encoding, or export-format header was refused.
     /// No response body is retained.
@@ -1555,11 +1559,7 @@ pub fn run_with_fetch(
     }
 
     let Some(problem) = args.problem.as_deref() else {
-        return failed(
-            args,
-            2,
-            "Supply a public problem ID such as P-4DSP.",
-        );
+        return failed(args, 2, "Supply a public problem ID such as P-4DSP.");
     };
     if !is_valid_problem_id(problem) || !problem_id(problem) {
         return failed(args, 2, "Supply a public problem ID such as P-4DSP.");
@@ -2426,7 +2426,6 @@ fn failed(args: &PullArgs, code: i32, message: &str) -> CliOutput {
     }
 }
 
-
 fn authenticate_archive(
     args: &PullArgs,
     trusted: &BTreeMap<String, String>,
@@ -2460,9 +2459,9 @@ fn run_with_download(
     let Some(problem) = args.problem.as_deref().filter(|id| problem_id(id)) else {
         return failed(args, 2, "Supply a public problem ID such as P-4DSP.");
     };
-    let url = match crate::resolve_origin(cli.origin.as_ref()).and_then(|origin| {
-        crate::build_url(&origin, &format!("/p/{problem}/export.jsonl.gz"))
-    }) {
+    let url = match crate::resolve_origin(cli.origin.as_ref())
+        .and_then(|origin| crate::build_url(&origin, &format!("/p/{problem}/export.jsonl.gz")))
+    {
         Ok(url) => url,
         Err(_) => {
             return failed(

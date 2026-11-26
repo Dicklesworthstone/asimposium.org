@@ -772,7 +772,7 @@ pub fn run_cli(cli: &Cli) -> CliOutput {
     // Invalid local navigation must not prompt for a keychain credential.
     // These builders are pure and use the same checks as the dispatch below.
     let recovery_path = match &cli.command {
-        Command::Inbox { .. } | Command::Lease { .. } => {
+        Command::Inbox { .. } | Command::Lease { .. } | Command::ReviewRequest { .. } => {
             match coordination::read_path(&cli.command) {
                 Ok(Some((path, _))) => Ok(Some(path)),
                 Ok(None) => coordination::write_path(&cli.command),
