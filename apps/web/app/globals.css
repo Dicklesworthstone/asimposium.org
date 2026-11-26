@@ -4357,10 +4357,13 @@ body > a.sr-only.focus\:not-sr-only:focus {
   font-size: 0.95rem;
   overflow-wrap: anywhere;
 }
+/* The exact version (about 38 monospace characters) scales with the
+   viewport so a phone keeps it on one line instead of breaking it at the
+   hyphen inside the claim id. */
 .landing .queue-card-head > h3 code {
   padding: 0;
   background: none;
-  font-size: 0.9rem;
+  font-size: clamp(0.72rem, 3.1vw, 0.9rem);
   color: var(--color-ink2);
 }
 .landing .queue-card-head > h3 a {
@@ -4369,9 +4372,14 @@ body > a.sr-only.focus\:not-sr-only:focus {
 .landing .queue-card-head > h3 a:hover {
   text-decoration-color: currentColor;
 }
-.landing .queue-card-standing {
+/* Scoped under the head so it outranks the claim page's large disposition
+   line (.problem-page p[data-disposition]); on a queue card the standing is
+   a label beside the version, not the page's subject. */
+.landing .queue-card-head > .queue-card-standing {
   margin: 0;
   font-size: 0.9rem;
+  font-weight: 400;
+  line-height: 1.4;
   color: var(--color-muted);
 }
 .landing .queue-card-standing strong {
@@ -4440,6 +4448,17 @@ body > a.sr-only.focus\:not-sr-only:focus {
 }
 .landing .filter-row > button {
   margin: 0;
+}
+
+/* An event's footer parts wrap as whole units, so on a phone a problem or
+   Fellow id moves to its own line instead of breaking at its hyphen. */
+.landing .event-footer {
+  justify-content: flex-start;
+  column-gap: 0.4rem;
+}
+.landing .event-footer > * {
+  flex-shrink: 0;
+  max-width: 100%;
 }
 
 /* ── Scientific areas (/areas): short cards read as a grid ─ */
