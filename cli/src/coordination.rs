@@ -65,6 +65,77 @@ pub enum LeaseCommand {
     },
 }
 
+#[derive(Debug, clap::Subcommand)]
+pub enum ReviewRequestCommand {
+    /// List one page of your private invitations for this problem.
+    List {
+        problem: String,
+        /// Opaque next_after from your previous page on the same problem.
+        #[arg(long)]
+        after: Option<String>,
+        /// The server always returns complete JSON, including next_after and omitted.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Read the pinned claim version, current invitation version and available next actions.
+    Get {
+        problem: String,
+        request_id: String,
+        /// The server always returns complete JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Invite a reviewer for a claim version using reviewer_id or match=different-family.
+    Create {
+        problem: String,
+        #[command(flatten)]
+        request: LedgerWriteArgs,
+    },
+    /// Accept, decline, cancel, or complete using expected_version. Completion also needs review_id.
+    Respond {
+        problem: String,
+        request_id: String,
+        #[command(flatten)]
+        request: LedgerWriteArgs,
+    },
+}
+
+fn invitation_path(problem: &str, request_id: Option<&str>) -> Result<String, String> {
+    // Only interpolate single identifier components. The Worker owns their grammar.
+    for id in std::iter::once(problem).chain(request_id) {
+        if id.is_empty() || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
+            return Err("Use the problem and invitation IDs from the Worker.".to_owned());
+        }
+    }
+    let mut path = format!("/v1/p/{problem}/review-requests");
+    if let Some(id) = request_id {
+        path.push('/');
+        path.push_str(id);
+    }
+    Ok(path)
+}
+
+pub(crate) const INVITATION_RECOVERY: &str = "Check asimp review-request list or get on the same problem. If the outcome is unclear, retry the original file and Idempotency-Key. Use a fresh key only for a deliberately new operation.\n";
+
+pub(crate) fn invitation_error_hint(status: u16, write: bool) -> &'static str {
+    match status {
+        401 | 403 => {
+            "Check your active Fellow identity, permissions and problem membership with asimp hello.\n"
+        }
+        400 | 413 | 422 => {
+            "Read /schemas/review-requests.v1.json. Use the previous page's next_after for pagination and the current invitation version for responses.\n"
+        }
+        404 => {
+            "Read asimp review-request list as the author or invited reviewer on the same problem.\n"
+        }
+        409 => {
+            "Refresh the invitation and check its version, reviewer eligibility and target. Keep the same key for an unchanged retry and use a new key for a changed request.\n"
+        }
+        _ if write => INVITATION_RECOVERY,
+        _ => "Retry the same invitation read on the same problem.\n",
+    }
+}
+
 fn validate_session(session: &str) -> Result<(), String> {
     if safe_session_segment(session) {
         Ok(())
@@ -119,6 +190,29 @@ pub(crate) fn read_path(command: &Command) -> Result<Option<(String, String)>, S
                 "lease list".to_owned(),
             )))
         }
+        Command::ReviewRequest {
+            command: ReviewRequestCommand::List { problem, after, .. },
+        } => {
+            let mut path = invitation_path(problem, None)?;
+            if let Some(after) = after {
+                let mut params = url::form_urlencoded::Serializer::new(String::new());
+                params.append_pair("after", after);
+                path.push('?');
+                path.push_str(&params.finish());
+            }
+            Ok(Some((path, "review-request list".to_owned())))
+        }
+        Command::ReviewRequest {
+            command:
+                ReviewRequestCommand::Get {
+                    problem,
+                    request_id,
+                    ..
+                },
+        } => Ok(Some((
+            invitation_path(problem, Some(request_id))?,
+            "review-request get".to_owned(),
+        ))),
         _ => Ok(None),
     }
 }
@@ -127,6 +221,20 @@ pub(crate) fn read_path(command: &Command) -> Result<Option<(String, String)>, S
 /// write still goes through the parent's file/key validation and one POST.
 pub(crate) fn write_path(command: &Command) -> Result<Option<String>, String> {
     match command {
+        Command::ReviewRequest {
+            command: ReviewRequestCommand::Create { problem, .. },
+        } => Ok(Some(invitation_path(problem, None)?)),
+        Command::ReviewRequest {
+            command:
+                ReviewRequestCommand::Respond {
+                    problem,
+                    request_id,
+                    ..
+                },
+        } => Ok(Some(format!(
+            "{}/respond",
+            invitation_path(problem, Some(request_id))?
+        ))),
         Command::Inbox {
             command: InboxCommand::Ack { .. },
         } => Ok(Some("/v1/inbox/ack".to_owned())),
@@ -271,6 +379,88 @@ mod tests {
     }
 
     #[test]
+    fn invitation_reads_preserve_pagination_and_next_actions_without_acting() {
+        let id = "RR-0123456789abcdef0123456789abcdef";
+        let base = "/v1/p/P-EXAMPLE/review-requests";
+        let page = r#"{"requests":[],"next_after":"RR-0123456789abcdef0123456789abcdef","omitted":["page_limit"]}"#;
+        let detail = r#"{"effective_status":"accepted","version":2,"claim_id":"C-1","claim_version":3,"next_actions":[{"method":"POST","url":"/v1/p/P-EXAMPLE/review-requests/RR-0123456789abcdef0123456789abcdef/respond"}]}"#;
+        for (args, expected, body) in [
+            (vec!["list", "P-EXAMPLE"], base.to_owned(), page),
+            (
+                vec!["list", "P-EXAMPLE", "--after", id],
+                format!("{base}?after={id}"),
+                page,
+            ),
+            (
+                vec!["get", "P-EXAMPLE", id, "--json"],
+                format!("{base}/{id}"),
+                detail,
+            ),
+        ] {
+            let command = cli(&[vec!["review-request"], args].concat());
+            assert!(command.command.requires_token());
+            let result = run_cli_with_fetch(&command, |url| {
+                assert_eq!(url, format!("https://example.test{expected}"));
+                Ok(Fetched {
+                    status: 200,
+                    body: body.to_owned(),
+                })
+            });
+            assert_eq!(result.exit_code, 0);
+            assert_eq!(result.stdout, body);
+        }
+    }
+
+    #[test]
+    fn invitation_responses_keep_the_same_body_and_key_after_a_lost_receipt() {
+        let id = "RR-0123456789abcdef0123456789abcdef";
+        let command = cli(&[
+            "review-request",
+            "respond",
+            "P-EXAMPLE",
+            id,
+            "--file",
+            "accept.json",
+            "--idempotency-key",
+            "private-key-canary",
+        ]);
+        let body = r#"{"action":"accept","expected_version":1}"#;
+        let receipt = r#"{"status":"accepted","version":2}"#;
+        assert!(command.command.requires_token());
+        for lost in [true, false] {
+            let result = run_cli_write(
+                &command,
+                |_| Ok(body.to_owned()),
+                |url, key, actual| {
+                    assert_eq!(
+                        url,
+                        format!("https://example.test/v1/p/P-EXAMPLE/review-requests/{id}/respond")
+                    );
+                    assert_eq!(actual, body);
+                    assert_eq!(key, "private-key-canary");
+                    if lost {
+                        Err(FetchError::Network)
+                    } else {
+                        Ok(Fetched {
+                            status: 200,
+                            body: receipt.to_owned(),
+                        })
+                    }
+                },
+            );
+            if lost {
+                assert_ne!(result.exit_code, 0);
+                assert!(result.stdout.is_empty());
+                assert!(result.stderr.contains("original file and Idempotency-Key"));
+                assert!(!result.stderr.contains("canary"));
+            } else {
+                assert_eq!(result.exit_code, 0);
+                assert_eq!(result.stdout, receipt);
+            }
+        }
+    }
+
+    #[test]
     fn lease_list_keeps_other_holders_objectives_and_lease_ids_intact() {
         let raw = "{\"ok\":true,\"leases\":[{\"lease_id\":\"L-123\",\"fellow_id\":\"F-other\",\"objective\":\"check C-2\",\"deliverable\":\"refutation\",\"parallel_safe\":true}]}";
         for args in [
@@ -293,6 +483,11 @@ mod tests {
     #[test]
     fn coordination_writes_post_the_exact_file_and_key_once() {
         for (args, expected, body) in [
+            (
+                vec!["review-request", "create", "P-EXAMPLE"],
+                "/v1/p/P-EXAMPLE/review-requests",
+                r#"{"claim_id":"C-1","claim_version":2,"match":"different-family"}"#,
+            ),
             (
                 vec!["inbox", "ack"],
                 "/v1/inbox/ack",
@@ -325,6 +520,7 @@ mod tests {
                 ],
             ]
             .concat());
+            assert!(command.command.requires_token());
             let calls = Cell::new(0);
             let result = run_cli_write(
                 &command,
@@ -405,6 +601,8 @@ mod tests {
             );
         }
         for base in [
+            vec!["review-request", "create", "P-EXAMPLE"],
+            vec!["review-request", "respond", "P-EXAMPLE", "RR-123"],
             vec!["inbox", "ack"],
             vec!["lease", "acquire", "S-123"],
             vec!["lease", "release", "S-123", "C-1"],
@@ -442,6 +640,8 @@ mod tests {
             assert_eq!(output.exit_code, 2);
             assert!(!output.stderr.contains("secret-canary"));
             for base in [
+                vec!["review-request", "create", unsafe_id],
+                vec!["review-request", "respond", "P-EXAMPLE", unsafe_id],
                 vec!["lease", "acquire", unsafe_id],
                 vec!["lease", "release", unsafe_id, "C-1"],
                 vec!["lease", "release", "S-123", unsafe_id],

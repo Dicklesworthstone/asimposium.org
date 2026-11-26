@@ -27,7 +27,7 @@ pub mod validation;
 pub mod watch;
 
 use clap::Parser;
-use coordination::{InboxCommand, LeaseCommand};
+use coordination::{InboxCommand, LeaseCommand, ReviewRequestCommand};
 use std::io::Read;
 use ureq::{Agent, AgentBuilder};
 use url::Url;
@@ -91,6 +91,11 @@ pub enum Command {
     Inbox {
         #[command(subcommand)]
         command: InboxCommand,
+    },
+    /// Invite a reviewer to a pinned claim, or read and respond to your private invitations.
+    ReviewRequest {
+        #[command(subcommand)]
+        command: ReviewRequestCommand,
     },
     /// Inspect, acquire, release or challenge object leases (keychain or ASIMP_TOKEN required).
     Lease {
@@ -495,6 +500,7 @@ impl Command {
                 | Self::Next { .. }
                 | Self::Triage { .. }
                 | Self::Inbox { .. }
+                | Self::ReviewRequest { .. }
                 | Self::Lease { .. }
                 | Self::Session { .. }
                 | Self::Pack { .. }
@@ -515,6 +521,11 @@ impl Command {
         match self {
             Self::Inbox {
                 command: InboxCommand::Ack { request },
+            }
+            | Self::ReviewRequest {
+                command:
+                    ReviewRequestCommand::Create { request, .. }
+                    | ReviewRequestCommand::Respond { request, .. },
             }
             | Self::Lease {
                 command:
@@ -1079,14 +1090,19 @@ fn run_cli_write(
         }
     );
     let lease_write = matches!(cli.command, Command::Lease { .. });
+    let review_request = matches!(cli.command, Command::ReviewRequest { .. });
     let write_label = if acknowledgment {
         "inbox acknowledgment"
     } else if lease_write {
         "lease write"
+    } else if review_request {
+        "review invitation"
     } else {
         "session write"
     };
-    let recovery = if acknowledgment {
+    let recovery = if review_request {
+        coordination::INVITATION_RECOVERY
+    } else if acknowledgment {
         "Acknowledgment may already have succeeded. Read asimp inbox list --json before retrying the same notice IDs or until_seq. Re-acknowledgment is safe, but its counts are not a replay of the original receipt.\n"
     } else {
         WRITE_RECOVERY
@@ -1098,7 +1114,9 @@ fn run_cli_write(
             stderr: String::new(),
         },
         Err(FetchError::Status(status)) => {
-            let hint = if acknowledgment {
+            let hint = if review_request {
+                coordination::invitation_error_hint(status, true)
+            } else if acknowledgment {
                 match status {
                     401 | 403 => {
                         "Check the active Fellow identity with asimp hello; inbox acknowledgment uses that Fellow's notices.\n"
@@ -1696,7 +1714,7 @@ pub fn run_cli_with_fetch(
     };
 
     let (path, label) = match &cli.command {
-        Command::Inbox { .. } | Command::Lease { .. } => {
+        Command::Inbox { .. } | Command::Lease { .. } | Command::ReviewRequest { .. } => {
             match coordination::read_path(&cli.command) {
                 Ok(Some(read)) => read,
                 Ok(None) => {
@@ -1875,6 +1893,8 @@ pub fn run_cli_with_fetch(
                         "Check asimp capabilities on the same --origin; retry this read later if the service is unavailable.\n"
                     }
                 }
+            } else if matches!(&cli.command, Command::ReviewRequest { .. }) {
+                coordination::invitation_error_hint(status, false)
             } else if matches!(&cli.command, Command::Inbox { .. }) {
                 match status {
                     401 | 403 => {

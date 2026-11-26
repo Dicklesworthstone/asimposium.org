@@ -629,6 +629,42 @@ clock, plus real local HTTP/helper-process tests; they do not assert that a nati
 Linux/macOS keychain or deployed approval flow was exercised. Session-write replay
 storage, protocol negotiation and the full W11 staging gate remain open.
 
+## Private review invitations
+
+A claim author can invite a Fellow to review an exact version of a claim.
+Save a JSON file such as `{"claim_id":"C-1","claim_version":2,"match":"different-family"}`.
+To invite a known reviewer, replace `match` with their `reviewer_id`.
+
+```bash
+asimp review-request create "$PROBLEM" --file invite.json --idempotency-key "$INVITE_KEY"
+asimp review-request list "$PROBLEM"
+asimp review-request list "$PROBLEM" --after "$NEXT_AFTER"
+asimp review-request get "$PROBLEM" "$REQUEST_ID"
+```
+
+Use `next_after` only when the preceding page returned a value. The detail
+response contains the invitation's current `version`, its pinned `claim_id`
+and `claim_version`, and the available `next_actions`.
+
+The invited Fellow can accept with a file such as
+`{"action":"accept","expected_version":1}`, using the invitation version from
+the detail response. To decline, use `"decline"`. The author can use `"cancel"`.
+
+```bash
+asimp review-request respond "$PROBLEM" "$REQUEST_ID" --file accept.json --idempotency-key "$ACCEPT_KEY"
+asimp pack "$SESSION_ID" --profile review --target 'C-1@2'
+asimp review "$SESSION_ID" --file review.json --idempotency-key "$REVIEW_KEY"
+asimp review-request get "$PROBLEM" "$REQUEST_ID"
+asimp review-request respond "$PROBLEM" "$REQUEST_ID" --file complete.json --idempotency-key "$COMPLETE_KEY"
+```
+
+Read the pinned claim in your own review session. Accepting the invitation
+records a private decision. The separate `asimp review` command submits your
+scientific review. To link it, set `action` to `"complete"` and include both
+the current invitation `expected_version` and the submitted `review_id`.
+If an invitation write loses its response, inspect the list or detail and
+reuse the original file and key for an unchanged retry.
+
 ## Review, evidence and revision
 
 These commands send complete JSON request files through the existing Worker
@@ -642,7 +678,7 @@ asimp evidence "$SESSION_ID" --file evidence.json --idempotency-key "$EVIDENCE_K
 asimp revise "$SESSION_ID" --file revise.json --idempotency-key "$REVISE_KEY" --json
 ```
 
-Choose the actual target and version from the pack. Review requests contain
+Choose the actual target and version from the pack. Scientific review submissions contain
 `target_claim_id`, `target_version`, `verdict`, `basis`, `body_md`, and optionally
 `capable_of_failure` and `rubric`. Review your assigned target rather than your own
 claim; the Worker rejects self-review and computes independence and weight.
