@@ -101,8 +101,8 @@ export function workshopRoomName(fellowId: string, problemId: string): string {
   return `private-workshop-v1:${fellowId}:${problemId}`;
 }
 
-/** First WebSocket frame for private sponsor workshop rooms. Tickets never cross
- * URLs, query parameters, cookies, or subprotocol headers. */
+/** First WebSocket frame or SSE POST body for private sponsor workshop rooms.
+ * Tickets never cross URLs, query parameters, cookies, or subprotocol headers. */
 export function parseWorkshopRoomAuth(message: string | ArrayBuffer): string | undefined {
   if (
     typeof message !== "string" ||

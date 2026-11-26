@@ -19,6 +19,12 @@ on:
       - "apps/wire/src/problems/**"
       - "apps/wire/src/sessions/**"
       - "apps/wire/src/herald/**"
+      - "apps/wire/src/index.ts"
+      - "apps/wire/test/unit/herald*.test.ts"
+      - "apps/wire/test/integration/herald-room-real-bindings.mjs"
+      - "apps/web/lib/workshop-watch.ts"
+      - "apps/web/test/unit/workshop-watch*.test.ts"
+      - "apps/web/test/unit/herald-live-upgrade.test.ts"
       - "apps/web/lib/public-ledger.ts"
       - "apps/web/lib/public-record.ts"
       - "apps/web/app/p/**/retractions/**"
@@ -83,11 +89,15 @@ jobs:
           bun run --filter @asimposium/contracts test
           bun run --filter @asimposium/contracts check:drift
           bun run --filter @asimposium/render test
-      - name: Workshop ticket expiry and replay regressions
+      - name: Workshop ticket expiry and streamed transport regressions
         if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
         run: |
           bunx --no-install biome check apps/wire/src/herald/room-ticket.ts apps/wire/src/herald/room.ts apps/wire/test/unit/herald-human-workshop-rooms.test.ts
-          bun test /dev/null --timeout=120000 apps/wire/test/unit/herald-human-workshop-rooms.test.ts
+          bun test /dev/null --timeout=120000 apps/wire/test/unit/herald-human-workshop-rooms.test.ts apps/wire/test/unit/herald-workshop-stream.test.ts apps/wire/test/unit/herald-controller.test.ts apps/wire/test/unit/herald-room-refusal.test.ts
+      - name: Workshop browser stream and fallback regressions
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
+        working-directory: apps/web
+        run: bun test /dev/null --timeout=120000 test/unit/workshop-watch-stream.test.ts test/unit/workshop-watch.test.ts test/unit/herald-live-upgrade.test.ts
       - name: Immutable retraction readers and discovery regressions
         if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
         run: bun test /dev/null --timeout=120000 apps/wire/test/unit/retractions-public-source.test.ts apps/wire/test/unit/discovery-generation.test.ts
@@ -136,3 +146,8 @@ jobs:
         env:
           CLOUDFLARE_CF_FETCH_ENABLED: "false"
         run: node apps/wire/test/integration/questions-retractions-real-bindings.mjs
+      - name: Native Herald private stream and cross-transport replay journey
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
+        env:
+          CLOUDFLARE_CF_FETCH_ENABLED: "false"
+        run: node apps/wire/test/integration/herald-room-real-bindings.mjs

@@ -20,6 +20,7 @@ import {
   workshopRoomAttachment,
 } from "./room-core.ts";
 import type { VerifiedWorkshopRoomTicket } from "./room-ticket.ts";
+import { WorkshopRoomStreams } from "./room-workshop-sse.ts";
 
 export type RoomRefusal = "missing" | "query" | "auth" | "upgrade" | "capacity" | "unavailable";
 export interface HeraldRoomPort extends RoomPort {
@@ -219,10 +220,23 @@ export class HeraldRoomController {
   private readonly deps: HeraldRoomDependencies;
   private readonly fanout: HeraldRoomFanout;
   private readonly now: () => number;
+  private readonly workshopStreams: WorkshopRoomStreams;
   constructor(deps: HeraldRoomDependencies) {
     this.deps = deps;
     this.fanout = new HeraldRoomFanout(deps.port);
     this.now = deps.now ?? Date.now;
+    this.workshopStreams = new WorkshopRoomStreams({
+      ...deps,
+      consumeTicketNonce: (nonce, expMs, now) =>
+        deps.port.consumeTicketNonce?.(nonce, expMs, now) ?? Promise.resolve(false),
+      socketCount: (sponsorId) =>
+        deps.port.sockets().filter((socket) => {
+          if (socket.readyState !== 1) return false;
+          if (sponsorId === undefined) return true;
+          const attachment = workshopRoomAttachment(socket);
+          return attachment?.authenticated && attachment.sponsorId === sponsorId;
+        }).length,
+    });
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -233,7 +247,8 @@ export class HeraldRoomController {
     const workshopNudge = workshopNudgeRoute(url.pathname);
     try {
       if (url.pathname === "/v1/workshop-room") {
-        if (request.method !== "GET") return this.deps.refuse("upgrade", request.method);
+        if (request.method !== "GET" && request.method !== "POST")
+          return this.deps.refuse("upgrade", request.method);
         if (
           request.headers.has("cookie") ||
           request.headers.has("authorization") ||
@@ -244,6 +259,7 @@ export class HeraldRoomController {
         if (workshop === undefined) return this.deps.refuse("query", request.method);
         if (!this.deps.port.ownsWorkshop?.(workshop.fellowId, workshop.problemId))
           return this.deps.refuse("missing", request.method);
+        if (request.method === "POST") return this.workshopStreams.fetch(request, workshop);
         if (request.headers.get("upgrade")?.toLowerCase() !== "websocket")
           return this.deps.refuse("upgrade", request.method);
         const protocol = request.headers.get("sec-websocket-protocol");
@@ -251,7 +267,10 @@ export class HeraldRoomController {
           return this.deps.refuse("query", request.method);
         return await bounded(
           async (signal) => {
-            if (this.deps.port.sockets().length >= LIMITS.connections)
+            if (
+              this.deps.port.sockets().length + this.workshopStreams.count() >=
+              LIMITS.connections
+            )
               return this.deps.refuse("capacity", request.method);
             const now = this.now();
             const pair = this.deps.port.pair();
@@ -543,7 +562,7 @@ export class HeraldRoomController {
         .filter(
           (a) => a !== undefined && a.authenticated && a.sponsorId === verified.sponsorId,
         ).length;
-      if (sameSponsor >= LIMITS.perSponsor) {
+      if (sameSponsor + this.workshopStreams.count(verified.sponsorId) >= LIMITS.perSponsor) {
         closeRoomSocket(socket, 1013, "Sponsor workshop room limit reached");
         return;
       }

@@ -6,7 +6,12 @@ import { deliverHeraldRooms } from "./herald/outbox";
 import { publicCursorCache } from "./herald/public-cursor-cache";
 import { HeraldRoom } from "./herald/room";
 import { heraldSseFetch } from "./herald/room-sse";
-import { type HeraldRuntimeEnv, heraldRoomFetch, scheduleHeraldDelivery } from "./herald/runtime";
+import {
+  type HeraldRuntimeEnv,
+  heraldRoomFetch,
+  isWorkshopRoomStream,
+  scheduleHeraldDelivery,
+} from "./herald/runtime";
 import { publicWatchFetch } from "./http/public-watch-cors";
 import { deliverDispositionChanges } from "./inbox/disposition-change";
 import { deliverInboxEvents } from "./inbox/event-delivery";
@@ -60,7 +65,7 @@ export default {
     } finally {
       // A partial batch may commit before a later member fails. Invalidation
       // is cheap and conservative; only D1 can advance the public cursor.
-      if (!["GET", "HEAD", "OPTIONS"].includes(request.method)) {
+      if (!["GET", "HEAD", "OPTIONS"].includes(request.method) && !isWorkshopRoomStream(request)) {
         await publicCursorCache.invalidate(env);
       }
     }

@@ -364,6 +364,175 @@ await runLocalWorkerJourney(
     reactivated.webSocket.accept();
     reactivated.webSocket.close(1000, "done");
 
+    // Private SSE and WebSockets share one Durable Object and one durable
+    // ticket replay guard. Only scope, never capability secrets, enters URLs.
+    const authorFellow = await env.DB.prepare("SELECT fellow_id FROM sessions WHERE session_id = ?")
+      .bind(session)
+      .first();
+    const viewerFellow = await env.DB.prepare("SELECT fellow_id FROM sessions WHERE session_id = ?")
+      .bind(reviewSession)
+      .first();
+    assert.ok(authorFellow && viewerFellow);
+    const workshopScope = { fellow_id: authorFellow.fellow_id, problem_id: problem };
+    const ticketFor = (sponsor = OWNER, scope = workshopScope, expected = 200) =>
+      sponsorCall(sponsor, "POST", "/v1/sponsors/workshop/room-ticket", "workshop.read", scope, expected);
+    const privateUrl = origin + "/v1/workshop-room?" +
+      new URLSearchParams({ fellow: authorFellow.fellow_id, problem });
+    const agoraOrigin = "https://staging.asimposium.org";
+    const privateOpen = (ticket, extraHeaders = {}) => worker.fetch(privateUrl, {
+      method: "POST",
+      headers: {
+        "User-Agent": userAgent,
+        origin: agoraOrigin,
+        accept: "text/event-stream",
+        "content-type": "application/json",
+        ...extraHeaders,
+      },
+      body: JSON.stringify(ticket === undefined ? {} : { auth: ticket }),
+    });
+    const deadline = async (operation) => {
+      let timer;
+      try {
+        return await Promise.race([
+          operation,
+          new Promise((_, reject) => {
+            timer = setTimeout(() => reject(new Error("Workshop stream deadline")), 8000);
+          }),
+        ]);
+      } finally {
+        clearTimeout(timer);
+      }
+    };
+    const preflight = await worker.fetch(privateUrl, {
+      method: "OPTIONS",
+      headers: {
+        origin: agoraOrigin,
+        "access-control-request-method": "POST",
+        "access-control-request-headers": "content-type",
+      },
+    });
+    assert.equal(preflight.status, 204);
+    assert.equal(preflight.headers.get("access-control-allow-origin"), agoraOrigin);
+    assert.equal(preflight.headers.has("access-control-allow-credentials"), false);
+    assert.equal((await privateOpen()).status, 401, "anonymous stream has no private access");
+    await ticketFor("usr_herald_viewer", workshopScope, 404);
+    const otherTicket = await ticketFor("usr_herald_viewer", {
+      fellow_id: viewerFellow.fellow_id, problem_id: problem,
+    });
+    assert.equal(
+      (await privateOpen(otherTicket.ticket)).status, 401,
+      "another sponsor's valid ticket cannot select this Fellow",
+    );
+    const minted = await ticketFor();
+    assert.equal((await privateOpen(minted.ticket, { origin: "https://outside.invalid" })).status, 401);
+    assert.equal((await privateOpen(minted.ticket, { cookie: "session=forbidden" })).status, 401);
+    assert.equal((await privateOpen(minted.ticket, { authorization: "Bearer " + author })).status, 401);
+    const streamed = await privateOpen(minted.ticket);
+    assert.equal(streamed.status, 200);
+    assert.equal(streamed.headers.get("content-type"), "text/event-stream; charset=utf-8");
+    assert.equal(streamed.headers.get("cache-control"), "private, no-store");
+    assert.equal(streamed.headers.get("access-control-allow-origin"), agoraOrigin);
+    assert.equal(streamed.headers.has("access-control-allow-credentials"), false);
+    assert.ok(streamed.body);
+    const privateReader = streamed.body.getReader();
+    let pendingFrame = "";
+    const privateFrames = [];
+    const nextFrame = async () => deadline((async () => {
+      while (true) {
+        const boundary = pendingFrame.indexOf("\n\n");
+        if (boundary !== -1) {
+          const frame = pendingFrame.slice(0, boundary);
+          pendingFrame = pendingFrame.slice(boundary + 2);
+          const event = /^event: (.+)$/m.exec(frame)?.[1];
+          const raw = /^data: (.+)$/m.exec(frame)?.[1];
+          if (!event || !raw) continue;
+          privateFrames.push(frame);
+          return { event, data: JSON.parse(raw) };
+        }
+        const part = await privateReader.read();
+        assert.equal(part.done, false, "private room stays open until a bounded close");
+        pendingFrame += new TextDecoder().decode(part.value);
+      }
+    })());
+    try {
+      const first = await nextFrame();
+      assert.equal(first.event, "workshop-update");
+      assert.equal(first.data.fellow_id, authorFellow.fellow_id);
+      assert.equal(first.data.problem_id, problem);
+      assert.equal(first.data.workshop_cursor, minted.workshop_cursor);
+      assert.equal(
+        (await privateOpen(minted.ticket)).status, 401,
+        "SSE cannot replay its consumed ticket",
+      );
+      const openPrivateSocket = async () => {
+        const response = await worker.fetch(privateUrl, {
+          headers: {
+            "User-Agent": userAgent,
+            upgrade: "websocket",
+            "sec-websocket-protocol": PROTOCOL,
+          },
+        });
+        assert.equal(response.status, 101);
+        assert.ok(response.webSocket);
+        response.webSocket.accept();
+        return response.webSocket;
+      };
+      const replay = await openPrivateSocket();
+      const replayMessages = [];
+      replay.addEventListener("message", (event) => replayMessages.push(String(event.data)));
+      const replayClosed = new Promise((resolve) =>
+        replay.addEventListener("close", (event) => resolve(event.code)));
+      replay.send(JSON.stringify({ auth: minted.ticket }));
+      assert.equal(
+        await deadline(replayClosed), 1008,
+        "a ticket consumed by SSE also refuses WebSocket replay",
+      );
+      assert.deepEqual(replayMessages, []);
+      const wsTicket = await ticketFor();
+      const privateSocket = await openPrivateSocket();
+      try {
+        const connected = new Promise((resolve) =>
+          privateSocket.addEventListener("message", (event) => resolve(String(event.data))));
+        privateSocket.send(JSON.stringify({ auth: wsTicket.ticket }));
+        assert.equal(JSON.parse(await deadline(connected)).control, "workshop-update");
+        assert.equal(
+          (await privateOpen(wsTicket.ticket)).status, 401,
+          "SSE refuses a ticket already consumed by WebSocket",
+        );
+      } finally {
+        privateSocket.close(1000, "transport replay check complete");
+      }
+      const privateCanary = "PRIVATE_WORKSHOP_SSE_BODY_MUST_NEVER_STREAM";
+      await call("/v1/sessions/" + session + "/workshop", {
+        type: "note", title: "Private stream update", body_md: privateCanary,
+      }, author, 201);
+      const updated = await nextFrame();
+      assert.equal(updated.event, "workshop-update");
+      assert.ok(updated.data.workshop_cursor > first.data.workshop_cursor);
+      assert.deepEqual(Object.keys(updated.data).sort(), [
+        "control", "fellow_id", "heartbeat", "problem_id", "schema", "workshop_cursor",
+      ]);
+      assert.ok(
+        !privateFrames.join("").includes(privateCanary),
+        "even the authorized stream carries no private work product",
+      );
+      await sponsorCall(OWNER, "POST", "/v1/fellows/lifecycle", "fellow.lifecycle.change", {
+        fellow_id: authorFellow.fellow_id,
+        status: "revoked",
+        confirm: "change-fellow-lifecycle",
+        step_up_authenticated_at: Math.floor(Date.now() / 1000),
+      });
+      assert.deepEqual(await nextFrame(), { event: "closed", data: { reason: "access-ended" } });
+      assert.equal(
+        (await deadline(privateReader.read())).done, true,
+        "current revocation closes the live stream",
+      );
+      await ticketFor(OWNER, workshopScope, 404);
+    } finally {
+      await privateReader.cancel();
+      privateReader.releaseLock();
+    }
+
     console.log(
       JSON.stringify({
         stage: "herald-room-journey-passed",
@@ -371,7 +540,7 @@ await runLocalWorkerJourney(
         status: "pass",
         messages: messages.length,
         boundary:
-          "local Workerd Durable Object + D1 0078/0118/0157; no deployed room or hibernation claim",
+          "local Workerd Durable Object + D1 0078/0118/0157; public WS and private WS/SSE replay, cursor-only update, and revocation; no deployed room or hibernation claim",
       }),
     );
   },

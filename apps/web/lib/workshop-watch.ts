@@ -14,7 +14,7 @@ export const WORKSHOP_WATCH_MAX_BACKOFF_MS = 60_000;
 export const WORKSHOP_WATCH_MAX_REFRESHES = 3;
 export const WORKSHOP_WATCH_HEARTBEAT_MS = 20_000;
 
-export type WorkshopWatchTransport = "ws" | "poll";
+export type WorkshopWatchTransport = "ws" | "sse" | "poll";
 
 export interface WorkshopWatchSocket {
   send(data: string): void;
@@ -42,6 +42,8 @@ export interface WorkshopWatchRuntime {
   readonly clearTimer: (timer: Timer) => void;
   readonly random: () => number;
   readonly openWebSocket?: (url: string, protocol: string) => WorkshopWatchSocket;
+  /** Streamed fetch permits POST auth without placing a ticket in an EventSource URL. */
+  readonly openSse?: (input: RequestInfo | URL, init: RequestInit) => Promise<Response>;
 }
 const browserRuntime: WorkshopWatchRuntime = {
   fetch: (...args) => fetch(...args),
@@ -50,6 +52,7 @@ const browserRuntime: WorkshopWatchRuntime = {
   random: () => Math.random(),
   openWebSocket:
     typeof WebSocket === "function" ? (url, protocol) => new WebSocket(url, protocol) : undefined,
+  openSse: typeof ReadableStream === "function" ? (input, init) => fetch(input, init) : undefined,
 };
 
 export interface WorkshopWatchOptions {
@@ -277,6 +280,23 @@ function parseWorkshopNoticeCursor(
   return undefined;
 }
 
+function workshopRoomUrl(roomUrl: string, options: WorkshopWatchOptions): URL {
+  const url = new URL(roomUrl);
+  const loopback = ["127.0.0.1", "localhost", "[::1]"].includes(url.hostname);
+  if (
+    !(url.protocol === "wss:" || (url.protocol === "ws:" && loopback)) ||
+    url.username !== "" ||
+    url.password !== "" ||
+    url.pathname !== "/v1/workshop-room" ||
+    [...url.searchParams.entries()].length !== 2 ||
+    url.searchParams.get("fellow") !== options.fellowId ||
+    url.searchParams.get("problem") !== options.problemId ||
+    url.hash !== ""
+  )
+    throw new CursorReadError("unavailable");
+  return url;
+}
+
 /** Cursor checks do not acknowledge new rendered work. Only new server props
  * supply that baseline; a failed refresh remains pending with bounded retries.
  * Every poll rechecks ownership, even when the workshop is idle. */
@@ -381,8 +401,7 @@ export class WorkshopWatch {
       void this.connectWorkshopRoom();
       return;
     }
-    this.liveTransport = "poll";
-    void this.poll();
+    this.startSseOrPoll();
   }
 
   private isCurrentSocket(sock: WorkshopWatchSocket, generation: number): boolean {
@@ -410,7 +429,7 @@ export class WorkshopWatch {
     this.socketDeadlineTimer = this.runtime.setTimer(() => {
       if (!this.isCurrentSocket(sock, generation)) return;
       this.socketDeadlineTimer = undefined;
-      this.dropToPolling(generation);
+      this.dropFromSocket(generation);
     }, WORKSHOP_WATCH_TIMEOUT_MS);
   }
 
@@ -425,21 +444,161 @@ export class WorkshopWatch {
         sock.send("ping");
         this.scheduleHeartbeat(sock, generation);
       } catch {
-        this.dropToPolling(generation);
+        this.dropFromSocket(generation);
       }
     }, WORKSHOP_WATCH_HEARTBEAT_MS);
   }
 
-  private dropToPolling(generation: number): void {
+  private dropFromSocket(generation: number): void {
     if (!this.running || !this.active || this.accessEnded || this.generation !== generation) return;
     this.closeSocket();
+    this.startSseOrPoll();
+  }
+
+  private startSseOrPoll(): void {
+    if (this.runtime.openSse) {
+      void this.connectWorkshopStream();
+      return;
+    }
     this.liveTransport = "poll";
     void this.poll();
+  }
+
+  private async connectWorkshopStream(): Promise<void> {
+    const openSse = this.runtime.openSse;
+    if (!openSse || !this.running || !this.active || this.accessEnded) return;
+    this.liveTransport = "sse";
+    const generation = this.generation;
+    const controller = new AbortController();
+    this.controller = controller;
+    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+    let deadline: Timer | undefined;
+    let lifetime: Timer | undefined;
+    const armDeadline = (milliseconds: number) => {
+      if (deadline !== undefined) this.runtime.clearTimer(deadline);
+      deadline = this.runtime.setTimer(() => controller.abort(), milliseconds);
+    };
+    const stopped = new Promise<never>((_, reject) => {
+      controller.signal.addEventListener(
+        "abort",
+        () => {
+          void reader?.cancel().catch(() => undefined);
+          reject(new CursorReadError("cancelled"));
+        },
+        { once: true },
+      );
+    });
+    const current = () =>
+      this.running &&
+      this.active &&
+      !this.accessEnded &&
+      this.generation === generation &&
+      !controller.signal.aborted;
+    try {
+      // A failed WebSocket may already have consumed its ticket. Every transport
+      // attempt obtains a new capability through the same-origin sponsor facade.
+      const minted = await Promise.race([
+        requestRoomTicket(this.options, this.runtime, controller.signal),
+        stopped,
+      ]);
+      if (!current()) return;
+      const url = workshopRoomUrl(minted.room_url, this.options);
+      url.protocol = url.protocol === "wss:" ? "https:" : "http:";
+      armDeadline(WORKSHOP_WATCH_TIMEOUT_MS);
+      const response = await Promise.race([
+        openSse(url.toString(), {
+          method: "POST",
+          headers: { accept: "text/event-stream", "content-type": "application/json" },
+          body: JSON.stringify({ auth: minted.ticket }),
+          credentials: "omit",
+          mode: "cors",
+          cache: "no-store",
+          redirect: "error",
+          referrerPolicy: "no-referrer",
+          signal: controller.signal,
+        }).then((result) => {
+          if (!current()) void result.body?.cancel().catch(() => undefined);
+          return result;
+        }),
+        stopped,
+      ]);
+      if (!current()) return;
+      if (
+        response.status !== 200 ||
+        !/^text\/event-stream(?:\s*;|$)/i.test(response.headers.get("content-type") ?? "") ||
+        !/(?:^|,)\s*no-store\s*(?:,|$)/i.test(response.headers.get("cache-control") ?? "") ||
+        !response.body
+      ) {
+        void response.body?.cancel().catch(() => undefined);
+        throw new CursorReadError("unavailable");
+      }
+      reader = response.body.getReader();
+      this.liveTransport = "sse";
+      lifetime = this.runtime.setTimer(
+        () => controller.abort(),
+        60_000 + WORKSHOP_WATCH_TIMEOUT_MS,
+      );
+      const decoder = new TextDecoder("utf-8", { fatal: true });
+      let buffer = "";
+      let bytes = 0;
+      let authenticated = false;
+      while (current()) {
+        const part = await Promise.race([reader.read(), stopped]);
+        if (!current() || part.done) return;
+        bytes += part.value.byteLength;
+        if (bytes > 128 * 1024) throw new CursorReadError("unavailable");
+        buffer += decoder.decode(part.value, { stream: true }).replace(/\r\n/g, "\n");
+        while (true) {
+          const boundary = buffer.indexOf("\n\n");
+          if (boundary === -1) break;
+          const frame = buffer.slice(0, boundary);
+          buffer = buffer.slice(boundary + 2);
+          if (frame.length > 2176) throw new CursorReadError("unavailable");
+          const lines = frame.split("\n");
+          const event = lines
+            .find((line) => line.startsWith("event:"))
+            ?.slice(6)
+            .trim();
+          if (event === "closed" || event === "reconnect") return;
+          if (event === "workshop-update") {
+            const data = lines
+              .filter((line) => line.startsWith("data:"))
+              .map((line) => line.slice(5).trim())
+              .join("\n");
+            const cursor = parseWorkshopNoticeCursor(
+              data,
+              this.options.fellowId,
+              this.options.problemId,
+            );
+            if (cursor === undefined) throw new CursorReadError("unavailable");
+            authenticated = true;
+            this.failures = 0;
+            this.changed(cursor);
+          } else if (event !== undefined) throw new CursorReadError("unavailable");
+        }
+        if (buffer.length > 2176) throw new CursorReadError("unavailable");
+        if (authenticated) armDeadline(WORKSHOP_WATCH_HEARTBEAT_MS + WORKSHOP_WATCH_TIMEOUT_MS);
+      }
+    } catch {
+      // The same-origin cursor read owns the access-ended decision, including
+      // ticket refusal, lost CORS/stream support, and silent transport failures.
+    } finally {
+      if (deadline !== undefined) this.runtime.clearTimer(deadline);
+      if (lifetime !== undefined) this.runtime.clearTimer(lifetime);
+      controller.abort();
+      reader?.releaseLock();
+      if (this.controller === controller) this.controller = undefined;
+      if (this.running && this.active && !this.accessEnded && this.generation === generation) {
+        this.liveTransport = "poll";
+        void this.poll();
+      }
+    }
   }
 
   private async connectWorkshopRoom(): Promise<void> {
     const openWs = this.runtime.openWebSocket;
     if (!openWs || !this.running || !this.active || !this.configured || this.accessEnded) return;
+    this.liveTransport = "ws";
     const generation = this.generation;
     const controller = new AbortController();
     this.controller = controller;
@@ -447,32 +606,8 @@ export class WorkshopWatch {
       const minted = await requestRoomTicket(this.options, this.runtime, controller.signal);
       if (generation !== this.generation || !this.running || !this.active || this.accessEnded)
         return;
-      // Defense-in-depth: allow only the exact non-secret workshop route
-      // selector (`?fellow=<id>&problem=<id>`, zero fragment or credential
-      // params; the secret ticket travels strictly in the first JSON auth
-      // frame) and allow cleartext ws: only on explicit loopback hosts.
-      const parsedUrl = new URL(minted.room_url);
-      const isLoopbackHost =
-        parsedUrl.hostname === "127.0.0.1" ||
-        parsedUrl.hostname === "localhost" ||
-        parsedUrl.hostname === "[::1]";
-      const allowedScheme =
-        parsedUrl.protocol === "wss:" || (parsedUrl.protocol === "ws:" && isLoopbackHost);
-      const searchEntries = [...parsedUrl.searchParams.entries()];
-      const validSelectorQuery =
-        searchEntries.length === 2 &&
-        parsedUrl.searchParams.get("fellow") === this.options.fellowId &&
-        parsedUrl.searchParams.get("problem") === this.options.problemId;
-      if (
-        !allowedScheme ||
-        parsedUrl.pathname !== "/v1/workshop-room" ||
-        !validSelectorQuery ||
-        parsedUrl.hash !== ""
-      ) {
-        this.dropToPolling(generation);
-        return;
-      }
-      const sock = openWs(minted.room_url, "asimposium.room.v1");
+      const parsedUrl = workshopRoomUrl(minted.room_url, this.options);
+      const sock = openWs(parsedUrl.toString(), "asimposium.room.v1");
       this.socket = sock;
       this.liveTransport = "ws";
       this.armSocketDeadline(sock, generation);
@@ -481,7 +616,7 @@ export class WorkshopWatch {
       const onDisconnect = () => {
         if (closed || !this.isCurrentSocket(sock, generation)) return;
         closed = true;
-        this.dropToPolling(generation);
+        this.dropFromSocket(generation);
       };
       sock.addEventListener("open", () => {
         if (!this.isCurrentSocket(sock, generation)) return;
@@ -519,7 +654,7 @@ export class WorkshopWatch {
       // Optional WS ticket upgrade must never strand the workshop view in
       // access-ended on 403/404/503/network; degrade cleanly to authoritative
       // same-origin GET /cursor polling, which owns the access-ended decision.
-      this.dropToPolling(generation);
+      this.dropFromSocket(generation);
     } finally {
       if (this.controller === controller) this.controller = undefined;
     }
@@ -562,10 +697,11 @@ export class WorkshopWatch {
       return;
     this.polling = true;
     const generation = this.generation;
-    this.controller = new AbortController();
+    const controller = new AbortController();
+    this.controller = controller;
     let delay = WORKSHOP_WATCH_INTERVAL_MS;
     try {
-      const cursor = await readCursor(this.options, this.runtime, this.controller.signal);
+      const cursor = await readCursor(this.options, this.runtime, controller.signal);
       if (generation !== this.generation || !this.running || !this.active) return;
       this.failures = 0;
       this.changed(cursor);
@@ -588,7 +724,7 @@ export class WorkshopWatch {
       this.emit("unavailable");
     } finally {
       this.polling = false;
-      this.controller = undefined;
+      if (this.controller === controller) this.controller = undefined;
       if (
         this.running &&
         this.active &&
