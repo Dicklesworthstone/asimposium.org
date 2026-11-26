@@ -9,13 +9,14 @@ import {
   reviewTargetKey,
 } from "../mega-commands/ledger-moves";
 import type { LedgerPackSection } from "./ledger-pack";
+import type { ReviewInvitationPack } from "./review-invitation-pack";
 
 const ITEM_CHARACTERS = 18000;
 export const REVIEW_QUEUE_PACK_BOUNDARY =
   "Review candidates use the canonical scientific queue and the same consequence, missing-check and age ordering as review recommendations in next/triage. Only other-sponsor, non-author versions not already reviewed by you are recommended. This is not a reservation or write permission; same-sponsor review remains possible through the ordinary review route, at its computed tier. The recorded tier belongs to existing reviews, not to you. Selection is bounded; unseen work may rank higher.";
 
 export interface ReviewQueuePackDependencies extends LedgerMovesDependencies {
-  invitations(db: D1Database, problem: string, fellow: string): Promise<LedgerPackSection>;
+  invitations(db: D1Database, problem: string, fellow: string): Promise<ReviewInvitationPack>;
   neutralize(body: string): string;
 }
 
@@ -71,6 +72,11 @@ function candidate(
   };
 }
 
+export type ReviewQueuePackSection = LedgerPackSection & {
+  targets: string[];
+  acceptedTarget?: string;
+};
+
 /** Call after session ownership and membership checks. No workshop or handback
  * contributes to selection. Private invitations remain on their participant-
  * checked reader; their failure cannot masquerade as no incoming invitations. */
@@ -80,7 +86,7 @@ export async function readCanonicalReviewQueuePack(
   cursor: number,
   reviewer: MoveViewer,
   dependencies?: ReviewQueuePackDependencies,
-): Promise<LedgerPackSection & { targets: string[] }> {
+): Promise<ReviewQueuePackSection> {
   const identifier = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}(?![\s\S])/;
   if (
     ![problemId, reviewer.fellowId, reviewer.sponsorId].every(
@@ -107,7 +113,7 @@ export async function readCanonicalReviewQueuePack(
     };
   }
   const canonical = source;
-  let section: LedgerPackSection & { targets: string[] } = {
+  let section: ReviewQueuePackSection = {
     candidates: [],
     omitted: [],
     targets: [],
@@ -209,6 +215,14 @@ export async function readCanonicalReviewQueuePack(
     const invitations = await canonical.invitations(db, problemId, reviewer.fellowId);
     section.candidates.unshift(...invitations.candidates);
     section.omitted.push(...invitations.omitted);
+    // A private acceptance steers only this recipient's navigation. The
+    // independently computed queue still checks exact version, authorship,
+    // sponsor independence and prior reviews. Neither an offer nor an old
+    // acceptance makes an otherwise ineligible version review-ready.
+    const accepted = invitations.acceptedTargets?.find((target) =>
+      section.targets.includes(target),
+    );
+    if (accepted !== undefined) section.acceptedTarget = accepted;
   } catch {
     section.omitted.push({
       reason: "review_invitations_unavailable",

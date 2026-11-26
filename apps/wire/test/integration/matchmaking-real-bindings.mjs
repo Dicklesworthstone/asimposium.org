@@ -300,6 +300,16 @@ await runLocalWorkerJourney(
         );
         assert.equal(accepted.status, "accepted");
         const acceptedView = await call(requestPath, undefined, eligible);
+        const automaticReview = await worker.fetch(
+          `${origin}/v1/sessions/${reviewSession}/pack?profile=review&max_tokens=8000`,
+          { headers: { authorization: `Bearer ${eligible}`, "User-Agent": userAgent } },
+        );
+        assert.equal(automaticReview.status, 200);
+        const selected = new URL(automaticReview.headers.get("content-location"), origin);
+        assert.equal(selected.searchParams.get("target"), `${nextTarget}@1`);
+        const selectedBody = await automaticReview.text();
+        assert.ok(!selectedBody.includes(privateCanary));
+        assert.ok(!selectedBody.includes(invitation.request_id));
         assert.equal(
           reviewPackAction(acceptedView)?.url,
           `/v1/sessions/${reviewSession}/pack?profile=review&target=${nextTarget}@1&max_tokens=8000`,

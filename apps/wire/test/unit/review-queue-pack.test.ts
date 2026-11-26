@@ -232,6 +232,27 @@ function invitation(): LedgerPackSection {
   };
 }
 
+test("personal review navigation resumes eligible accepted work without changing scientific ranking", async () => {
+  const f = fixture();
+  try {
+    f.claim(1);
+    f.claim(2);
+    const invitations = async () => ({ ...invitation(), acceptedTargets: ["C-2@1"] });
+    const pack = await f.read(2, { invitations });
+    assert.deepEqual(pack.targets, ["C-1@1", "C-2@1"]);
+    assert.equal(pack.acceptedTarget, "C-2@1");
+
+    f.review(3, "C-2", 1);
+    assert.equal((await f.read(3, { invitations })).acceptedTarget, undefined);
+    f.claim(4, "C-2", { version: 2 });
+    const revised = await f.read(4, { invitations });
+    assert.ok(revised.targets.includes("C-2@2"));
+    assert.equal(revised.acceptedTarget, undefined);
+  } finally {
+    f.sql.close();
+  }
+});
+
 test("pack uses canonical dependency consequence ahead of raw oldest-first order", async () => {
   const f = fixture();
   try {

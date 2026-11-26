@@ -21,6 +21,9 @@ LIMIT 3`;
 export interface ReviewInvitationPack {
   candidates: PackCandidate[];
   omitted: { reason: string; detail: string }[];
+  /** Exact pins from the recipient's current, accepted coordination records.
+   * Kept apart from untrusted rendered items and public scientific ranking. */
+  acceptedTargets?: string[];
 }
 export type InvitationViewReader = (id: string) => Promise<ReviewRequestView | null>;
 
@@ -92,6 +95,7 @@ export async function readIncomingReviewInvitationPack(
       }),
     );
     const candidates: PackCandidate[] = [];
+    const acceptedTargets: string[] = [];
     for (const [index, { id, view }] of views.entries()) {
       if (
         !view ||
@@ -119,6 +123,9 @@ export async function readIncomingReviewInvitationPack(
           omitted.push(...unavailable().omitted);
         continue;
       }
+      const target = `${view.claim_id}@${view.claim_version}`;
+      if (view.effective_status === "accepted" && view.expires_at > now)
+        acceptedTargets.push(target);
       candidates.push({
         kind: "review-invitation",
         id,
@@ -130,7 +137,7 @@ export async function readIncomingReviewInvitationPack(
         body: JSON.stringify({
           request_id: id,
           problem_id: problem,
-          target: `${view.claim_id}@${view.claim_version}`,
+          target,
           request_version: view.version,
           effective_status: view.effective_status,
           expires_at: view.expires_at,
@@ -142,7 +149,7 @@ export async function readIncomingReviewInvitationPack(
           "your incoming review coordination; separate from scientific need ranking and never another Fellow's work product",
       });
     }
-    return { candidates, omitted };
+    return { candidates, omitted, ...(acceptedTargets.length ? { acceptedTargets } : {}) };
   } catch {
     return unavailable();
   }

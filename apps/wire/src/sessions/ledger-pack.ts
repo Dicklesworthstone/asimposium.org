@@ -60,7 +60,7 @@ import { composeClaimProofObligations } from "./claim-proof-obligations";
 import { readFormalGapSection, readGraveyardFrictionSection } from "./formal-pack";
 import { readKilledHypothesisPack } from "./killed-hypothesis-pack";
 import { readLiteraturePack } from "./literature-pack.ts";
-import { readCanonicalReviewQueuePack } from "./review-queue-pack";
+import { readCanonicalReviewQueuePack, type ReviewQueuePackSection } from "./review-queue-pack";
 
 // One extra row proves truncation. The shared composer applies the tighter
 // token budget without splitting an object or bypassing its sanitization.
@@ -256,7 +256,7 @@ export async function readReviewQueuePack(
   problemId: string,
   cursor: number,
   reviewer: ReviewQueueReviewer,
-): Promise<LedgerPackSection & { targets: string[] }> {
+): Promise<ReviewQueuePackSection> {
   return readCanonicalReviewQueuePack(db, problemId, cursor, reviewer);
 }
 

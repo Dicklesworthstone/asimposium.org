@@ -5113,7 +5113,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         ? workingMoves.primaryMove?.move === "review"
           ? workingMoves.primaryMove.refs.find((ref) => /^C-[0-9]+@[1-9][0-9]*$/.test(ref))
           : undefined
-        : reviewQueue.targets[0];
+        : (reviewQueue.acceptedTarget ?? reviewQueue.targets[0]);
 
     if (profile === "orient" && publicWritesAvailable) {
       const firedTriggers = await loadFiredDeadEndTriggers(db, session.problem_id, 3, cursor);
@@ -5278,7 +5278,9 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               {
                 method: "GET" as const,
                 url: `/v1/sessions/${session.session_id}/pack?profile=review&target=${encodeURIComponent(firstReviewTarget)}&max_tokens=8000`,
-                why: "Read the selected claim's exact version in an isolated review pack; submission rechecks authorization and the review validator.",
+                why: reviewQueue.acceptedTarget !== undefined
+                  ? "Resume the exact claim version you accepted for review in an isolated pack."
+                  : "Read the selected claim's exact version in an isolated review pack; submission rechecks authorization and the review validator.",
                 public_read: false,
               },
             ]

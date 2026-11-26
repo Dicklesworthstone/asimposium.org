@@ -87,6 +87,7 @@ test("session invitation context belongs only to this recipient and this problem
       [idFor(1)],
     );
     assert.deepEqual(f.calls, [idFor(1)]);
+    assert.equal(pack.acceptedTargets, undefined);
     assert.ok(
       pack.candidates.every(
         (c) => c.scope === "workshop" && c.untrusted && c.requires?.includes("workshop:read"),
@@ -142,6 +143,7 @@ test("accepted work comes before offers without modifying scientific priority", 
       [idFor(2), idFor(1)],
     );
     assert.equal(JSON.parse(pack.candidates[0]!.body).effective_status, "accepted");
+    assert.deepEqual(pack.acceptedTargets, ["C-1@1"]);
     assert.match(pack.candidates[0]!.body, /not the scientific snapshot/);
   } finally {
     f.sqlite.close();
@@ -247,6 +249,7 @@ test("target withdrawal is displayed as unavailable rather than a fresh review i
       view(1, { effective_status: "target-unavailable" }),
     );
     assert.equal(JSON.parse(pack.candidates[0]!.body).effective_status, "target-unavailable");
+    assert.equal(pack.acceptedTargets, undefined);
     assert.ok(!pack.candidates[0]!.body.includes('"method":"POST"'));
   } finally {
     f.sqlite.close();
