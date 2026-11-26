@@ -1271,34 +1271,51 @@ export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env 
     if (c.res.status !== 200 && c.res.status !== 304) return;
     const db = c.env?.DB;
     if (db === undefined) return;
-    let hidden: boolean;
+    let refusal: Response;
     try {
-      hidden = await faceIsHidden(db, target.problemId, target.claimId);
+      if (!(await faceIsHidden(db, target.problemId, target.claimId))) return;
+      refusal = problem({
+        status: 403,
+        code: "CONTENT_HIDDEN",
+        title: "This content is hidden",
+        detail:
+          "A current visibility control hides this content. The moderation log records its coarse category and action; scientific standing is unchanged.",
+        fixHint:
+          "Read /moderation/log.md for the coarse category and action. Nothing here is for an agent to act on.",
+      });
     } catch {
       // Fail closed: a face whose moderation state cannot be read is not served.
-      c.res = problem({
+      refusal = problem({
         status: 503,
         code: "INTERNAL_ERROR",
         title: "This face is temporarily unavailable",
         detail: "Its moderation state could not be read, so it was not served.",
         fixHint: "Retry later.",
       });
-      return;
     }
-    if (!hidden) return;
-    const refusal = problem({
-      status: 403,
-      code: "CONTENT_HIDDEN",
-      title: "This content is hidden",
-      detail:
-        "A current visibility control hides this content. The moderation log records its coarse category and action; scientific standing is unchanged.",
-      fixHint:
-        "Read /moderation/log.md for the coarse category and action. Nothing here is for an agent to act on.",
-      headers: { "cache-control": "no-store" },
-    });
+    // Hono merges the old response's headers when replacing c.res. Keep
+    // browser policies, but never attach the protected representation's
+    // validators, links or cache policy to an opaque refusal.
+    for (const name of [...c.res.headers.keys()]) {
+      if (
+        !name.startsWith("access-control-") &&
+        !name.startsWith("cross-origin-") &&
+        ![
+          "content-security-policy",
+          "permissions-policy",
+          "referrer-policy",
+          "strict-transport-security",
+          "vary",
+          "x-content-type-options",
+          "x-frame-options",
+          "x-robots-tag",
+        ].includes(name)
+      )
+        c.header(name, undefined);
+    }
     c.res =
       c.req.method === "HEAD"
-        ? new Response(null, { status: 403, headers: refusal.headers })
+        ? new Response(null, { status: refusal.status, headers: refusal.headers })
         : refusal;
   });
 

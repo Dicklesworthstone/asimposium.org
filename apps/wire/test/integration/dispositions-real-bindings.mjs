@@ -28,6 +28,28 @@ await runLocalWorkerJourney(async (context) => {
     }
   }
 
+  // A bounded review pack supplies the claim and its scientific cut. Read the
+  // cited proof from its exact public face even when the pack omits its body.
+  async function publishedArgument(problem, claim, evidenceId, sessionId, packCursor) {
+    const face = ClaimFaceResponseSchema.parse(
+      await call(`/p/${problem}/evidence/${evidenceId}.json`, undefined, undefined, 200),
+    );
+    const item = face.items.find(
+      (entry) => entry.kind === "claim-evidence" && entry.id === evidenceId,
+    );
+    assert.ok(item, `expected published evidence ${evidenceId}`);
+    assert.equal(item.untrusted, true);
+    const proof = safeJsonParse(item.body);
+    assert.equal(proof.problem, problem);
+    assert.equal(proof.target, `${claim}@1`);
+    assert.equal(proof.session, sessionId);
+    assert.equal(proof.kind, "argument");
+    assert.equal(proof.direction, "supports");
+    assert.ok(Number.isSafeInteger(proof.seq) && proof.seq > 0 && proof.seq <= packCursor);
+    assert.match(proof.content_digest, /^sha256:[a-f0-9]{64}$/);
+    return { evidence_id: evidenceId, digest: proof.content_digest };
+  }
+
   const sponsorA = "usr_disp_sponsor_a";
   const authorA = await enroll("disp-author-a", sponsorA, {
     model: "openai/gpt-5.6",
@@ -353,14 +375,18 @@ await runLocalWorkerJourney(async (context) => {
     undefined,
     reviewerB,
   );
-  const c1Detail = safeJsonParse(reviewPackRes.items.find((it) => it.kind === "claim-detail").body);
-  const proofItem = reviewPackRes.items.find((it) => it.id === c1Proof.evidence_id);
-  assert.ok(proofItem, `Published proof ${c1Proof.evidence_id} must be in review pack`);
-  const proofDetail = safeJsonParse(proofItem.body);
-  const proofRef = {
-    evidence_id: c1Proof.evidence_id,
-    digest: proofDetail.content_digest,
-  };
+  const c1Item = reviewPackRes.items.find(
+    (it) => it.kind === "claim-detail" && it.id === `${c1Id}@1`,
+  );
+  assert.ok(c1Item, "the review pack includes the exact claim statement");
+  const c1Detail = safeJsonParse(c1Item.body);
+  const proofRef = await publishedArgument(
+    problemId,
+    c1Id,
+    c1Proof.evidence_id,
+    authorSession.session_id,
+    reviewPackRes.cursor,
+  );
 
   await call(
     `${reviewerSessionPathB}/evidence`,
@@ -1137,8 +1163,15 @@ await runLocalWorkerJourney(async (context) => {
         const controlledRead = await worker.fetch(`${origin}${recovery.read_url}`, {
           headers: { "User-Agent": userAgent },
         });
-        assert.equal(controlledRead.status, action === "hide" ? 404 : 200);
-        await controlledRead.text();
+        if (action === "hide") {
+          assert.equal(controlledRead.status, 403);
+          assert.equal((await controlledRead.json()).code, "CONTENT_HIDDEN");
+          assert.equal(controlledRead.headers.get("cache-control"), "no-store");
+          assert.equal(controlledRead.headers.get("etag"), null);
+        } else {
+          assert.equal(controlledRead.status, 200);
+          assert.match(await controlledRead.text(), /stale/i);
+        }
       }
     }
     const historical = ClaimFaceResponseSchema.parse(
@@ -1782,11 +1815,17 @@ await runLocalWorkerJourney(async (context) => {
         ),
       );
     const assertionPack = await readAssertionPack();
-    const claimDetail = safeJsonParse(
-      assertionPack.items.find((item) => item.kind === "claim-detail").body,
+    const assertionItem = assertionPack.items.find(
+      (item) => item.kind === "claim-detail" && item.id === `${assertionClaim}@1`,
     );
-    const argumentDetail = safeJsonParse(
-      assertionPack.items.find((item) => item.id === argument.evidence_id).body,
+    assert.ok(assertionItem, "the review pack includes the exact assertion claim");
+    const claimDetail = safeJsonParse(assertionItem.body);
+    const argumentRef = await publishedArgument(
+      tierProblem,
+      assertionClaim,
+      argument.evidence_id,
+      authorSession.session_id,
+      assertionPack.cursor,
     );
     await call(
       `/v1/sessions/${crossSession.session_id}/evidence`,
@@ -1808,7 +1847,7 @@ await runLocalWorkerJourney(async (context) => {
           attempted_falsifier: "An element belonging to the empty finite set.",
           capable_of_failure: "Enumeration producing an element would contradict zero cardinality.",
           result: "survived",
-          evidence: [{ evidence_id: argument.evidence_id, digest: argumentDetail.content_digest }],
+          evidence: [argumentRef],
         },
         body_md: "Exhaustive enumeration of the empty finite set returned zero elements.",
       },

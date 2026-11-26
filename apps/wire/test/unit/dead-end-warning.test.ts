@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import {
   DeadEndsListResponseSchema,
   PackResponseSchema,
@@ -271,6 +271,8 @@ describe("dead-end warning publications", () => {
         expect(hidden.status, target).toBe(target === "problem" ? 403 : 200);
         if (target === "problem") {
           expect(await hidden.json()).toMatchObject({ code: "CONTENT_HIDDEN" });
+          expect(hidden.headers.get("etag")).toBeNull();
+          expect(hidden.headers.get("cache-control")).toBe("no-store");
         } else {
           const face = DeadEndsListResponseSchema.parse(await hidden.json());
           expect(face.dead_ends).toEqual([]);
@@ -296,5 +298,36 @@ describe("dead-end warning publications", () => {
         });
         expect(restored.status, target).toBe(304);
       }
+    }));
+
+  test("unavailable face controls withhold even a matching validator on GET and HEAD", () =>
+    withFixture(async (f) => {
+      const route = await routeFixture(f);
+      const path = `/p/${PROBLEM}/dead-ends.json`;
+      const visible = await route.request(path);
+      const etag = visible.headers.get("etag");
+      expect(visible.status).toBe(200);
+      if (!etag) throw new Error("Expected a validator for the readable public face.");
+      const prepare = f.db.prepare.bind(f.db);
+      const failed = spyOn(f.db, "prepare").mockImplementation((sql) => {
+        if (sql.includes("AS problem_hidden")) throw new Error("Control lookup unavailable");
+        return prepare(sql);
+      });
+      try {
+        for (const method of ["GET", "HEAD"]) {
+          const response = await route.request(path, {
+            method,
+            headers: { "if-none-match": etag },
+          });
+          expect(response.status).toBe(503);
+          expect(response.headers.get("cache-control")).toBe("no-store");
+          expect(response.headers.has("etag")).toBe(false);
+          if (method === "HEAD") expect(await response.text()).toBe("");
+          else expect(await response.json()).toMatchObject({ code: "INTERNAL_ERROR" });
+        }
+      } finally {
+        failed.mockRestore();
+      }
+      expect((await route.request(path, { headers: { "if-none-match": etag } })).status).toBe(304);
     }));
 });

@@ -14,7 +14,7 @@ const scope = { fellowId: "fellow-stream", problemId: "P-STREAM" };
 const sponsorId = "usr_stream_owner";
 const route = "https://a.asimposium.org/v1/workshop-room?fellow=fellow-stream&problem=P-STREAM";
 const origin = "https://asimposium.org";
-const request = (body: unknown, headers: HeadersInit = {}) =>
+const request = (body: unknown, headers: Record<string, string> = {}) =>
   new Request(route, {
     method: "POST",
     headers: { "content-type": "application/json", origin, ...headers },
@@ -103,7 +103,7 @@ describe("private workshop streamed-fetch fallback", () => {
     const f = fixture();
     const response = await f.streams.fetch(request({ auth: await mint() }), scope);
     const reader = response.body!.getReader();
-    const decode = (part: ReadableStreamReadResult<Uint8Array>) =>
+    const decode = (part: Awaited<ReturnType<typeof reader.read>>) =>
       new TextDecoder().decode(part.value);
     expect(decode(await reader.read())).toContain('"workshop_cursor":7');
     f.update(8);
