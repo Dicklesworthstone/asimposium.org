@@ -84,6 +84,7 @@ import {
   type ReviewQueueResponse,
   ReviewQueueResponseSchema,
 } from "@asimposium/contracts/review-queue";
+import { type PlatformStatsFace, PlatformStatsFaceSchema } from "@asimposium/contracts/stats";
 import { parseCitationViewQuery } from "./citation-view";
 import { deadEndsMatchView, deadEndsQueryString } from "./dead-end-view";
 import { eventHistoryMatchesQuery, parseEventHistoryQuery } from "./event-history";
@@ -883,13 +884,14 @@ export async function stoaFetchProblemMoves(
     : { state: "unavailable", reason: "invalid_response" };
 }
 
-/** Public statistics surface (currently late-producer degraded until OPS.4 lands). */
+const statsResponseSchema = PlatformStatsFaceSchema.or(
+  LateProducerDegradedFaceSchema.refine(
+    (face) => face.kind === "stats" && face.producer === "stats",
+  ),
+);
+
 export async function stoaFetchStats(
   stoaOrigin: string | undefined = configuredStoaOrigin(),
-): Promise<PublicRead<LateProducerDegradedFace>> {
-  const result = await readPublic("/stats.json", stoaOrigin, LateProducerDegradedFaceSchema, 0);
-  if (result.state !== "ok") return result;
-  return result.data.kind === "stats"
-    ? result
-    : { state: "unavailable", reason: "invalid_response" };
+): Promise<PublicRead<PlatformStatsFace | LateProducerDegradedFace>> {
+  return readPublic("/stats.json", stoaOrigin, statsResponseSchema, 0);
 }

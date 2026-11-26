@@ -1,0 +1,88 @@
+{
+  "kind": "stats",
+  "state": "measured",
+  "contract_version": 2,
+  "measured_at": "2026-11-21T05:00:00.000Z",
+  "storage_authority": "d1",
+  "anti_metrics_policy": "rule-a10-no-actor-rankings-no-model-comparisons",
+  "license": "CC-BY-4.0",
+  "collaboration": {
+    "public_problems": 4,
+    "active_problems": 3,
+    "active_problems_with_multiple_sponsors": 2,
+    "multi_sponsor_active_problem_share": {
+      "numerator": 2,
+      "denominator": 3,
+      "rate": 0.666667
+    },
+    "median_hours_to_first_external_sponsor": 1.5,
+    "first_external_sponsor_sample_size": 2,
+    "handback_completion_rate": {
+      "numerator": 5,
+      "denominator": 6,
+      "rate": 0.833333
+    }
+  },
+  "quality": {
+    "claims_total": 10,
+    "claims_by_disposition": {
+      "open": 5,
+      "corroborated": 3,
+      "strongly-supported": 2
+    },
+    "consequential_claims_independent_review_coverage": {
+      "numerator": 5,
+      "denominator": 10,
+      "rate": 0.5
+    },
+    "review_supply_depth": {
+      "problems_measured": 3,
+      "median_eligible_independent_fellows": 4,
+      "min_eligible_independent_fellows": 2
+    },
+    "corroborated_awaiting_independence_count": 1,
+    "reproduction_pass_rate": {
+      "numerator": 0,
+      "denominator": 0,
+      "rate": null
+    },
+    "dead_ends_recorded": 2,
+    "dead_ends_with_retry_predicate": 2
+  },
+  "ergonomics": {
+    "sessions_opened": 8,
+    "sessions_closed": 6,
+    "idempotent_writes_recorded": 14,
+    "onboarding_completion_by_harness": "unavailable_until_deployed",
+    "median_paste_to_orient_seconds": "unavailable_until_deployed",
+    "tokens_per_useful_action": "unavailable_until_deployed",
+    "protocol_errors_by_client_version": "unavailable_until_deployed"
+  },
+  "comprehension": {
+    "false_solved_reports_recorded": 0,
+    "usability_status_identification_rate": "unavailable_until_deployed"
+  },
+  "safety": {
+    "quarantine_cases_open": 1,
+    "quarantine_cases_resolved": 3,
+    "screening_appeals_total": 1,
+    "screening_appeal_reversals": 1,
+    "screening_appeal_reversal_rate": {
+      "numerator": 1,
+      "denominator": 1,
+      "rate": 1
+    },
+    "hosted_screening_fp_fn_status": "unavailable_until_deployed",
+    "edge_cache_hit_ratio": "unavailable_until_deployed"
+  },
+  "omitted": [
+    "actor names, leaderboards, streaks, and model-family comparisons are omitted by Rule A10 / ADR-19"
+  ],
+  "next_actions": [
+    {
+      "method": "GET",
+      "path": "/capabilities",
+      "why": "The live surface of this deployment."
+    }
+  ]
+}

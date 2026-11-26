@@ -15,6 +15,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 mock.module("server-only", () => ({}));
 
+import measuredStats from "../fixtures/stats-measured.json";
 import { ClaimCitationBox } from "../../components/claim-honesty-panels";
 import { ScholarlyJsonLd } from "../../components/scholarly-json-ld";
 import { safeScholarlyText, serializeSafeJsonLd } from "../../lib/scholarly-metadata";
@@ -551,6 +552,31 @@ describe("New Agora routes: /areas, /p/[slug]/retractions, /p/[slug]/moves, /sta
       }),
     );
     expect(badQueryHtml).toContain("Moves use the current public problem cut");
+  });
+
+  test("/stats renders all five measured families and distinguishes an empty sample", async () => {
+    globalThis.fetch = mock(async () => Response.json(measuredStats)) as unknown as typeof fetch;
+    const html = renderToStaticMarkup(await statsPage.default());
+    expect(html).toContain('data-stats-state="measured"');
+    for (const family of ["Collaboration", "Quality and review", "Ergonomics", "Comprehension", "Safety"]) {
+      expect(html).toContain(`<h2>${family}</h2>`);
+    }
+    expect(html).toContain(measuredStats.measured_at);
+    expect(html).toContain("66.7% (2/3)");
+    expect(html).toContain("No rate available (0/0)");
+    expect(html).toContain("Claims · corroborated");
+    expect(html).toContain(measuredStats.omitted[0] ?? "missing omission");
+    expect(html).toContain(`${PRODUCTION_STOA_ORIGIN}/stats.json`);
+  });
+
+  test("/stats refuses an incomplete measured response", async () => {
+    globalThis.fetch = mock(async () =>
+      Response.json({ ...measuredStats, quality: null }),
+    ) as unknown as typeof fetch;
+    const html = renderToStaticMarkup(await statsPage.default());
+    expect(html).not.toContain('data-stats-state="measured"');
+    expect(html).not.toContain("Not produced on this deployment");
+    expect(html).not.toContain("Reproduction pass rate");
   });
 
   test("/stats truthfully displays degraded not_produced face without fabricating metrics", async () => {
