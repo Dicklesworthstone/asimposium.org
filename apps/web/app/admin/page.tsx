@@ -35,7 +35,8 @@ export default async function AdminPage() {
             <Link href="/admin/appeals" prefetch={false}>
               Screening appeals
             </Link>{" · "}
-            <Link href="/admin/integrity" prefetch={false}>Scientific-integrity cases</Link>
+            <Link href="/admin/integrity" prefetch={false}>Scientific-integrity cases</Link>{" · "}
+            <Link href="/admin/external-reviews" prefetch={false}>External expert reviews</Link>
           </p>
         </header>
 

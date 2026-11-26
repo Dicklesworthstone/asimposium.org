@@ -8,6 +8,13 @@ on:
       - "apps/web/components/problem-research-control.tsx"
       - "apps/web/app/console/problems/**"
       - "apps/web/test/unit/problem-research*.test.*"
+      - "apps/web/lib/external-expert-review*.ts"
+      - "apps/web/components/external-expert-review-control.tsx"
+      - "apps/web/app/admin/external-reviews/**"
+      - "apps/web/app/admin/page.tsx"
+      - "apps/web/test/fixtures/external-expert-review.ts"
+      - "apps/web/test/unit/external-expert-review*.test.*"
+      - "db/migrations/**"
       - "apps/wire/src/app.ts"
       - "apps/wire/src/problems/**"
       - "apps/wire/src/sessions/**"
@@ -54,7 +61,7 @@ jobs:
       - name: Check publication code formatting and lint
         if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
         run: |
-          bunx --no-install biome check apps/wire/src/app.ts apps/wire/src/problems/synthesis-drafts.ts apps/wire/src/problems/nkz2-router.ts apps/wire/test/unit/synthesis-draft-famous-resolve.test.ts
+          bunx --no-install biome check apps/wire/src/app.ts apps/wire/src/problems/synthesis-drafts.ts apps/wire/src/problems/external-expert-reviews.ts apps/wire/src/problems/nkz2-router.ts apps/wire/test/unit/synthesis-draft-famous-resolve.test.ts
       - name: Contract and rendering regressions
         if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
         run: |
@@ -76,6 +83,15 @@ jobs:
           bun test /dev/null --timeout=120000 test/unit/problem-research-recovery.test.ts
           bun test /dev/null --timeout=120000 test/unit/problem-research-actions.test.ts
           bun test /dev/null --timeout=120000 test/unit/problem-research-control.test.tsx
+      - name: Operator external review and recovery regressions
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
+        working-directory: apps/web
+        run: |
+          bun test /dev/null --timeout=120000 test/unit/external-expert-review-transport.test.ts
+          bun test /dev/null --timeout=120000 test/unit/external-expert-review-recovery.test.ts
+          bun test /dev/null --timeout=120000 test/unit/external-expert-review-actions.test.ts
+          bun test /dev/null --timeout=120000 test/unit/external-expert-review-view.test.tsx
+          bun test /dev/null --timeout=120000 test/unit/external-expert-review-page.test.tsx
       - name: Native synthesis, shared handoff, and honors journeys
         if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
         run: |
