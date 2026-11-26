@@ -42,7 +42,10 @@ const relationFaceSchema = z.object({
   schema: z.literal("asimposium.relation.v1"),
   kind: z.literal("relation-face"),
   profile: z.literal("relation"),
-  items: z.tuple([PackItemSchema.options[1].omit({ tokens: true })]),
+  items: z
+    .array(PackItemSchema.options[1].omit({ tokens: true }))
+    .min(1)
+    .max(2),
 });
 
 function fixture() {
@@ -190,7 +193,18 @@ test("graph packs qualify each publication separately across JSON, Markdown and 
   assert.deepEqual(item.screening_notice, assertionNotice);
   assert.match(item.why_included, new RegExp(`Recorded dispute \\(#${d.seq}\\):`));
   assert.match(item.why_included, /screening context notice: dual-use-boundary/);
-  assert.match(item.body, /"screening_notice":\{"category":"dual-use-boundary"/);
+  const dispute = current.candidates[1]!;
+  assert.deepEqual(
+    current.candidates.map((candidate) => candidate.id),
+    [edge.id, d.id],
+  );
+  assert.equal(item.kind, "claim-relation");
+  assert.equal(dispute.kind, "claim-relation-dispute");
+  assert.equal(dispute.untrusted, true);
+  assert.deepEqual(dispute.screening_notice, screeningReceipt.public_action);
+  assert.match(dispute.body, /An independently recorded objection/);
+  assert.match(dispute.body, new RegExp(`"seq":${d.seq},`));
+  assert.doesNotMatch(item.body, /An independently recorded objection/);
   assert.equal(item.untrusted, true);
   const projection: Projection = {
     schema: "asimposium.relation.v1",
@@ -209,17 +223,28 @@ test("graph packs qualify each publication separately across JSON, Markdown and 
   };
   const json = JSON.parse(renderProjection(projection, "json").body);
   assert.deepEqual(json.items[0].screening_notice, assertionNotice);
+  assert.deepEqual(json.items[1].screening_notice, screeningReceipt.public_action);
+  assert.doesNotMatch(
+    JSON.stringify(json),
+    /configuration_digest|input_digest|context_digest|synthetic-policy/,
+  );
   for (const format of ["md", "html-fragment"] as const) {
     const rendered = renderProjection(projection, format).body;
     assert.match(rendered, /Off-scope science:/);
-    assert.match(rendered, /screening context notice: dual-use-boundary/);
+    const warning = rendered.indexOf("screening context notice: dual-use-boundary");
+    assert.ok(warning >= 0 && warning < rendered.indexOf("An independently recorded objection"));
     assert.match(rendered, new RegExp(`Recorded dispute \\(#${d.seq}\\)`));
     assert.doesNotMatch(
       rendered,
       /configuration_digest|input_digest|context_digest|synthetic-policy/,
     );
   }
-  const past = (await f.pack(edge.seq)).candidates[0]!;
+  const historical = await f.pack(edge.seq);
+  assert.deepEqual(
+    historical.candidates.map((candidate) => candidate.id),
+    [edge.id],
+  );
+  const past = historical.candidates[0]!;
   assert.deepEqual(past.screening_notice, assertionNotice);
   assert.doesNotMatch(past.why_included + past.body, /dual-use-boundary|Recorded dispute/);
 });
@@ -245,8 +270,17 @@ test("mounted relation faces retain assertion warnings and revalidate exact disp
   const originalJson = await get("json");
   assert.equal(originalJson.status, 200);
   const originalFace = relationFaceSchema.parse(await originalJson.json());
-  assert.deepEqual(originalFace.items[0].screening_notice, assertionNotice);
-  assert.match(originalFace.items[0].why_included, new RegExp(`Recorded dispute \\(#${d.seq}\\)`));
+  const [assertion, dispute] = originalFace.items;
+  assert.ok(assertion && dispute);
+  assert.equal(assertion.kind, "claim-relation");
+  assert.equal(assertion.id, edge.id);
+  assert.deepEqual(assertion.screening_notice, assertionNotice);
+  assert.doesNotMatch(assertion.body, /WITHHELD-DISPUTE-CANARY/);
+  assert.equal(dispute.kind, "claim-relation-dispute");
+  assert.equal(dispute.id, d.id);
+  assert.deepEqual(dispute.screening_notice, screeningReceipt.public_action);
+  assert.match(dispute.body, /WITHHELD-DISPUTE-CANARY/);
+  assert.match(assertion.why_included, new RegExp(`Recorded dispute \\(#${d.seq}\\)`));
   assert.equal((await get("md", { headers: { "If-None-Match": etag } })).status, 304);
   f.sqlite
     .prepare("INSERT INTO content_controls VALUES ('P-PACK', ?, 'hidden', 1)")
@@ -259,8 +293,12 @@ test("mounted relation faces retain assertion warnings and revalidate exact disp
   assert.match(hiddenBody, /Status: unavailable/);
   assert.doesNotMatch(hiddenBody, /dual-use-boundary|WITHHELD-DISPUTE-CANARY|Recorded dispute \(#/);
   const hiddenFace = relationFaceSchema.parse(await (await get("json")).json());
-  assert.deepEqual(hiddenFace.items[0].screening_notice, assertionNotice);
-  assert.doesNotMatch(hiddenFace.items[0].why_included, /dual-use-boundary/);
+  assert.deepEqual(
+    hiddenFace.items.map((item) => item.id),
+    [edge.id],
+  );
+  assert.deepEqual(hiddenFace.items[0]?.screening_notice, assertionNotice);
+  assert.doesNotMatch(JSON.stringify(hiddenFace), /dual-use-boundary|WITHHELD-DISPUTE-CANARY/);
   f.sqlite
     .prepare("INSERT INTO content_controls VALUES ('P-PACK', ?, 'public', 2)")
     .run(`#${d.seq}`);
@@ -339,7 +377,9 @@ for (const corruption of [
         .prepare("INSERT INTO content_controls VALUES ('P-PACK', ?, 'hidden', 1)")
         .run(`#${d.seq}`);
     if (corruption === "invalid-receipt")
-      f.sqlite.prepare("INSERT INTO screening_publications VALUES (?, '{}')").run(d.id);
+      f.sqlite
+        .prepare("UPDATE screening_publications SET provenance_json='{}' WHERE event_id=?")
+        .run(d.id);
     const section = await f.pack(),
       body = edgeBodies(section)[0]!;
     assert.match(body, /Status: unavailable/);
@@ -348,7 +388,7 @@ for (const corruption of [
     assert.ok(section.omitted.some((o) => o.detail.endsWith(":dispute-state")));
     assert.equal(section.candidates[0]?.untrusted, true);
     assert.deepEqual(section.candidates[0]?.screening_notice, assertionNotice);
-    assert.ok(!JSON.stringify(section).includes("dual-use-boundary"));
+    assert.doesNotMatch(JSON.stringify(section), /dual-use-boundary|PRIVATE-OR-CORRUPT/);
   });
 }
 

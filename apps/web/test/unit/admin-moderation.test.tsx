@@ -254,7 +254,7 @@ describe("operator moderation commands and honest readback", () => {
     expect(calls).toEqual([]);
   });
 
-  test("dispatches every supported scientific whole-object kind with the exact target and receipt", async () => {
+  test("dispatches every supported whole-object kind with the exact target and receipt", async () => {
     for (const [kind, target] of [
       ["problem", "P-4DSP"],
       ["claim", "P-4DSP/C-12"],
@@ -268,6 +268,7 @@ describe("operator moderation commands and honest readback", () => {
       ["conflict", "P-4DSP/CF-1"],
       ["synthesis", "P-4DSP/SYNTH-1"],
       ["retraction", "P-4DSP/R-2"],
+      ["commentary", "P-4DSP/COMM-0123456789abcdef"],
     ] as const) {
       const input = form("content");
       input.set("target_kind", kind);
@@ -282,7 +283,7 @@ describe("operator moderation commands and honest readback", () => {
         request: { ...commands.content, target_kind: kind, target_id: target },
       });
     }
-    expect(calls).toHaveLength(12);
+    expect(calls).toHaveLength(13);
   });
 
   test("lost responses retain the exact request and key; retries do not create a new command", async () => {
@@ -410,11 +411,11 @@ describe("operator moderation commands and honest readback", () => {
       "conflict",
       "synthesis",
       "retraction",
+      "commentary",
     ]) {
       expect(html).toContain(`value="${kind}"`);
     }
     expect(html).not.toContain('value="relation"');
-    expect(html).not.toContain('value="commentary"');
     expect(html).not.toContain('value="ban_sponsor"');
   });
 });

@@ -11077,10 +11077,27 @@ describe("session protocol routes", () => {
           "claims",
           "claim_versions",
           "claim_projections",
-          "outbox",
           "screening_publications",
         ])
           expect(after.counts[table], table).toBe((before.counts[table] ?? -1) + count);
+        const publishedJobs = async () =>
+          (
+            await f.db
+              .prepare(
+                "SELECT o.event_id, o.kind, o.dedupe_key FROM outbox o JOIN events e ON e.id = o.event_id " +
+                  "WHERE e.type = 'claim.created' ORDER BY e.seq, o.kind",
+              )
+              .all<{ event_id: string; kind: string; dedupe_key: string }>()
+          ).results;
+        const expectedJobs = events.flatMap(({ id }) =>
+          ["embedding.compute", "search.index"].map((kind) => ({
+            event_id: id,
+            kind,
+            dedupe_key: `${kind}:${id}`,
+          })),
+        );
+        expect(await publishedJobs()).toEqual(expectedJobs);
+        expect(after.counts.outbox).toBe((before.counts.outbox ?? -1) + expectedJobs.length);
         expect(after.cursor?.cursor).toBe((before.cursor?.cursor ?? -1) + count);
         expect(await diffProjections(f.db, "P-4DSP")).toEqual({ drift: [], unreplayable: [] });
         expect(await eventChainMatches(await readEvents(f.db, "P-4DSP", 0, 100))).toBe(true);
@@ -11088,6 +11105,7 @@ describe("session protocol routes", () => {
         expect(replay.status).toBe(200);
         expect(await replay.text()).toBe(raw);
         expect(screens).toHaveLength(count);
+        expect(await publishedJobs()).toEqual(expectedJobs);
         expect(await footprint(f)).toEqual(after);
         const changed = await f.post(
           f.path + "/close",
@@ -13496,7 +13514,16 @@ describe("session protocol routes", () => {
     const pack = PackResponseSchema.parse(await response.json());
     const claim = pack.items.find((item) => item.kind === "claim" && item.id === "C-1");
     expect(claim?.body).toContain("Two is even.");
-    expect(claim?.body).not.toContain("DRIFTED-CLAIM-PROJECTION");
+    expect(claim?.body).toContain("scientific standing unavailable");
+    expect(claim?.body).not.toContain("review:");
+    expect(JSON.stringify(pack)).not.toContain("DRIFTED-CLAIM-PROJECTION");
+    expect(pack.omitted).toContainEqual({
+      reason: "content_unavailable",
+      detail: "claim-scientific-standing",
+    });
+    expect(pack.omitted.some(({ reason }) => reason === "moves_unavailable")).toBe(true);
+    expect(pack.items.some(({ kind }) => kind === "move")).toBe(false);
+    expect(pack.items.some(({ id }) => id === "SYS-claims-empty")).toBe(false);
   });
 
   test.each(["missing", "corrupt"] as const)(

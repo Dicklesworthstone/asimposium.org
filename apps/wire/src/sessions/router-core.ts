@@ -4304,6 +4304,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     let hasLeaseContext = false;
     let claimContentUnavailable = false;
     let claimHistoryBudgetExceeded = false;
+    let claimStandingUnavailable = false;
     let workshopHeadsTruncated = false;
     let directiveContext: Awaited<ReturnType<typeof readActiveSponsorDirectives>>;
     try {
@@ -4617,8 +4618,12 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             PACK_CLAIM_CANDIDATE_LIMIT,
           );
         } catch (error) {
-          if (!(error instanceof ScientificReadBudgetExceededError)) throw error;
-          claimHistoryBudgetExceeded = true;
+          if (error instanceof ScientificReadBudgetExceededError) claimHistoryBudgetExceeded = true;
+          else if (profile === "working" && error instanceof ScientificInputError) {
+            // The batch cannot attest standing. The public statements were
+            // authenticated separately by readPackClaimHeads at this cursor.
+            claimStandingUnavailable = true;
+          } else throw error;
         }
         // A bounded coordination prefix must not erase a selected claim's
         // lease tag. Return at most one current holder per selected claim,
@@ -4654,21 +4659,24 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             continue;
           }
           const fold = dispositions.get(claim.id);
-          if (!fold) throw new Error("Public claim has no scientific ledger timeline");
+          if (!fold && !claimStandingUnavailable)
+            throw new Error("Public claim has no scientific ledger timeline");
           const leaseInfo = leaseMap.get(claim.id);
           const leaseTag = leaseInfo
             ? ` · leased by ${leaseInfo.fellow_id}${leaseInfo.parallel_safe ? " (parallel-safe)" : ""}${leaseInfo.status === "challenged" ? " · challenged" : ""}`
             : "";
           // Fable §6.6: the review-state facet displays beside the disposition,
           // computed from public reviews of the head version (as on claim faces).
-          const reviewState = reviewStateFromRecordedReviews(
-            fold.reviewFacets.filter((review) => review.targetVersion === fold.currentVersion),
-          );
-          const disposition =
-            displayClaimDisposition(fold.disposition, fold.context) +
-            (fold.stale ? " · stale" : "") +
-            ` · review: ${reviewState}` +
-            leaseTag;
+          let disposition = "scientific standing unavailable";
+          if (fold) {
+            const reviewState = reviewStateFromRecordedReviews(
+              fold.reviewFacets.filter((review) => review.targetVersion === fold.currentVersion),
+            );
+            disposition =
+              displayClaimDisposition(fold.disposition, fold.context) +
+              (fold.stale ? " · stale" : "") +
+              ` · review: ${reviewState}`;
+          }
           candidates.push({
             kind: "claim",
             id: claim.id,
@@ -4679,12 +4687,13 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             tokens: 1,
             untrusted: true,
             body:
-              `${claim.id} (seq ${claim.source_seq}, ${disposition}): ${claim.statement}` +
-              (fold.legacyReviews > 0
+              `${claim.id} (seq ${claim.source_seq}, ${disposition}${leaseTag}): ${claim.statement}` +
+              (fold && fold.legacyReviews > 0
                 ? `\n${fold.legacyReviews} review(s) use legacy-unverified provenance; historical declared tiers are displayed on their records but cannot earn cross-family credit.`
                 : ""),
-            why_included:
-              "include a live public claim in ledger sequence order, with its computed disposition and review state",
+            why_included: fold
+              ? "include a live public claim in ledger sequence order, with its computed disposition and review state"
+              : "include the verified public claim statement at the pack cursor",
             stable_prefix: 100 + index,
           });
         }
@@ -5040,7 +5049,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     )
       actionPermissions.push("protocol-conflict:write");
     const workingMoves =
-      profile === "working"
+      profile === "working" && !claimStandingUnavailable
         ? await readWorkingMovesPack({
             db,
             problemId: session.problem_id,
@@ -5083,7 +5092,19 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               review: reviewAllowed,
             },
           })
-        : { candidates: [], omitted: [], primaryMove: null, degraded: false };
+        : {
+            candidates: [],
+            omitted: claimStandingUnavailable
+              ? [
+                  {
+                    reason: "moves_unavailable",
+                    detail: "working-moves: claim standing could not be verified at the pack cursor.",
+                  },
+                ]
+              : [],
+            primaryMove: null,
+            degraded: claimStandingUnavailable,
+          };
     candidates.push(...workingMoves.candidates);
     if (
       reviewTemplate?.availability === "available" ||
@@ -5319,6 +5340,9 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         ...targetSection.omitted,
         ...deadEndSection.omitted,
         ...(claimContentUnavailable ? [{ reason: "content_unavailable", detail: "claims" }] : []),
+        ...(claimStandingUnavailable
+          ? [{ reason: "content_unavailable", detail: "claim-scientific-standing" }]
+          : []),
         ...(claimHistoryBudgetExceeded
           ? [
               {
