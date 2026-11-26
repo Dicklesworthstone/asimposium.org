@@ -4197,6 +4197,267 @@ body > a.sr-only.focus\:not-sr-only:focus {
   border-left: 3px solid var(--color-bronze);
 }
 
+/* ── Scientific needs (/moves) ──────────────────────────── */
+/*
+ * The page injects the shared serializer's HTML, which carries no classes,
+ * so these rules follow its fixed shape: an article with the title, the
+ * participation note, the discovery boundary and a count; one section per
+ * problem; and inside it one section per recommended move.
+ */
+.landing .moves-face {
+  counter-reset: moves-problem;
+}
+.landing .moves-face > article > h1 {
+  margin-top: 0.4rem;
+}
+.landing .moves-face > article > p:nth-of-type(1) {
+  font-size: 1.08rem;
+  color: var(--color-ink2);
+}
+.landing .moves-face > article > p:nth-of-type(3) {
+  font-size: 0.9rem;
+  color: var(--color-muted);
+}
+/* Selection boundaries are method notes. Set small beside a rule, so the
+   needs themselves lead and the notes stay one glance away. */
+.landing .moves-face > article > p:nth-of-type(2),
+.landing .moves-face section[data-problem] > p:last-child,
+.landing .moves-face section[data-problem] > section > details ~ p {
+  font-size: 0.84rem;
+  line-height: 1.55;
+  color: var(--color-muted);
+  padding-left: 0.85rem;
+  border-left: 2px solid var(--color-line);
+}
+.landing .moves-face section[data-problem] {
+  counter-increment: moves-problem;
+  margin: 1.8rem 0 0;
+  padding: 1.2rem 1.35rem 1.15rem;
+  border: 1px solid var(--color-line);
+  border-top: 3px solid var(--color-clay);
+  border-radius: var(--radius-lg);
+  background: var(--color-card);
+  box-shadow: var(--shadow-1);
+}
+.landing .moves-face section[data-problem] > h2 {
+  margin: 0 0 0.55rem;
+  padding: 0 0 0.65rem;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+/* Each problem is lettered like a page section; the serializer's heading
+   has no room for a coin element, so the counter strikes one. */
+.landing .moves-face section[data-problem] > h2::before {
+  content: counter(moves-problem, lower-greek);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.85em;
+  height: 1.85em;
+  margin-right: 0.65em;
+  border: 1px solid color-mix(in srgb, var(--color-clay) 50%, transparent);
+  border-radius: 50%;
+  background: var(--wash-card);
+  box-shadow: inset 0 0 0 2px var(--color-card);
+  font-family: var(--font-serif);
+  font-style: italic;
+  font-weight: 500;
+  font-size: 1.15em;
+  line-height: 1;
+  color: var(--color-clay);
+  letter-spacing: 0;
+  vertical-align: -0.1em;
+}
+/* The participation note repeats word for word under every problem; the
+   article states it once above, so the copies are not set again. */
+.landing .moves-face section[data-problem] > h2 + p {
+  display: none;
+}
+.landing .moves-face section[data-problem] > h2 + p + p,
+.landing .moves-face section[data-problem] > section ~ p:not(:last-child) {
+  font-size: 0.88rem;
+  color: var(--color-muted);
+}
+.landing .moves-face section[data-problem] > section {
+  margin: 0.85rem 0 0;
+  padding: 0.85rem 1rem 0.8rem;
+  border: 1px solid var(--color-line);
+  border-left: 3px solid var(--color-rule);
+  border-radius: var(--radius);
+  background: var(--color-paper);
+}
+/* The primary move is the recommendation; alternatives sit quieter. */
+.landing .moves-face section[data-problem] > section:first-of-type {
+  border-left-color: var(--color-clay);
+  background: var(--wash-card);
+}
+.landing .moves-face section[data-problem] > section > h3 {
+  margin: 0 0 0.4rem;
+  font-family: var(--font-display);
+  font-size: 0.8rem;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--color-muted);
+}
+.landing .moves-face section[data-problem] > section:first-of-type > h3 {
+  color: var(--color-clay);
+}
+.landing .moves-face section[data-problem] > section > p {
+  margin: 0.35rem 0;
+}
+.landing .moves-face section[data-problem] > section > p:nth-of-type(2) {
+  font-size: 0.86rem;
+  color: var(--color-muted);
+  overflow-wrap: anywhere;
+}
+.landing .moves-face section[data-problem] > section > p:has(> a:only-child) {
+  font-weight: 600;
+}
+.landing .moves-face details {
+  margin: 0.55rem 0;
+}
+.landing .moves-face details > summary {
+  cursor: pointer;
+  font-size: 0.92rem;
+  color: var(--color-ink2);
+}
+.landing .moves-face details > pre {
+  max-height: 20rem;
+  margin: 0.5rem 0 0;
+  overflow: auto;
+  font-size: 0.78rem;
+  line-height: 1.5;
+}
+/* The template catalog closes the page as one quiet sheet. */
+.landing .moves-face > article > details {
+  margin: 1.8rem 0 0;
+  padding: 0.75rem 1rem;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-lg);
+  background: var(--color-card);
+}
+.landing .moves-face > article > details > :is(p, ul) {
+  font-size: 0.92rem;
+}
+
+/* ── Review queue cards (/reviews, /explore) ───────────── */
+.landing .queue-card-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.3rem 1rem;
+  margin: 0 0 0.75rem;
+  padding: 0 0 0.65rem;
+  border-bottom: 1px solid var(--color-line);
+}
+.landing .queue-card-head > h3 {
+  margin: 0;
+  font-size: 0.95rem;
+  overflow-wrap: anywhere;
+}
+.landing .queue-card-head > h3 code {
+  padding: 0;
+  background: none;
+  font-size: 0.9rem;
+  color: var(--color-ink2);
+}
+.landing .queue-card-head > h3 a {
+  text-decoration-color: transparent;
+}
+.landing .queue-card-head > h3 a:hover {
+  text-decoration-color: currentColor;
+}
+.landing .queue-card-standing {
+  margin: 0;
+  font-size: 0.9rem;
+  color: var(--color-muted);
+}
+.landing .queue-card-standing strong {
+  color: var(--color-ink);
+}
+/* The missing check is why the card is on the page. */
+.landing .queue-card-need {
+  margin: 0 0 0.9rem;
+  padding: 0.6rem 0.85rem;
+  border-left: 3px solid var(--color-clay);
+  border-radius: 0 var(--radius) var(--radius) 0;
+  background: var(--wash-card);
+  line-height: 1.5;
+}
+.landing .queue-card h4 {
+  margin: 1.1rem 0 0.3rem;
+  font-family: var(--font-display);
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--color-muted);
+}
+.landing .queue-card-facts {
+  margin: 1.1rem 0 0;
+  padding: 0.7rem 0 0;
+  border-top: 1px dashed var(--color-line);
+  font-size: 0.84rem;
+  line-height: 1.5;
+  color: var(--color-muted);
+  overflow-wrap: anywhere;
+}
+.landing .queue-card-facts > p {
+  margin: 0.2rem 0;
+}
+.landing .queue-card .record-actions {
+  margin: 1rem 0 0;
+  box-shadow: none;
+}
+
+/* ── Filter forms (a field and its button in one row) ──── */
+.landing .filter-form {
+  margin: 1.2rem 0;
+  padding: 0.9rem 1.1rem 1rem;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-lg);
+  background: var(--color-card);
+  box-shadow: var(--shadow-1);
+}
+.landing .filter-form > label {
+  display: block;
+  margin: 0 0 0.45rem;
+  font-size: 0.92rem;
+  color: var(--color-ink2);
+}
+.landing .filter-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: stretch;
+  gap: 0.5rem;
+  margin: 0;
+}
+.landing .filter-row > input {
+  flex: 1 1 14rem;
+  min-width: 0;
+}
+.landing .filter-row > button {
+  margin: 0;
+}
+
+/* ── Scientific areas (/areas): short cards read as a grid ─ */
+@media (min-width: 40rem) {
+  .landing.areas-index-page .problems-list {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(min(19rem, 100%), 1fr));
+    gap: 1rem;
+  }
+  .landing.areas-index-page .problems-list > .problem-card {
+    display: flex;
+    flex-direction: column;
+  }
+  .landing.areas-index-page .problems-list > .problem-card > .area-meta-row {
+    margin-top: auto;
+  }
+}
+
 @media print {
   .meander,
   .frieze,

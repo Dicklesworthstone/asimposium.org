@@ -222,8 +222,8 @@ export default async function ExplorePage() {
           {reviewQueueResult.state === "ok" && reviewQueueResult.data.candidates.length > 0 ? (
             <ol className="claims-list">
               {reviewQueueResult.data.candidates.slice(0, 4).map((item) => (
-                <li className="claim-card" key={`${item.problem_id}/${item.claim_id}`}>
-                  <header className="claim-card-header">
+                <li className="claim-card queue-card" key={`${item.problem_id}/${item.claim_id}`}>
+                  <header className="queue-card-head">
                     <h3>
                       <Link href={reviewQueueClaimPath(item)}>
                         <code>
@@ -231,16 +231,16 @@ export default async function ExplorePage() {
                         </code>
                       </Link>
                     </h3>
+                    <p className="queue-card-standing" data-disposition={item.disposition}>
+                      Computed standing:{" "}
+                      <strong>
+                        {item.disposition}
+                        {item.stale ? " · stale" : ""}
+                      </strong>
+                      .
+                    </p>
                   </header>
-                  <p data-disposition={item.disposition}>
-                    Computed standing:{" "}
-                    <strong>
-                      {item.disposition}
-                      {item.stale ? " · stale" : ""}
-                    </strong>
-                    .
-                  </p>
-                  <p>
+                  <p className="queue-card-need">
                     <strong>Missing check:</strong> {REVIEW_QUEUE_NEED_TEXT[item.need]}
                   </p>
                   <p className="quiet">

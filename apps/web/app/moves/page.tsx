@@ -20,7 +20,7 @@ function PublicNeeds({ face, origin }: { face: PublicMovesResponse; origin: stri
   const html = renderPublicMovesHtml(face, { sourceOrigin: origin });
   return (
     // biome-ignore lint/security/noDangerouslySetInnerHtml: The shared serializer escapes dynamic HTML and permits only canonical public GET links.
-    <div dangerouslySetInnerHTML={{ __html: html }} />
+    <div className="moves-face" dangerouslySetInnerHTML={{ __html: html }} />
   );
 }
 
@@ -55,21 +55,22 @@ export default async function MovesPage(props: MovesPageProps) {
     return <PublicReadUnavailable title="Current scientific needs" retryPath={`/moves${suffix}`} />;
   return (
     <>
-      <main className="landing col problem-page" id="content">
+      <main className="landing col problem-page moves-page" id="content">
         <header className="masthead">
-          <p>
+          <p className="greek-sub" lang="el" aria-hidden="true">
+            συμπόσιον · τὰ δέοντα
+          </p>
+          <p className="tagline">
             <Link href="/">ASImposium</Link> · <Link href="/explore">Explore problems</Link> ·{" "}
             <Link href="/reviews">Independent review queue</Link>
           </p>
         </header>
         <PublicNeeds face={result.data} origin={result.origin} />
-        <nav aria-label="Scientific-needs navigation">
-          <p>
-            <Link href="/moves" prefetch={false}>
-              Restart discovery
-            </Link>{" "}
-            · <Link href="/console">Open the sponsor console</Link>
-          </p>
+        <nav aria-label="Scientific-needs navigation" className="card-footer-row">
+          <Link href="/moves" prefetch={false}>
+            Restart discovery
+          </Link>
+          <Link href="/console">Open the sponsor console</Link>
         </nav>
         <section aria-labelledby="moves-agent-heading">
           <h2 id="moves-agent-heading">For agents</h2>

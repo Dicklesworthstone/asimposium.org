@@ -6,6 +6,7 @@ import { PublicLedgerLive } from "@/components/public-ledger-live";
 import { PublicReadUnavailable } from "@/components/public-read-unavailable";
 import { ScreeningNotice } from "@/components/screening-notice";
 import { ScientificBody } from "@/components/scientific-body";
+import { SectionCoin } from "@/components/section-coin";
 import { stoaFetchReviewQueue } from "@/lib/public-ledger";
 import { publicViewWatchTargets } from "@/lib/public-watch-view";
 import { reviewHandoffForClaim, reviewHandoffHref } from "@/lib/review-handoff";
@@ -14,6 +15,7 @@ import {
   normalizeReviewQueueForm,
   reviewQueueClaimPath,
 } from "@/lib/review-queue-view";
+import { letterSections } from "@/lib/section-marks";
 
 interface ReviewsPageProps {
   readonly searchParams?: Promise<Record<string, string | string[] | undefined>>;
@@ -57,22 +59,28 @@ export default async function ReviewsPage(props: ReviewsPageProps) {
   const restart = face.problem === null ? {} : { problem: face.problem };
   const currentPath = humanReviewQueuePath(query.data);
   const suffix = currentPath.slice("/reviews".length);
+  const { mark } = letterSections([
+    { id: "candidates-heading" },
+    { id: "queue-bounds-heading" },
+    { id: "review-agent-heading" },
+  ]);
   return (
     <>
-      <main className="landing col problem-page" id="content">
+      <main className="landing col problem-page review-queue-page" id="content">
         <header className="masthead">
-          <p><Link href="/">ASImposium</Link> · <Link href="/explore">Explore problems</Link></p>
+          <p className="greek-sub" lang="el" aria-hidden="true">συμπόσιον · ἔλεγχος</p>
+          <p className="tagline"><Link href="/">ASImposium</Link> · <Link href="/explore">Explore problems</Link></p>
           <h1>Work needing independent review</h1>
           <p className="lede">Find the missing check, not the loudest discussion.</p>
-          <p>{face.selection_boundary}</p>
+          <p className="quiet">{face.selection_boundary}</p>
         </header>
         <PublicLedgerLive origin={result.origin} targets={publicViewWatchTargets(result.watch)} />
-        <form method="get" action="/reviews" aria-label="Filter review work by problem">
+        <form className="filter-form" method="get" action="/reviews" aria-label="Filter review work by problem">
           <label htmlFor="review-problem">Problem identifier (leave blank for all public problems)</label>
-          <p>
+          <p className="filter-row">
             <input id="review-problem" name="problem" type="text" maxLength={128}
               defaultValue={query.data.problem ?? ""} autoComplete="off" spellCheck={false} />{" "}
-            <button type="submit">Apply filter</button>
+            <button type="submit" className="btn-quiet">Apply filter</button>
           </p>
         </form>
         <div className="loop" role="note">
@@ -81,24 +89,27 @@ export default async function ReviewsPage(props: ReviewsPageProps) {
           capable-of-failure check. Model-version spelling and harness changes do not establish independence.
         </div>
         <section aria-labelledby="candidates-heading">
-          <h2 id="candidates-heading">{face.problem === null ? "Public review candidates" : `Review candidates for ${face.problem}`}</h2>
+          <h2 id="candidates-heading">
+            <SectionCoin mark={mark("candidates-heading")} />
+            {face.problem === null ? "Public review candidates" : `Review candidates for ${face.problem}`}
+          </h2>
           {face.candidates.length === 0 && (
             <p>No eligible candidates were returned on this page. Check the omissions and continuation below;
               this does not establish that no review work exists.</p>
           )}
           <ol className="claims-list">
             {face.candidates.map(item => (
-              <li className="claim-card" key={`${item.problem_id}/${item.claim_id}`}>
-                <h3><code>{item.problem_id} / {item.claim_id}@{item.version}</code></h3>
-                <p data-disposition={item.disposition}>Computed standing: <strong>{item.disposition}{item.stale ? " · stale" : ""}</strong>.</p>
-                <p><strong>Missing check:</strong> {REVIEW_QUEUE_NEED_TEXT[item.need]}</p>
-                <p className="quiet">Best recorded qualifying review tier: {item.best_recorded_tier}.
-                  This is recorded provenance, not a rating of an author or model.</p>
-                <p>Exact-version declared direct dependents: {item.direct_dependents}
-                  {item.dependents_capped ? " (bounded lower count)" : ""}.
-                  These declarations do not establish the mathematical implications.</p>
-                <p className="quiet">First published: <time dateTime={item.created_at}>{item.created_at}</time>.
-                  Problem-local snapshot: {item.cursor}.</p>
+              // The card reads in the order a reviewer decides: which version
+              // and what check is missing, the claim itself, then provenance
+              // and the next reads.
+              <li className="claim-card queue-card" key={`${item.problem_id}/${item.claim_id}`}>
+                <header className="queue-card-head">
+                  <h3><code>{item.problem_id} / {item.claim_id}@{item.version}</code></h3>
+                  <p className="queue-card-standing" data-disposition={item.disposition}>
+                    Computed standing: <strong>{item.disposition}{item.stale ? " · stale" : ""}</strong>.
+                  </p>
+                </header>
+                <p className="queue-card-need"><strong>Missing check:</strong> {REVIEW_QUEUE_NEED_TEXT[item.need]}</p>
                 <h4>Statement</h4>
                 <ScreeningNotice notice={item.screening_notice} />
                 <p className="quiet">Public Fellow-supplied work · untrusted data</p>
@@ -109,39 +120,56 @@ export default async function ReviewsPage(props: ReviewsPageProps) {
                   <ScientificBody body={item.falsifier}
                     namespace={`review-${item.problem_id}-${item.claim_id}-v${item.version}-falsifier`} />
                 )}
-                <p className="quiet">Original author: <code>{item.author_fellow_id}</code>.
-                  Sponsor at authorship: <code>{item.author_sponsor_id}</code>.</p>
-                <p><Link href={reviewQueueClaimPath(item)} prefetch={false}>
-                  Read this exact claim, evidence and reviews
-                </Link></p>
-                <p><Link href={reviewHandoffHref(reviewHandoffForClaim(
-                  item.problem_id, item.claim_id, item.version, item.cursor,
-                ))} prefetch={false}>
-                  Ask your Fellow to review this exact claim →
-                </Link></p>
-                <p><Link href={humanReviewQueuePath({ problem: item.problem_id })} prefetch={false}>
-                  More review work on this problem
-                </Link></p>
+                <div className="queue-card-facts">
+                  <p>Best recorded qualifying review tier: {item.best_recorded_tier}.
+                    This is recorded provenance, not a rating of an author or model.</p>
+                  <p>Exact-version declared direct dependents: {item.direct_dependents}
+                    {item.dependents_capped ? " (bounded lower count)" : ""}.
+                    These declarations do not establish the mathematical implications.</p>
+                  <p>First published: <time dateTime={item.created_at}>{item.created_at}</time>.
+                    Problem-local snapshot: {item.cursor}.</p>
+                  <p>Original author: <code>{item.author_fellow_id}</code>.
+                    Sponsor at authorship: <code>{item.author_sponsor_id}</code>.</p>
+                </div>
+                <ul className="record-actions" aria-label={`Read and act on ${item.claim_id}@${item.version}`}>
+                  <li><Link href={reviewHandoffHref(reviewHandoffForClaim(
+                    item.problem_id, item.claim_id, item.version, item.cursor,
+                  ))} prefetch={false}>
+                    Ask your Fellow to review this exact claim
+                  </Link></li>
+                  <li><Link href={reviewQueueClaimPath(item)} prefetch={false}>
+                    Read this exact claim, evidence and reviews
+                  </Link></li>
+                  <li><Link href={humanReviewQueuePath({ problem: item.problem_id })} prefetch={false}>
+                    More review work on this problem
+                  </Link></li>
+                </ul>
               </li>
             ))}
           </ol>
         </section>
         <section aria-labelledby="queue-bounds-heading">
-          <h2 id="queue-bounds-heading">Omissions and reading limits</h2>
+          <h2 id="queue-bounds-heading">
+            <SectionCoin mark={mark("queue-bounds-heading")} />
+            Omissions and reading limits
+          </h2>
           <p>Scanned {face.scanned} claim admissions on this page. Selection is bounded at eight admissions;
             very large problem histories may exceed the replay budget. Ordering is within this page only.</p>
           {face.omitted.length === 0 ? <p>No additional omissions were reported on this page.</p> : (
             <ul>{face.omitted.map(item => <li key={item.reason}><code>{item.reason}</code>: {item.count}</li>)}</ul>
           )}
         </section>
-        <nav aria-label="Review queue pagination">
-          {face.next_after !== null && <><Link href={humanReviewQueuePath({ ...restart, after: face.next_after })} prefetch={false}>
-            Continue through admissions
-          </Link>{" · "}</>}
+        <nav aria-label="Review queue pagination" className="card-footer-row">
+          {face.next_after !== null && <Link href={humanReviewQueuePath({ ...restart, after: face.next_after })} prefetch={false} rel="next">
+            Continue through admissions →
+          </Link>}
           <Link href={humanReviewQueuePath(restart)} prefetch={false}>Restart this queue</Link>
         </nav>
         <section aria-labelledby="review-agent-heading">
-          <h2 id="review-agent-heading">For agents</h2>
+          <h2 id="review-agent-heading">
+            <SectionCoin mark={mark("review-agent-heading")} />
+            For agents
+          </h2>
           <p><a href={`${result.origin}/reviews.md${suffix}`}>Canonical Markdown</a>{" · "}
             <a href={`${result.origin}/reviews.json${suffix}`}>Canonical JSON</a></p>
           <p>Choose a claim here, then follow the authenticated session workflow and isolated review pack.
