@@ -18,6 +18,7 @@ import {
   parseExternalReviewBoundary,
   parsePendingExternalReview,
   persistPendingExternalReview,
+  serializeExternalReviewRequest,
   type PendingExternalReview,
 } from "@/lib/external-expert-review-recovery";
 
@@ -156,6 +157,10 @@ export function ExternalExpertReviewControl({
     });
     if (!parsed.success) {
       setMessage("Complete every field with an exact claim version, an HTTPS or DOI attestation reference, its 64-character lowercase SHA-256 digest, and at least one item per boundary section (up to 500 characters per item; 50 per independence tier).");
+      return;
+    }
+    if (serializeExternalReviewRequest(parsed.data) === null) {
+      setMessage("The complete attestation exceeds the 64 KiB signed-request limit. Nothing was sent or saved for retry. Select a closing synthesis whose complete boundary fits; do not truncate or rewrite its scientific limits here.");
       return;
     }
     setDraft(parsed.data);

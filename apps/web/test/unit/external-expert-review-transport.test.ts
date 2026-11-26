@@ -112,3 +112,32 @@ test("lost-response recovery accepts the matching record's current revocation wi
   expect(await stoaRecordExternalExpertReview(externalReviewOperator, externalReviewProblem, externalReviewInput, "old-record-key"))
     .toEqual({ ok: true, data: revoked });
 });
+
+test("oversized multibyte attestations are refused before signing or network dispatch", async () => {
+  const fetcher = mock(async () => Response.json(externalReviewRecord));
+  globalThis.fetch = fetcher as unknown as typeof fetch;
+  const input = { ...externalReviewInput, no_claim_boundary: {
+    ...externalReviewInput.no_claim_boundary, verified: Array.from({ length: 140 }, () => "é".repeat(250)),
+  } };
+  expect(JSON.stringify(input).length).toBeLessThan(65_536);
+  expect(new TextEncoder().encode(JSON.stringify(input)).byteLength).toBeGreaterThan(65_536);
+  expect(await stoaRecordExternalExpertReview(externalReviewOperator, externalReviewProblem, input, "oversize"))
+    .toEqual({ ok: false, reason: "refused", status: 413, problemCode: "REQUEST_BODY_TOO_LARGE" });
+  expect(fetcher).not.toHaveBeenCalled();
+});
+
+test("bounded operator history admits fifty individually valid near-limit UTF-8 records", async () => {
+  const input = { ...externalReviewInput, no_claim_boundary: {
+    ...externalReviewInput.no_claim_boundary, verified: Array.from({ length: 124 }, () => "é".repeat(250)),
+  } };
+  expect(new TextEncoder().encode(JSON.stringify(input)).byteLength).toBeLessThanOrEqual(65_536);
+  const records = Array.from({ length: 50 }, (_, index) => ({
+    ...externalReviewRecord, no_claim_boundary: input.no_claim_boundary,
+    review_record_id: "EER-" + String(index + 1).padStart(26, "0"),
+  }));
+  const body = JSON.stringify({ problem_id: externalReviewProblem, reviews: records });
+  expect(new TextEncoder().encode(body).byteLength).toBeGreaterThan(1_048_576);
+  globalThis.fetch = mock(async () => new Response(body, { headers: { "content-type": "application/json" } })) as unknown as typeof fetch;
+  expect(await stoaExternalExpertReviews(externalReviewOperator, externalReviewProblem))
+    .toEqual({ ok: true, data: records });
+});

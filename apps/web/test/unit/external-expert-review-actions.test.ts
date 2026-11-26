@@ -104,3 +104,13 @@ test("only the backend's typed missing-target 404s settle an unrecorded attestat
       .toMatchObject({ ok: false, retainAttempt: true });
   }
 });
+
+test("oversized UTF-8 requests never dispatch and old pending identity remains intact", async () => {
+  const input = { ...externalReviewInput, no_claim_boundary: {
+    ...externalReviewInput.no_claim_boundary, verified: Array.from({ length: 140 }, () => "é".repeat(250)),
+  } };
+  const result = await actions.recordExternalReviewAction(externalReviewOperator, externalReviewProblem, input, "original-oversize-key", true);
+  expect(result).toMatchObject({ ok: false, retainAttempt: true });
+  if (!result.ok) expect(result.message).toContain("64 KiB");
+  expect(writes).toHaveLength(0);
+});

@@ -8,6 +8,7 @@ import {
 } from "@asimposium/contracts";
 import { requireOperatorSession } from "@/lib/admin";
 import { stoaRecordExternalExpertReview } from "@/lib/external-expert-reviews";
+import { serializeExternalReviewRequest } from "@/lib/external-expert-review-recovery";
 
 export type RecordExternalReviewActionResult =
   | { readonly ok: true; readonly record: ExternalExpertReviewRecord }
@@ -35,6 +36,9 @@ export async function recordExternalReviewAction(
         idempotencyKey.trim() !== idempotencyKey || confirmed !== true)
       return { ok: false, retainAttempt: true,
         message: "Review an exact claim version, reviewer attribution, permanent attestation reference and digest, verdict, date, and complete no-claim boundary. Confirm that you checked the attestation before recording it." };
+    if (serializeExternalReviewRequest(parsed.data) === null)
+      return { ok: false, retainAttempt: true,
+        message: "This retained attestation exceeds the 64 KiB signed-request limit and was not resent. Its original command and key remain intact. Inspect recorded reviews before changing the target or scientific boundary." };
     const result = await stoaRecordExternalExpertReview(session.operatorId, problemId, parsed.data, idempotencyKey);
     if (result.ok) return { ok: true, record: result.data };
     if (result.reason === "refused" && result.problemCode !== undefined && [400, 422].includes(result.status ?? 0))

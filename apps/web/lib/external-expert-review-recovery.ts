@@ -7,6 +7,8 @@ import {
 } from "@asimposium/contracts";
 import { isCanonicalSponsorId } from "./sponsor-id";
 
+/** The complete signed UTF-8 JSON body must fit the Worker service-envelope limit. */
+export const MAX_EXTERNAL_REVIEW_REQUEST_BYTES = 64 * 1024;
 const VERSION = "asimposium.external-review-recovery.v1";
 export interface PendingExternalReview {
   readonly version: typeof VERSION;
@@ -40,8 +42,18 @@ export function parsePendingExternalReview(raw: string, operatorId: string, prob
   return { version: VERSION, operatorId, problemId, input: input.data, key: row.key, startedAt: row.startedAt };
 }
 
+/** Serialize through the same schema and byte encoding as the signed transport. */
+export function serializeExternalReviewRequest(input: unknown): string | null {
+  const parsed = ExternalExpertReviewCreateRequestSchema.safeParse(input);
+  if (!parsed.success) return null;
+  const body = JSON.stringify(parsed.data);
+  return new TextEncoder().encode(body).byteLength <= MAX_EXTERNAL_REVIEW_REQUEST_BYTES ? body : null;
+}
+
 export function createPendingExternalReview(operatorId: string, problemId: string,
   input: ExternalExpertReviewCreateRequest, key: string, startedAt = Date.now()): PendingExternalReview {
+  if (serializeExternalReviewRequest(input) === null)
+    throw new Error("External review request exceeds the 64 KiB ingress limit or is invalid");
   return parsePendingExternalReview(JSON.stringify({ version: VERSION, operatorId, problemId, input, key, startedAt }), operatorId, problemId);
 }
 
@@ -59,6 +71,10 @@ export function persistPendingExternalReview(storage: Pick<Storage, "getItem" | 
   const checked = parsePendingExternalReview(JSON.stringify(attempt), attempt.operatorId, attempt.problemId);
   const serialized = JSON.stringify(checked);
   const existing = storage.getItem(key);
+  // Older pending requests remain readable and recoverable with their original key.
+  // Refuse an oversized NEW attempt before any bytes are written to browser storage.
+  if (existing === null && serializeExternalReviewRequest(checked.input) === null)
+    throw new Error("External review request exceeds the 64 KiB ingress limit");
   if (existing !== null && JSON.stringify(parsePendingExternalReview(existing, attempt.operatorId, attempt.problemId)) !== serialized)
     throw new Error("Another external review is still pending");
   storage.setItem(key, serialized);

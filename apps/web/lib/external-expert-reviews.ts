@@ -7,7 +7,11 @@ import {
   type ExternalExpertReviewCreateRequest,
   type ExternalExpertReviewRecord,
 } from "@asimposium/contracts";
+import { serializeExternalReviewRequest } from "./external-expert-review-recovery";
 import { callStoa, type StoaCall } from "./stoa";
+
+/** Fifty ingress-bounded attestations plus their immutable record metadata. */
+export const MAX_EXTERNAL_REVIEW_LIST_RESPONSE_BYTES = 4 * 1024 * 1024;
 
 function validProblem(problemId: string): boolean {
   return typeof problemId === "string" && problemId.trim() === problemId &&
@@ -23,7 +27,7 @@ export function stoaExternalExpertReviews(
   const path = "/v1/operators/problems/" + encodeURIComponent(problemId) + "/external-expert-reviews";
   return callStoa({
     method: "GET", route: path, path, action: "operator.external-expert-reviews.list",
-    principalId: operatorId, principalType: "operator", body: "", responseMaxBytes: 1_048_576,
+    principalId: operatorId, principalType: "operator", body: "", responseMaxBytes: MAX_EXTERNAL_REVIEW_LIST_RESPONSE_BYTES,
     parse: (value) => {
       if (!value || typeof value !== "object" || Array.isArray(value) ||
           Object.keys(value).sort().join(",") !== "problem_id,reviews")
@@ -51,10 +55,13 @@ export function stoaRecordExternalExpertReview(
   if (!validProblem(problemId) || !parsed.success || typeof idempotencyKey !== "string" ||
       !/^[A-Za-z0-9._-]{1,160}$/.test(idempotencyKey) || idempotencyKey.trim() !== idempotencyKey)
     return Promise.resolve({ ok: false, reason: "refused", status: 400 });
+  const body = serializeExternalReviewRequest(parsed.data);
+  if (body === null)
+    return Promise.resolve({ ok: false, reason: "refused", status: 413, problemCode: "REQUEST_BODY_TOO_LARGE" });
   const path = "/v1/operators/problems/" + encodeURIComponent(problemId) + "/external-expert-reviews";
   return callStoa({
     method: "POST", route: path, path, action: "operator.external-expert-reviews.create",
-    principalId: operatorId, principalType: "operator", body: JSON.stringify(parsed.data),
+    principalId: operatorId, principalType: "operator", body,
     idempotencyKey, responseMaxBytes: 262_144,
     parse: (value) => {
       const record = ExternalExpertReviewRecordSchema.parse(value);

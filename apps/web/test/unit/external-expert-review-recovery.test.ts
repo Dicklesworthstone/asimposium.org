@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import {
   clearPendingExternalReview, createPendingExternalReview, externalReviewRecoveryKey,
   parseExternalReviewBoundary, parsePendingExternalReview, persistPendingExternalReview,
+  MAX_EXTERNAL_REVIEW_REQUEST_BYTES, serializeExternalReviewRequest,
 } from "../../lib/external-expert-review-recovery";
 import { externalReviewInput, externalReviewOperator, externalReviewProblem } from "../fixtures/external-expert-review";
 
@@ -80,4 +81,45 @@ test("exact boundary JSON preserves multiline strings, whitespace and array orde
     JSON.stringify({ verified: ["incomplete"] }),
     " ".repeat(128_001),
   ]) expect(parseExternalReviewBoundary(invalid)).toBeNull();
+});
+
+test("the exact UTF-8 request limit admits its last byte and refuses multibyte overflow before new persistence", () => {
+  const request = structuredClone(externalReviewInput);
+  const bytes = () => new TextEncoder().encode(JSON.stringify(request)).byteLength;
+  while (bytes() + 503 <= MAX_EXTERNAL_REVIEW_REQUEST_BYTES)
+    request.no_claim_boundary.verified.push("é".repeat(250));
+  const remaining = MAX_EXTERNAL_REVIEW_REQUEST_BYTES - bytes();
+  expect(remaining).toBeGreaterThanOrEqual(3);
+  request.no_claim_boundary.verified.push("x".repeat(remaining - 3));
+  expect(bytes()).toBe(MAX_EXTERNAL_REVIEW_REQUEST_BYTES);
+  expect(serializeExternalReviewRequest(request)).toBe(JSON.stringify(request));
+  const valid = createPendingExternalReview(externalReviewOperator, externalReviewProblem, request, "last-byte-key");
+  const saved = storage();
+  persistPendingExternalReview(saved, valid);
+  expect(parsePendingExternalReview(JSON.stringify(valid), externalReviewOperator, externalReviewProblem).input).toEqual(request);
+
+  const oversized = structuredClone(request);
+  oversized.no_claim_boundary.verified[0] += "🧪";
+  expect(new TextEncoder().encode(JSON.stringify(oversized)).byteLength).toBe(MAX_EXTERNAL_REVIEW_REQUEST_BYTES + 4);
+  expect(JSON.stringify(oversized).length).toBeLessThan(MAX_EXTERNAL_REVIEW_REQUEST_BYTES);
+  expect(serializeExternalReviewRequest(oversized)).toBeNull();
+  expect(() => createPendingExternalReview(externalReviewOperator, externalReviewProblem, oversized, "too-large-key")).toThrow("64 KiB");
+  const attempted = { ...valid, key: "too-large-key", input: oversized };
+  const empty = storage();
+  expect(() => persistPendingExternalReview(empty, attempted)).toThrow("64 KiB");
+  expect(empty.getItem(externalReviewRecoveryKey(externalReviewOperator, externalReviewProblem))).toBeNull();
+});
+
+test("previously stored oversized requests remain parseable without discarding or replacing their original key", () => {
+  const oversized = { ...externalReviewInput,
+    no_claim_boundary: { ...externalReviewInput.no_claim_boundary, verified: Array.from({ length: 140 }, () => "é".repeat(250)) } };
+  const old = { ...pending(), input: oversized, startedAt: 0 };
+  const saved = storage();
+  const key = externalReviewRecoveryKey(externalReviewOperator, externalReviewProblem);
+  saved.setItem(key, JSON.stringify(old));
+  const recovered = parsePendingExternalReview(saved.getItem(key) ?? "", externalReviewOperator, externalReviewProblem);
+  expect(recovered).toEqual(old);
+  persistPendingExternalReview(saved, recovered);
+  expect(parsePendingExternalReview(saved.getItem(key) ?? "", externalReviewOperator, externalReviewProblem)).toEqual(old);
+  expect(serializeExternalReviewRequest(recovered.input)).toBeNull();
 });
