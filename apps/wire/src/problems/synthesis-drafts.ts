@@ -57,6 +57,10 @@ import {
 } from "../screening/publication-context.ts";
 import type { WorkersAIPromotionInput } from "../screening/workers-ai.ts";
 import {
+  archivedProblemWriteProblem,
+  isArchivedProblemWriteError,
+} from "../sessions/problem-archive-admission.ts";
+import {
   checkAndReserveQuota,
   promotionRateLimitedProblem,
   settleQuotaReservation,
@@ -301,9 +305,9 @@ export async function publishSynthesisDraftForSponsor(
   },
 ): Promise<PublishDraftResult | Response> {
   const problem = await db
-    .prepare("SELECT id, status FROM problems WHERE id = ?")
+    .prepare("SELECT id, status, admission_mode FROM problems WHERE id = ?")
     .bind(problemId)
-    .first<{ id: string; status: string }>();
+    .first<{ id: string; status: string; admission_mode: string }>();
   if (!problem) {
     return {
       ok: false,
@@ -367,6 +371,7 @@ export async function publishSynthesisDraftForSponsor(
 
   const replay = publishedDraftReceipt(draft);
   if (replay !== undefined) return replay;
+  if (problem.admission_mode === "archived-read-only") return archivedProblemWriteProblem();
 
   const latestReceipt = async (): Promise<PublishDraftResult | undefined> => {
     const latest = await db
@@ -503,16 +508,23 @@ export async function publishSynthesisDraftForSponsor(
       detail: "The authoring Fellow must have a current sponsor who can review held work.",
     };
   }
-  const admission = await checkAndReserveQuota(db, {
-    fellowId: draft.author_fellow_id,
-    problemId,
-    sponsorId,
-    sessionId: draft.session_id,
-    route: "synthesis-draft-publish",
-    idempotencyKey: `synth-draft-publish:${problemId}:${synthesisId}`,
-    requestDigest,
-    sponsorLimit: screening.sponsorLimit,
-  });
+  let admission: Awaited<ReturnType<typeof checkAndReserveQuota>>;
+  try {
+    admission = await checkAndReserveQuota(db, {
+      fellowId: draft.author_fellow_id,
+      problemId,
+      sponsorId,
+      sessionId: draft.session_id,
+      route: "synthesis-draft-publish",
+      idempotencyKey: `synth-draft-publish:${problemId}:${synthesisId}`,
+      requestDigest,
+      sponsorLimit: screening.sponsorLimit,
+    });
+  } catch (error) {
+    if (isArchivedProblemWriteError(error))
+      return (await latestReceipt()) ?? archivedProblemWriteProblem();
+    throw error;
+  }
   if (!admission.allowed) {
     const winner = await latestReceipt();
     if (winner !== undefined) return winner;
@@ -735,6 +747,7 @@ export async function publishSynthesisDraftForSponsor(
     await settleQuotaReservation(db, reservationId, "settled_failed");
     const winner = await latestReceipt();
     if (winner !== undefined) return winner;
+    if (isArchivedProblemWriteError(error)) return archivedProblemWriteProblem();
     if (isScreeningPostureChangedError(error))
       return screeningHoldResponse("provider-unavailable", undefined, "quarantine-first");
     if (isScreeningDecisionChangedError(error))

@@ -188,11 +188,18 @@ export async function publishSynthesisDraftAction(
       };
     }
     if (result.reason === "refused" && result.status === 403) {
-      return {
-        ok: false,
-        message:
-          "Only a problem steward or the authoring Fellow's current sponsor may publish this draft.",
-      };
+      if (result.problemCode === "WRITE_REFUSED" && result.detail === "The problem is read-only") {
+        return { ok: false, message: "This problem is read-only. Its synthesis drafts can no longer be published." };
+      }
+      return { ok: false, message: "Publication was refused. Check the problem’s current state and your authority to publish this draft." };
+    }
+    if (result.reason === "refused" && result.status === 429) {
+      if (result.problemCode === "RATE_LIMITED") {
+        return { ok: false, message: "The publication rate limit was reached. Wait for the limit to reset before retrying this draft." };
+      }
+      if (result.problemCode === "WRITE_REFUSED" && result.detail === "Synthesis publication is already in progress") {
+        return { ok: false, message: "Publication is already in progress. Refresh the queue to check for a receipt before retrying this draft." };
+      }
     }
     if (result.reason === "refused" && result.problemCode === "SYNTHESIS_UNANCHORED") {
       return {

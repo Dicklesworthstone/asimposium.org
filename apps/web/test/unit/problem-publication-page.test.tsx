@@ -593,7 +593,7 @@ test("a synthesis screening decision gives the accountable sponsor coarse case g
     if (result.ok) throw new Error("Screening decision became a publication receipt");
     expect(result.screening?.code).toBe(screening.code);
     expect(result.message).toContain("did not publish");
-    if ("case_id" in screening) {
+    if (screening.coarse_category !== undefined) {
       expect(result.screening?.caseId).toBe(caseId);
       expect(result.message).toContain("accountable sponsor");
       expect(result.message).toContain(screening.coarse_category);
@@ -601,5 +601,26 @@ test("a synthesis screening decision gives the accountable sponsor coarse case g
       expect(result.screening?.caseId).toBeUndefined();
       expect(result.message).toContain("Check with a moderator");
     }
+  }
+});
+
+test("synthesis publication distinguishes a read-only problem, a rate limit and an approval in progress", async () => {
+  const { publishSynthesisDraftAction } = await import("../../app/console/problems/[problem]/actions");
+  identity = "usr_steward";
+  for (const [status, problemCode, detail, expected] of [
+    [403, "WRITE_REFUSED", "The problem is read-only", "can no longer be published"],
+    [403, "WRITE_REFUSED", "Cannot publish synthesis draft", "your authority"],
+    [429, "RATE_LIMITED", "Publication rate limited", "Wait for the limit to reset"],
+    [429, "WRITE_REFUSED", "Synthesis publication is already in progress", "check for a receipt"],
+    [429, "WRITE_REFUSED", "unrecognized title", "Publication could not be confirmed"],
+    [429, undefined, "unrecognized title", "Publication could not be confirmed"],
+    [403, undefined, "unrecognized title", "Publication was refused"],
+  ] as const) {
+    publishResult = { ok: false, reason: "refused", status, detail, ...(problemCode ? { problemCode } : {}) };
+    const result = await publishSynthesisDraftAction(identity, researchSynthesis.problem_id, researchSynthesis.synthesis_id);
+    if (result.ok) throw new Error("A refusal became a publication receipt");
+    expect(result.message).toContain(expected);
+    expect(result.message).not.toContain("unrecognized title");
+    expect(result.screening).toBeUndefined();
   }
 });

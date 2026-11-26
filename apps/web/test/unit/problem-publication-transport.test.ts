@@ -125,7 +125,7 @@ test("synthesis publication recognizes private screening decisions and only acce
   }
 
   const receipt = {
-    problem_id: publicationProblem, synthesis_id: id, state: "published", covers_through: 1,
+    problem_id: publicationProblem, synthesis_id: id, state: "published" as const, covers_through: 1,
     anchors_count: 1, dropped_single_author_count: 0, author_fellow_id: "F-AUTHOR",
     published_by_principal_id: publicationSponsor, event_id: "E-SYNTH", sequence: 2,
     published_at: "2026-10-27T00:00:00.000Z",

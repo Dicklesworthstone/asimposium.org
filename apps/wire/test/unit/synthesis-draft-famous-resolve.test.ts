@@ -4,6 +4,7 @@ import {
   ExternalExpertReviewRecordSchema,
   ProblemDocumentSchema,
   type ProblemLifecycleActionRequest,
+  ScreeningPromotionHoldResponseSchema,
   SynthesisDraftListResponseSchema,
   SynthesisDraftPublishResponseSchema,
   SynthesisDraftResponseSchema,
@@ -643,8 +644,11 @@ test("draft publication stores its contextual warning and replays without screen
     expect(item?.synthesis.authoring_principal).toBe(FELLOW);
     expect(item?.synthesis.published_by_principal_id).toBe(SPONSOR);
 
-    // No screener is supplied and the sponsor's only slot is occupied.
-    // An exact committed receipt still replays for free.
+    f.sql
+      .query("UPDATE problems SET admission_mode = 'archived-read-only' WHERE id = ?")
+      .run(PROBLEM);
+    // The sponsor can still retrieve a committed receipt after archiving,
+    // with their only slot occupied and no screener available.
     const replay = expectPublishResult(
       await publishSynthesisDraftForSponsor(f.db, PROBLEM, synthesisId, SPONSOR),
     );
@@ -686,6 +690,41 @@ test("draft publication fails closed without a screener or available sponsor quo
     f.sql.close();
   }
 });
+
+for (const timing of ["before approval", "during screening"] as const) {
+  test(`an archive ${timing} preserves the private synthesis and public ledger`, async () => {
+    const { f, synthesisId, publicState, reservations } = await privateSynthesisFixture();
+    try {
+      const before = publicState();
+      const archive = () =>
+        f.sql
+          .query("UPDATE problems SET admission_mode = 'archived-read-only' WHERE id = ?")
+          .run(PROBLEM);
+      if (timing === "before approval") archive();
+      let calls = 0;
+      const policy = draftScreening(f.db);
+      const result = await publishSynthesisDraftForSponsor(f.db, PROBLEM, synthesisId, SPONSOR, {
+        ...policy,
+        screen: async (candidate, authorSponsorId) => {
+          calls++;
+          const outcome = await policy.screen(candidate, authorSponsorId);
+          if (timing === "during screening") archive();
+          return outcome;
+        },
+      });
+      if (!(result instanceof Response)) throw new Error("Expected an archived-problem refusal.");
+      expect(result.status).toBe(403);
+      expect(ProblemDocumentSchema.parse(await result.json()).code).toBe("WRITE_REFUSED");
+      expect(publicState()).toEqual(before);
+      expect(calls).toBe(timing === "before approval" ? 0 : 1);
+      expect(reservations()).toEqual(
+        timing === "before approval" ? [] : [{ status: "settled_failed" }],
+      );
+    } finally {
+      f.sql.close();
+    }
+  });
+}
 
 test("draft bytes changed after screening cannot enter the publication transaction", async () => {
   const { f, synthesisId, publicState, reservations } = await privateSynthesisFixture();
@@ -775,13 +814,14 @@ test("Fable §6.1: draft synthesis stays private until steward/sponsor publishes
     } as unknown as Env;
 
     let screeningCalls = 0;
+    let providerAvailable = true;
     const app = createApp({
       screenPromotion: async (input) => {
         screeningCalls++;
         return syntheticScreeningObservation(input, {
           decision: "pass",
           coarse_category: "benign-context",
-          provider_status: "ok",
+          provider_status: providerAvailable ? "ok" : "error",
         });
       },
     });
@@ -908,6 +948,13 @@ test("Fable §6.1: draft synthesis stays private until steward/sponsor publishes
     expect(otherList.status).toBe(200);
     expect(SynthesisDraftListResponseSchema.parse(await otherList.json()).drafts).toHaveLength(0);
 
+    const screeningsBeforePublication = screeningCalls;
+    const reservations = () =>
+      f.sql
+        .query(
+          "SELECT status FROM public_write_attempt_reservations WHERE route = 'synthesis-draft-publish' ORDER BY status",
+        )
+        .all();
     const otherPub = await signedSponsorReq(
       "POST",
       `/v1/sponsors/problems/${PROBLEM}/syntheses/${draftJson.synthesis_id}/publish`,
@@ -915,6 +962,8 @@ test("Fable §6.1: draft synthesis stays private until steward/sponsor publishes
       OTHER_SPONSOR,
     );
     expect(otherPub.status).toBe(403);
+    expect(screeningCalls).toBe(screeningsBeforePublication);
+    expect(reservations()).toEqual([]);
     const otherErr = ProblemDocumentSchema.parse(await otherPub.json());
     expect(otherErr.code).toBe("WRITE_REFUSED");
 
@@ -1006,19 +1055,50 @@ test("Fable §6.1: draft synthesis stays private until steward/sponsor publishes
       }
     ).cursor;
 
-    const screeningsBeforePublication = screeningCalls;
-    const pubRes = await signedSponsorReq(
-      "POST",
-      `/v1/sponsors/problems/${PROBLEM}/syntheses/${draftJson.synthesis_id}/publish`,
-      "sponsor.syntheses.drafts.publish",
-      SPONSOR,
-    );
-    expect(pubRes.status).toBe(201);
+    const publishDraft = () =>
+      signedSponsorReq(
+        "POST",
+        `/v1/sponsors/problems/${PROBLEM}/syntheses/${draftJson.synthesis_id}/publish`,
+        "sponsor.syntheses.drafts.publish",
+        SPONSOR,
+      );
+    providerAvailable = false;
+    const held = await publishDraft();
+    expect(held.status).toBe(202);
+    expect(held.headers.get("cache-control")).toContain("no-store");
+    const { case_id } = ScreeningPromotionHoldResponseSchema.parse(await held.json());
+    if (case_id === undefined) throw new Error("A held synthesis needs a private review case.");
+    const caseState = () =>
+      f.sql.query("SELECT state FROM screening_cases WHERE case_id = ?").get(case_id);
+    expect(caseState()).toEqual({ state: "pending" });
+    expect(reservations()).toEqual([{ status: "settled_held" }]);
     expect(screeningCalls).toBe(screeningsBeforePublication + 1);
+    expect(
+      f.sql.query("SELECT id FROM events WHERE object_id = ?").get(draftJson.synthesis_id),
+    ).toBeNull();
+    expect(f.sql.query("SELECT cursor FROM public_cursor WHERE singleton = 1").get()).toEqual({
+      cursor: cursorBeforePub,
+    });
+
+    providerAvailable = true;
+    const pubRes = await publishDraft();
+    expect(pubRes.status).toBe(201);
+    expect(screeningCalls).toBe(screeningsBeforePublication + 2);
+    expect(caseState()).toEqual({ state: "superseded" });
     const published = SynthesisDraftPublishResponseSchema.parse(await pubRes.json());
     expect(published.synthesis_id).toBe(draftJson.synthesis_id);
     expect(published.author_fellow_id).toBe(fellowId);
     expect(published.published_by_principal_id).toBe(SPONSOR);
+    expect(
+      f.sql
+        .query(
+          `SELECT p.event_id FROM screening_publications p JOIN screening_cases c
+             ON c.input_digest = json_extract(p.provenance_json, '$.input_digest')
+            AND c.context_digest = json_extract(p.provenance_json, '$.context_digest')
+           WHERE p.event_id = ? AND c.case_id = ?`,
+        )
+        .get(published.event_id, case_id),
+    ).toEqual({ event_id: published.event_id });
 
     // Wave 12 regression: publishing a draft synthesis MUST increment public_cursor exactly once.
     const cursorAfterPub = (
@@ -1029,14 +1109,10 @@ test("Fable §6.1: draft synthesis stays private until steward/sponsor publishes
     expect(cursorAfterPub).toBe(cursorBeforePub + 1);
 
     // Second publish call is idempotent (returns 200, no duplicate ledger event or cursor bump).
-    const pubAgain = await signedSponsorReq(
-      "POST",
-      `/v1/sponsors/problems/${PROBLEM}/syntheses/${draftJson.synthesis_id}/publish`,
-      "sponsor.syntheses.drafts.publish",
-      SPONSOR,
-    );
+    const pubAgain = await publishDraft();
     expect(pubAgain.status).toBe(200);
-    expect(screeningCalls).toBe(screeningsBeforePublication + 1);
+    expect(screeningCalls).toBe(screeningsBeforePublication + 2);
+    expect(reservations()).toEqual([{ status: "settled_held" }, { status: "settled_published" }]);
     expect(SynthesisDraftPublishResponseSchema.parse(await pubAgain.json())).toEqual(published);
     const cursorAfterReplay = (
       f.sql.query("SELECT cursor FROM public_cursor WHERE singleton = 1").get() as {

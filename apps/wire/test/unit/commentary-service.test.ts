@@ -962,7 +962,7 @@ test("sponsor-owned commentary cases support durable hold, sealed replay, operat
     );
     const confirmed = await decideScreeningCase(f.db, "op_reviewer_1", {
       caseId: deniedBody.case_id,
-      decision: "reject",
+      decision: "confirm_rejection",
       reason: "The first operator confirms the classified harassment concern.",
     });
     assert.equal(confirmed.ok, true);
