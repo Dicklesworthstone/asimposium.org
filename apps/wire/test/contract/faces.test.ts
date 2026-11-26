@@ -392,6 +392,25 @@ const REAL_READER_INITIALIZER = `const readSafeProtocolDocument = protocolDocume
   getDocument,
 );`;
 
+function setupProblemIndexTables(db: Database) {
+  db.run(
+    "CREATE TABLE problems (id TEXT PRIMARY KEY, public_seq INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, title TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'active', unlisted INTEGER NOT NULL DEFAULT 0, admission_mode TEXT DEFAULT 'open')",
+  );
+  db.run(
+    "CREATE TABLE content_controls (control_id TEXT PRIMARY KEY, problem_id TEXT NOT NULL, target_kind TEXT NOT NULL, target_ref TEXT NOT NULL, visibility TEXT NOT NULL, source TEXT NOT NULL, reason_category TEXT NOT NULL, actor TEXT NOT NULL, reason TEXT NOT NULL, version INTEGER NOT NULL, created_at TEXT NOT NULL)",
+  );
+  db.run(
+    "CREATE TABLE screening_publications (event_id TEXT PRIMARY KEY, provenance_json TEXT NOT NULL)",
+  );
+  db.run(
+    "CREATE TABLE events (id TEXT PRIMARY KEY, problem_id TEXT, object_id TEXT, object_kind TEXT, type TEXT, seq INTEGER, object_version INTEGER DEFAULT 1, payload_sha256 TEXT DEFAULT 'fixture-digest')",
+  );
+  db.run(
+    "CREATE TABLE event_content (event_id TEXT PRIMARY KEY, payload_sha256 TEXT, redacted_at TEXT)",
+  );
+  db.run("CREATE TABLE retractions (retraction_id TEXT, problem_id TEXT, target_object TEXT)");
+}
+
 describe("the production protocol cold-path gate", () => {
   test("a hostile bundled document refuses before any public-text reader can run", () => {
     const token = ["asimp", "ag", "01JQZX9Y2K4M7P8R"].join("_");
@@ -1764,18 +1783,7 @@ describe("face wire format", () => {
     // pinned so a hand-sorted stub result alone cannot false-green.
     const db = new Database(":memory:");
     try {
-      db.run(
-        "CREATE TABLE problems (id TEXT PRIMARY KEY, public_seq INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, title TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'active', unlisted INTEGER NOT NULL DEFAULT 0)",
-      );
-      db.run(
-        "CREATE TABLE content_controls (control_id TEXT PRIMARY KEY, problem_id TEXT NOT NULL, target_kind TEXT NOT NULL, target_ref TEXT NOT NULL, visibility TEXT NOT NULL, source TEXT NOT NULL, reason_category TEXT NOT NULL, actor TEXT NOT NULL, reason TEXT NOT NULL, version INTEGER NOT NULL, created_at TEXT NOT NULL)",
-      );
-      db.run(
-        "CREATE TABLE screening_publications (event_id TEXT PRIMARY KEY, provenance_json TEXT NOT NULL)",
-      );
-      db.run(
-        "CREATE TABLE events (id TEXT PRIMARY KEY, problem_id TEXT, object_id TEXT, object_kind TEXT, type TEXT, seq INTEGER)",
-      );
+      setupProblemIndexTables(db);
       const base = Date.parse("2026-08-20T00:00:00.000Z");
       const insert = db.prepare(
         "INSERT INTO problems (id, public_seq, created_at, updated_at) VALUES (?, ?, ?, ?)",
@@ -1871,18 +1879,7 @@ describe("face wire format", () => {
   test("problems index ranks open object-level scientific needs ahead of process-only chatter with deterministic tie-breaks and keyset pagination (5ujc)", async () => {
     const db = new Database(":memory:");
     try {
-      db.run(
-        "CREATE TABLE problems (id TEXT PRIMARY KEY, public_seq INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, title TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'active', unlisted INTEGER NOT NULL DEFAULT 0)",
-      );
-      db.run(
-        "CREATE TABLE content_controls (control_id TEXT PRIMARY KEY, problem_id TEXT NOT NULL, target_kind TEXT NOT NULL, target_ref TEXT NOT NULL, visibility TEXT NOT NULL, source TEXT NOT NULL, reason_category TEXT NOT NULL, actor TEXT NOT NULL, reason TEXT NOT NULL, version INTEGER NOT NULL, created_at TEXT NOT NULL)",
-      );
-      db.run(
-        "CREATE TABLE screening_publications (event_id TEXT PRIMARY KEY, provenance_json TEXT NOT NULL)",
-      );
-      db.run(
-        "CREATE TABLE events (id TEXT PRIMARY KEY, problem_id TEXT, object_id TEXT, object_kind TEXT, type TEXT, seq INTEGER)",
-      );
+      setupProblemIndexTables(db);
       const insertProblem = db.prepare(
         "INSERT INTO problems (id, public_seq, created_at, updated_at, title, status) VALUES (?, ?, '2026-08-19T00:00:00.000Z', '2026-08-20T00:00:00.000Z', ?, ?)",
       );
@@ -1916,6 +1913,10 @@ describe("face wire format", () => {
       insertProblem.run("P-DELTA", 2, "Closed-gap problem", "active");
       insertEvent.run("E-D-1", "P-DELTA", "G-1", "gap", "gap.filed", 1);
       insertEvent.run("E-D-2", "P-DELTA", "G-1", "gap", "gap.closed-by", 2);
+
+      db.run(
+        "INSERT INTO event_content (event_id, payload_sha256) SELECT id, payload_sha256 FROM events",
+      );
 
       const env = {
         DB: {
@@ -1960,6 +1961,51 @@ describe("face wire format", () => {
         ).json(),
       );
       expect(afterAlpha.problems.map((p) => p.id)).toEqual(["P-DELTA"]);
+
+      // Exercise the event identities emitted by the scientific writers.
+      const append = (problem: string, object: string, kind: string, type: string, version = 1) => {
+        const seq = db
+          .query<{ seq: number }, [string]>(
+            "UPDATE problems SET public_seq = public_seq + 1 WHERE id = ? RETURNING public_seq AS seq",
+          )
+          .get(problem)?.seq;
+        if (seq === undefined) throw new Error("Unknown problem");
+        const id = `${problem}-${seq}`;
+        insertEvent.run(id, problem, object, kind, type, seq);
+        db.prepare("UPDATE events SET object_version = ? WHERE id = ?").run(version, id);
+        db.prepare("INSERT INTO event_content VALUES (?, 'fixture-digest', NULL)").run(id);
+        return id;
+      };
+      const ranked = async () => {
+        const response = await routes.fetch(new Request("https://a.asimposium.org/problems.json"), env);
+        return ProblemsIndexResponseSchema.parse(await response.json()).problems.map(({ id }) => id);
+      };
+      append("P-BETA", "G-1", "gap", "gap.withdrawn");
+      append("P-BETA", "R-1", "retraction", "object.retracted");
+      db.run("INSERT INTO retractions VALUES ('R-1','P-BETA','C-1@1')");
+      expect(await ranked()).toEqual(["P-GAMMA", "P-ALPHA", "P-BETA", "P-DELTA"]);
+      // An exact-version concession does not withdraw the successor.
+      const successor = append("P-BETA", "C-1", "claim", "claim.revised", 2);
+      expect((await ranked())[0]).toBe("P-BETA");
+      db.prepare("UPDATE event_content SET redacted_at='now' WHERE event_id=?").run(successor);
+      expect((await ranked())[0]).toBe("P-GAMMA");
+      const origin = append("P-DELTA", "H-1", "hypothesis", "hypothesis.created");
+      append("P-DELTA", "CF-1", "conflict", "conflict.normalized");
+      expect((await ranked())[0]).toBe("P-DELTA");
+      append("P-DELTA", "CF-1", "conflict", "conflict.resolved", 2);
+      append("P-DELTA", "H-1", "hypothesis", "hypothesis.deferred");
+      append("P-DELTA", "Q-1", "question", "question.asked");
+      append("P-DELTA", "Q-1", "question", "question.withdrawn");
+      expect(await ranked()).toEqual(["P-GAMMA", "P-ALPHA", "P-BETA", "P-DELTA"]);
+      append("P-DELTA", "H-1", "hypothesis", "hypothesis.resumed");
+      expect(await ranked()).toEqual(["P-GAMMA", "P-DELTA", "P-ALPHA", "P-BETA"]);
+      db.prepare("UPDATE event_content SET redacted_at='now' WHERE event_id=?").run(origin);
+      expect(await ranked()).toEqual(["P-GAMMA", "P-ALPHA", "P-BETA", "P-DELTA"]);
+      db.prepare("UPDATE event_content SET redacted_at=NULL WHERE event_id=?").run(origin);
+      db.run("UPDATE problems SET admission_mode='archived-read-only' WHERE id='P-GAMMA'");
+      expect((await ranked())[0]).toBe("P-DELTA");
+      db.run("UPDATE problems SET status='resolved' WHERE id='P-DELTA'");
+      expect(await ranked()).toEqual(["P-ALPHA", "P-BETA", "P-DELTA", "P-GAMMA"]);
     } finally {
       db.close();
     }

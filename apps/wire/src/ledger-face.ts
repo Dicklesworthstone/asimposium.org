@@ -67,7 +67,7 @@ import {
   renderFormalRecordsMarkdown,
 } from "@asimposium/render/formal-records";
 import { type Context, Hono } from "hono";
-import { offScopeProblemSql } from "./discovery/public-scope.ts";
+import { offScopeProblemSql, offScopePublicationSql } from "./discovery/public-scope.ts";
 import type { Env } from "./env";
 import { validatedProblem as problemDocument } from "./http/envelope";
 import { bibtexForClaim, CitationInputError, citeKeyFor, cslForClaim } from "./krater/citation";
@@ -164,83 +164,46 @@ export const PROBLEM_INDEX_MARKDOWN_FIELD_DESCRIPTORS = [
   defineProblemIndexMarkdownField("status", (value) => `; status ${value}`),
 ] as const;
 
-const OPEN_MOVE_WEIGHT_EXPR = `(
-  CASE WHEN problems.status = 'sharpening' THEN 2 ELSE 0 END
-  + COALESCE((
-      SELECT COUNT(DISTINCT e.object_id) * 3
-      FROM events e
-      WHERE e.problem_id = problems.id
-        AND e.seq <= problems.public_seq
-        AND e.object_kind = 'claim'
-        AND e.type IN ('claim.created', 'claim.revised')
-        AND NOT EXISTS (
-          SELECT 1 FROM events r
-          WHERE r.problem_id = problems.id
-            AND r.seq <= problems.public_seq
-            AND r.object_id = e.object_id
-            AND r.type = 'object.retracted'
-        )
-        AND NOT ${hiddenByContentControlSql("problems.id", "e.object_id")}
-        AND NOT ${hiddenByContentControlSql("problems.id", "'#' || e.seq")}
-    ), 0)
-  + COALESCE((
-      SELECT COUNT(DISTINCT e.object_id) * 2
-      FROM events e
-      WHERE e.problem_id = problems.id
-        AND e.seq <= problems.public_seq
-        AND e.type = 'gap.filed'
-        AND NOT EXISTS (
-          SELECT 1 FROM events c
-          WHERE c.problem_id = problems.id
-            AND c.seq <= problems.public_seq
-            AND c.object_id = e.object_id
-            AND c.type IN ('gap.closed-by', 'gap.withdrawn')
-        )
-        AND NOT ${hiddenByContentControlSql("problems.id", "e.object_id")}
-        AND NOT ${hiddenByContentControlSql("problems.id", "'#' || e.seq")}
-    ), 0)
-  + COALESCE((
-      SELECT COUNT(DISTINCT e.object_id) * 2
-      FROM events e
-      WHERE e.problem_id = problems.id
-        AND e.seq <= problems.public_seq
-        AND e.type = 'conflict.normalized'
-        AND NOT ${hiddenByContentControlSql("problems.id", "e.object_id")}
-        AND NOT ${hiddenByContentControlSql("problems.id", "'#' || e.seq")}
-    ), 0)
-  + COALESCE((
-      SELECT COUNT(DISTINCT e.object_id) * 2
-      FROM events e
-      WHERE e.problem_id = problems.id
-        AND e.seq <= problems.public_seq
-        AND e.type = 'hypothesis.created'
-        AND NOT EXISTS (
-          SELECT 1 FROM events k
-          WHERE k.problem_id = problems.id
-            AND k.seq <= problems.public_seq
-            AND k.object_id = e.object_id
-            AND k.type IN ('hypothesis.killed', 'hypothesis.superseded')
-        )
-        AND NOT ${hiddenByContentControlSql("problems.id", "e.object_id")}
-        AND NOT ${hiddenByContentControlSql("problems.id", "'#' || e.seq")}
-    ), 0)
-  + COALESCE((
-      SELECT COUNT(DISTINCT e.object_id)
-      FROM events e
-      WHERE e.problem_id = problems.id
-        AND e.seq <= problems.public_seq
-        AND e.type = 'question.asked'
-        AND NOT EXISTS (
-          SELECT 1 FROM events a
-          WHERE a.problem_id = problems.id
-            AND a.seq <= problems.public_seq
-            AND a.object_id = e.object_id
-            AND a.type = 'question.answered'
-        )
-        AND NOT ${hiddenByContentControlSql("problems.id", "e.object_id")}
-        AND NOT ${hiddenByContentControlSql("problems.id", "'#' || e.seq")}
-    ), 0)
-)`;
+// Choose each object's current state before checking availability. A hidden
+// revision or a terminal event must never resurrect an earlier need.
+const OPEN_MOVE_WEIGHT_EXPR = `CASE
+  WHEN problems.status IN ('resolved','retired') OR problems.admission_mode = 'archived-read-only' THEN 0
+  ELSE (CASE WHEN problems.status = 'sharpening' THEN 2 ELSE 0 END) + COALESCE((
+    SELECT SUM(CASE h.object_kind WHEN 'claim' THEN 3 WHEN 'question' THEN 1 ELSE 2 END)
+    FROM (
+      SELECT e.id, e.problem_id, e.seq, e.object_id, e.object_kind, e.object_version, e.type,
+        e.payload_sha256, ROW_NUMBER() OVER history AS position,
+        MIN(e.seq) OVER (history ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS first_seq
+      FROM events e WHERE e.problem_id = problems.id AND e.seq <= problems.public_seq
+        AND ((e.object_kind = 'claim' AND e.type IN ('claim.created','claim.revised'))
+          OR (e.object_kind = 'gap' AND e.type IN ('gap.filed','gap.closed-by','gap.withdrawn'))
+          OR (e.object_kind = 'conflict' AND e.type IN ('conflict.normalized','conflict.resolved'))
+          OR (e.object_kind = 'hypothesis' AND e.type IN ('hypothesis.created','hypothesis.resumed',
+            'hypothesis.deferred','hypothesis.narrowed','hypothesis.killed','hypothesis.superseded'))
+          OR (e.object_kind = 'question' AND e.type IN ('question.asked','question.answered','question.withdrawn')))
+      WINDOW history AS (PARTITION BY e.object_kind, e.object_id ORDER BY e.seq DESC)
+    ) h
+    JOIN event_content content ON content.event_id = h.id AND content.payload_sha256 = h.payload_sha256
+      AND content.redacted_at IS NULL
+    WHERE h.position = 1
+      AND h.type IN ('claim.created','claim.revised','gap.filed','conflict.normalized',
+        'hypothesis.created','hypothesis.resumed','question.asked')
+      AND NOT ${eventContentHiddenSql("h")} AND NOT ${offScopePublicationSql("h.id")}
+      AND (h.type <> 'hypothesis.resumed' OR EXISTS (
+        SELECT 1 FROM events origin JOIN event_content original ON original.event_id = origin.id
+          AND original.payload_sha256 = origin.payload_sha256 AND original.redacted_at IS NULL
+        WHERE origin.problem_id = h.problem_id AND origin.seq = h.first_seq
+          AND origin.type = 'hypothesis.created' AND NOT ${eventContentHiddenSql("origin")}
+          AND NOT ${offScopePublicationSql("origin.id")}
+      ))
+      AND (h.object_kind <> 'claim' OR NOT EXISTS (
+        SELECT 1 FROM retractions r JOIN events withdrawal ON withdrawal.problem_id = r.problem_id
+          AND withdrawal.object_id = r.retraction_id AND withdrawal.object_kind = 'retraction'
+          AND withdrawal.type = 'object.retracted' AND withdrawal.seq <= problems.public_seq
+        WHERE r.problem_id = h.problem_id
+          AND r.target_object IN (h.object_id, h.object_id || '@' || h.object_version)
+      ))
+  ), 0) END`;
 
 const PROBLEM_INDEX_COLUMNS = PROBLEM_INDEX_MARKDOWN_FIELD_DESCRIPTORS.map(({ key }) => key).join(
   ", ",
