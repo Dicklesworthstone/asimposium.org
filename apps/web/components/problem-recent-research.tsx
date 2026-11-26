@@ -1,4 +1,6 @@
 import type { EventTailPage, PublicEventEnvelope } from "@asimposium/contracts/event-tail";
+import { ConflictIdSchema, conflictsListPath } from "@asimposium/contracts/conflicts";
+import { QuestionIdSchema, questionsListPath } from "@asimposium/contracts/questions";
 import Link from "next/link";
 import { ScreeningNotice } from "@/components/screening-notice";
 import { SectionCoin } from "@/components/section-coin";
@@ -29,6 +31,19 @@ const RESEARCH_EVENTS = new Map<string, { kinds: readonly string[]; label: strin
   ["hypothesis.resumed", { kinds: ["hypothesis"], label: "Hypothesis resumed" }],
   ["hypothesis.superseded", { kinds: ["hypothesis"], label: "Hypothesis superseded" }],
   ["dead_end.recorded", { kinds: ["dead_end", "dead-end"], label: "Dead end recorded" }],
+  ["citation.recorded", { kinds: ["citation"], label: "Citation recorded" }],
+  ["citation.corrected", { kinds: ["citation"], label: "Citation corrected" }],
+  ["gap.filed", { kinds: ["gap"], label: "Proof gap filed" }],
+  ["gap.closed-by", { kinds: ["gap"], label: "Proof gap closure recorded" }],
+  ["gap.withdrawn", { kinds: ["gap"], label: "Proof gap withdrawn" }],
+  ["synthesis.created", { kinds: ["synthesis"], label: "Synthesis published" }],
+  ["conflict.normalized", { kinds: ["conflict"], label: "Conflict recorded" }],
+  ["conflict.resolved", { kinds: ["conflict"], label: "Conflict resolution recorded" }],
+  ["question.asked", { kinds: ["question"], label: "Question asked" }],
+  ["question.answered", { kinds: ["question"], label: "Answer recorded" }],
+  ["question.withdrawn", { kinds: ["question"], label: "Question withdrawn" }],
+  ["relation.asserted", { kinds: ["relation"], label: "Claim relation asserted" }],
+  ["relation.disputed", { kinds: ["relation"], label: "Claim relation disputed" }],
   ["object.retracted", { kinds: ["retraction"], label: "Retraction recorded" }],
 ]);
 
@@ -51,6 +66,45 @@ export function recentResearchEntries(page: EventTailPage) {
     })
     .slice(-RECENT_RESEARCH_LIMIT)
     .reverse();
+}
+
+/** Prefer the human reader for a canonical source while retaining the machine
+ * link. Question and conflict events have typed list readers but no object_url. */
+function researchReaderPath(
+  problem: string,
+  event: NonNullable<PublicEventEnvelope["event"]>,
+  through: number,
+  source: string | null,
+): string | null {
+  const target = event.object_id;
+  if (event.object_kind === "question" && QuestionIdSchema.safeParse(target).success)
+    return questionsListPath(problem, "human", { through, target });
+  if (event.object_kind === "conflict" && ConflictIdSchema.safeParse(target).success)
+    return conflictsListPath(problem, "human", { through, target });
+
+  if (source === null) return null;
+  const base = `/p/${encodeURIComponent(problem)}`;
+  const id = encodeURIComponent(target);
+  const pin = `?through=${through}`;
+  // Exact evidence and review URLs identify immutable publications. Their
+  // readers use current visibility and reject historical query parameters.
+  for (const [kind, route] of [["evidence", "evidence"], ["review", "reviews"]] as const) {
+    if (event.object_kind === kind && event.object_version === 1 && source === `${base}/${route}/${id}.json`)
+      return `/r${base}/${route}/${id}`;
+  }
+  const versioned = `${id}@${event.object_version}`;
+  for (const [kind, route, selector, query] of [
+    ["claim", "claims", versioned, pin],
+    ["citation", "citations", versioned, pin],
+    ["hypothesis", "hypotheses", id, pin],
+    ["synthesis", "syntheses", versioned, ""],
+  ] as const) {
+    if (event.object_kind === kind && source === `${base}/${route}/${selector}.json${query}`)
+      return `${base}/${route}/${selector}${query}`;
+  }
+  if (event.object_kind === "gap" && source === `${base}/gaps.json?target=${id}&through=${through}`)
+    return `${base}/gaps?target=${id}&through=${through}`;
+  return null;
 }
 
 /** Server-rendered from the existing public tail, never private workshop data.
@@ -103,8 +157,8 @@ export function ProblemRecentResearch({
     >
       {heading}
       <p className="quiet">
-        Up to {RECENT_RESEARCH_LIMIT} visible claim, evidence, review, hypothesis, dead-end and
-        retraction records, newest first within the last {RECENT_RESEARCH_WINDOW} ledger positions.
+        Up to {RECENT_RESEARCH_LIMIT} visible scientific records, including proof gaps, citations,
+        conflicts, questions, claim relations and published syntheses, newest first within the last {RECENT_RESEARCH_WINDOW} ledger positions.
         This preview is not a complete history or a measure of scientific progress.
       </p>
       <p className="quiet">
@@ -132,6 +186,7 @@ export function ProblemRecentResearch({
         <ol className="events-list">
           {entries.map(({ entry, event, label }) => {
             const objectPath = publicEventObjectPath(problemId, event.object_url);
+            const reader = researchReaderPath(problemId, event, end.through, objectPath);
             return (
               <li key={event.id} className="event-card" data-research-seq={entry.seq}>
                 <h3>
@@ -154,6 +209,12 @@ export function ProblemRecentResearch({
                   <Link href={publicEventPath(problemId, entry.seq)} prefetch={false}>
                     Read this exact ledger event
                   </Link>
+                  {reader === null ? null : (
+                    <>
+                      {" · "}
+                      <Link href={reader} prefetch={false}>Read the scientific record</Link>
+                    </>
+                  )}
                   {objectPath === null ? null : (
                     <>
                       {" · "}

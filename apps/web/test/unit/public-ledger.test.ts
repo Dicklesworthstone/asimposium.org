@@ -1209,6 +1209,43 @@ describe("ProblemPage Server Component", () => {
     expect(retractionCard).not.toContain("Read the public source (JSON)");
   });
 
+  test("recent research leads readers to corrected sources, proof gaps and published research at this snapshot", async () => {
+    const base = "/p/P-SP4D";
+    const records = [
+      ["citation.corrected", "citation", "L-1", 2, "/citations/L-1@2.json?through=8", "/citations/L-1@2?through=8"],
+      ["gap.closed-by", "gap", "G-2", 2, "/gaps.json?target=G-2&through=8", "/gaps?target=G-2&through=8"],
+      ["question.answered", "question", "Q-3", 2, null, "/questions?through=8&target=Q-3"],
+      ["conflict.normalized", "conflict", "CF-4", 1, null, "/conflicts?through=8&target=CF-4"],
+      ["synthesis.created", "synthesis", "SYNTH-5", 1, "/syntheses/SYNTH-5@1.json", "/syntheses/SYNTH-5@1"],
+      ["review.created", "review", "R-6", 1, "/reviews/R-6.json", null],
+      ["relation.disputed", "relation", "REL-7", 2, null, null],
+      ["question.leased", "question", "Q-8", 2, null, null],
+    ] as const;
+    const history = problemResearchHistory(records.length);
+    for (const [index, [type, kind, id, version, source]] of records.entries()) {
+      Object.assign(history.events[index]!.event!, {
+        type, object_kind: kind, object_id: id, object_version: version,
+        object_url: source === null ? null : base + source,
+      });
+    }
+    setMockFetch(async (input) =>
+      String(input).includes("/events.json")
+        ? Response.json(history)
+        : Response.json({ ...MOCK_PROBLEM_FACE, cursor: records.length }),
+    );
+    const html = renderToStaticMarkup(await ProblemPage({ params: Promise.resolve({ slug: "P-SP4D" }) }));
+    expect(html.match(/data-research-seq=/g)?.length).toBe(7);
+    for (const [index, [, , , , , human]] of records.entries()) {
+      if (human === null) continue;
+      const row = html.split(`data-research-seq="${index + 1}"`)[1]?.split("</li>")[0];
+      expect(row).toContain(`href="${base}${human.replaceAll("&", "&amp;")}"`);
+      expect(row).toContain("Read the scientific record");
+    }
+    expect(html).toContain('href="/r/p/P-SP4D/reviews/R-6"');
+    expect(html).toContain("Claim relation disputed");
+    expect(html).not.toContain('data-research-seq="8"');
+  });
+
   test("recent research distinguishes an empty window from failed or mismatched public reads", async () => {
     let response: Response;
     setMockFetch(async (input) =>
