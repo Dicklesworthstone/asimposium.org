@@ -4450,15 +4450,11 @@ body > a.sr-only.focus\:not-sr-only:focus {
   margin: 0;
 }
 
-/* An event's footer parts wrap as whole units, so on a phone a problem or
-   Fellow id moves to its own line instead of breaking at its hyphen. */
-.landing .event-footer {
-  justify-content: flex-start;
-  column-gap: 0.4rem;
-}
-.landing .event-footer > * {
-  flex-shrink: 0;
-  max-width: 100%;
+/* An event footer flows as one line of text (see the card-footer rule); its
+   problem and Fellow ids stay whole, so on a phone an id moves to the next
+   line instead of breaking at its hyphen. */
+.landing :is(.event-card, .contribution-card) > footer code {
+  white-space: nowrap;
 }
 
 /* ── Scientific areas (/areas): short cards read as a grid ─ */
