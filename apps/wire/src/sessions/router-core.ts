@@ -142,6 +142,7 @@ import {
   SERVICE_ENVELOPE_HEADER,
 } from "../auth/http";
 import { wrongPrincipalProblem } from "../auth/refusal";
+import { ACTIVE_DIRECTIVE_AUTHORITY_SQL } from "../directives/active-source.ts";
 import {
   accountSponsorDirectiveOmissions,
   readActiveSponsorDirectives,
@@ -13311,19 +13312,49 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           statements: (sealed, claimToken) => [
             db
               .prepare(
-                `INSERT INTO session_write_replays
+                // This private write has no event insert, so the ledger's
+                // session, membership, archival and grant-budget guards do not
+                // run for it. Admit the replay and draft together under the
+                // same current grant authority used by private session reads.
+                `WITH draft_authority AS (${ACTIVE_DIRECTIVE_AUTHORITY_SQL})
+                 INSERT INTO session_write_replays
                    (scope, principal_scope, idempotency_key, request_digest,
                     response_ciphertext, response_initialization_vector,
                     expires_at, claim_token)
-                 SELECT 'synthesize', ?, ?, ?, ?, ?, ?, ?
-                 WHERE EXISTS (${LIVE_LEDGER_CREDENTIAL_SQL})
-                   AND EXISTS (
-                     SELECT 1 FROM problems
-                     WHERE id = ? AND status NOT IN ('private-draft', 'resolved', 'retired')
-                   )
+                 SELECT 'synthesize', ?7, ?8, ?9, ?10, ?11, ?12, ?13
+                 WHERE EXISTS (
+                   SELECT 1 FROM draft_authority authority
+                   JOIN enrollment_fellows f ON f.fellow_id = authority.fellow_id
+                     AND f.status = 'active'
+                   JOIN fellow_tokens t ON t.credential_id = ?4 AND t.token_hash = ?5
+                   JOIN sessions s ON s.session_id = ?6 AND s.fellow_id = ?1
+                     AND s.problem_id = ?3 AND s.closed_at IS NULL
+                   JOIN problem_memberships m ON m.problem_id = s.problem_id
+                     AND m.fellow_id = s.fellow_id AND m.role IN ('contributor', 'steward')
+                   JOIN problems p ON p.id = s.problem_id
+                     AND p.status NOT IN ('private-draft', 'resolved', 'retired')
+                     AND p.admission_mode <> 'archived-read-only'
+                   WHERE EXISTS (SELECT 1 FROM json_each(t.granted_scopes_json)
+                     WHERE value = 'promote')
+                     AND NOT EXISTS (SELECT 1 FROM sponsor_suspension_events
+                       WHERE sponsor_id = ?2)
+                     AND NOT EXISTS (SELECT 1 FROM private_draft_erasures
+                       WHERE problem_id = ?3)
+                     AND (SELECT COUNT(*) FROM events
+                       WHERE writer_credential_id = t.credential_id) < COALESCE(
+                         json_extract(t.granted_resources_json, '$.eventBudget'),
+                         json_extract(t.granted_resources_json, '$.event_budget'),
+                         9007199254740991)
+                 )
                  ON CONFLICT(scope, principal_scope, idempotency_key) DO NOTHING`,
               )
               .bind(
+                auth.binding.fellowId,
+                auth.binding.sponsorId,
+                session.problem_id,
+                auth.binding.credentialId,
+                auth.binding.tokenHash,
+                session.session_id,
                 auth.binding.fellowId,
                 key,
                 digest,
@@ -13331,8 +13362,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                 sealed.initializationVector,
                 Math.floor(Date.now() / 1000) + Math.floor(REPLAY_TTL_MS / 1000),
                 claimToken,
-                auth.binding.credentialId,
-                session.problem_id,
               ),
             db
               .prepare(
@@ -13385,10 +13414,14 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       if (error instanceof ReplayConflictError) return idempotencyConflictProblem();
       if (!(await credentialIsLiveAtCommit(db, auth.binding.credentialId)))
         return writeRefusedProblem();
+      if (error instanceof ReplayClaimNotCommittedError) {
+        const currentSession = await openSessionOf(db, sessionId, auth.binding.fellowId);
+        if (currentSession instanceof Response) return privateNoStore(currentSession);
+      }
       const latestProblem = await db
-        .prepare("SELECT status FROM problems WHERE id = ?")
+        .prepare("SELECT status, admission_mode FROM problems WHERE id = ?")
         .bind(session.problem_id)
-        .first<{ status: string }>();
+        .first<{ status: string; admission_mode: string }>();
       if (latestProblem?.status === "resolved" || latestProblem?.status === "retired") {
         return validatedProblem({
           status: 422,
@@ -13402,6 +13435,14 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             example: { method: "GET", path: "/problems.json" },
           },
         });
+      }
+      if (error instanceof ReplayClaimNotCommittedError) {
+        if (latestProblem?.admission_mode === "archived-read-only")
+          return archivedProblemWriteProblem();
+        // replayOrCommit already recovered any concurrent winning receipt.
+        // No replay row means the atomic authority predicate refused this
+        // fresh draft, including membership, sponsor or grant changes.
+        return writeRefusedProblem();
       }
       throw error;
     }

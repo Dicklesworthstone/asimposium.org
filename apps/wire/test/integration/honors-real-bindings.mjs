@@ -117,8 +117,27 @@ await runLocalWorkerJourney(
         undefined,
         token,
       );
-      const detail = json(pack.items.find((item) => item.kind === "claim-detail").body);
-      const proof = json(pack.items.find((item) => item.id === proofId).body);
+      const detailItem = pack.items.find(
+        (item) => item.kind === "claim-detail" && item.id === `${claim}@1`,
+      );
+      assert.ok(detailItem, "the review pack includes the exact claim statement");
+      const detail = json(detailItem.body);
+      // Review packs are bounded. Read the exact immutable evidence face even
+      // when its body was omitted from the pack's available context budget.
+      const evidenceFace = await call(
+        `/p/${problem}/evidence/${proofId}.json`,
+        undefined,
+        undefined,
+        200,
+      );
+      const proofItem = evidenceFace.items.find(
+        (item) => item.kind === "claim-evidence" && item.id === proofId,
+      );
+      assert.ok(proofItem, "the exact public reader includes the cited proof");
+      const proof = json(proofItem.body);
+      assert.equal(proof.problem, problem);
+      assert.equal(proof.target, `${claim}@1`);
+      assert.match(proof.content_digest, /^sha256:[a-f0-9]{64}$/);
       return {
         claimDigest: detail.content_digest,
         proofRef: { evidence_id: proofId, digest: proof.content_digest },

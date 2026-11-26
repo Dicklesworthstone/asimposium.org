@@ -1374,6 +1374,105 @@ await runLocalWorkerJourney(
     );
     console.log(JSON.stringify({ stage: "closing-synthesis-warning-publication", status: "pass" }));
 
+    // A private draft must recheck session authority after paid screening.
+    // Hold the actual Workerd request while a separate HTTP close commits.
+    const closingWriter = await enroll("synthesis-close-race", "usr_synthesis_close_race");
+    const closingSession = await call(
+      "/v1/sessions",
+      { problem_id: problemId, intent: "explore" },
+      closingWriter,
+      201,
+    );
+    const closingPath = `/v1/sessions/${closingSession.session_id}`;
+    const savedBeforeClose = await call(
+      `${closingPath}/synthesize`,
+      retainedBody,
+      closingWriter,
+      201,
+      "synthesis-saved-before-close",
+    );
+    const heldCall = (await fixtures.screeningCalls()) + 1;
+    await fixtures.holdScreeningCall(heldCall);
+    const pendingCloseDraft = call(
+      `${closingPath}/synthesize`,
+      retainedBody,
+      closingWriter,
+      409,
+      "synthesis-close-during-screening",
+    ).then(
+      (value) => ({ value }),
+      (error) => ({ error }),
+    );
+    let beforeClosedRefusal;
+    try {
+      const deadline = Date.now() + 10_000;
+      while ((await fixtures.screeningCalls()) < heldCall && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      assert.equal(await fixtures.screeningCalls(), heldCall, "draft reached the screening barrier");
+      await call(
+        `${closingPath}/close`,
+        { handback: "The saved private synthesis is ready; this session is closed.", promote: [] },
+        closingWriter,
+        201,
+        "close-while-synthesis-screening",
+      );
+      beforeClosedRefusal = await footprint();
+    } finally {
+      await fixtures.releaseScreeningCall();
+    }
+    const closedOutcome = await pendingCloseDraft;
+    if ("error" in closedOutcome) throw closedOutcome.error;
+    assert.equal(closedOutcome.value.code, "SESSION_CLOSED");
+    assert.deepEqual(
+      await footprint(),
+      beforeClosedRefusal,
+      "The refused draft creates no public event, projection, outbox or successful replay",
+    );
+    assert.equal(
+      (await env.DB.prepare("SELECT COUNT(*) AS n FROM synthesis_drafts WHERE session_id = ?")
+        .bind(closingSession.session_id)
+        .first()).n,
+      1,
+      "Only the previously accepted draft is retained",
+    );
+    assert.equal(
+      (await env.DB.prepare(
+        "SELECT COUNT(*) AS n FROM session_write_replays WHERE scope = 'synthesize' AND idempotency_key = ?",
+      ).bind("synthesis-close-during-screening").first()).n,
+      0,
+      "Refusal leaves the idempotency key unclaimed",
+    );
+    assert.equal(
+      (await env.DB.prepare(
+        "SELECT status FROM public_write_attempt_reservations WHERE route = 'synthesize' AND idempotency_key = ?",
+      ).bind("synthesis-close-during-screening").first()).status,
+      "settled_failed",
+    );
+    assert.deepEqual(
+      await call(
+        `${closingPath}/synthesize`,
+        retainedBody,
+        closingWriter,
+        200,
+        "synthesis-saved-before-close",
+      ),
+      savedBeforeClose,
+      "A completed draft receipt survives session closure",
+    );
+    assert.equal(
+      (await call(
+        `${closingPath}/synthesize`,
+        retainedBody,
+        closingWriter,
+        409,
+        "synthesis-new-after-close",
+      )).code,
+      "SESSION_CLOSED",
+    );
+    assert.equal(await fixtures.screeningCalls(), heldCall, "closed-session replay needs no screening");
+    console.log(JSON.stringify({ stage: "synthesis-close-during-screening", status: "pass" }));
+
     // W2.6 (79n, z3or): claims (anchored across a statement revision), their
     // versions and the syntheses rebuild from the log.
     const rebuilt = await assertProjectionsRebuild(env.DB, problemId);

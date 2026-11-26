@@ -2561,7 +2561,8 @@ export async function fixture(options: LocalD1Options = {}) {
       const keys = (await crypto.subtle.generateKey({ name: "Ed25519" }, true, [
         "sign",
         "verify",
-      ])) as CryptoKeyPair;
+      ])) as CryptoKey | CryptoKeyPair;
+      if (!("privateKey" in keys)) throw new Error("Expected an Ed25519 key pair");
       const publicKeyHex = Buffer.from(await crypto.subtle.exportKey("raw", keys.publicKey)).toString("hex");
       return {
         app: createApp({ screenPromotion }),
@@ -17881,6 +17882,210 @@ describe("committed promotion outbox nudge", () => {
   });
 
   describe("synthesis lifecycle and P13 anchor validation (W5.8b)", () => {
+    for (const change of [
+      "session close",
+      "credential revocation",
+      "membership removal",
+      "observer downgrade",
+      "problem archival",
+      "sponsor panic",
+      "Fellow pause",
+    ] as const) {
+      test(`synthesis draft rejects ${change} after screening without retaining a draft or replay`, async () => {
+        let beforeDraftCommit: (() => Promise<void>) | undefined;
+        let screened = false;
+        let screeningCalls = 0;
+        let changed = false;
+        // Deterministic SQLite transaction interleave; the native synthesis
+        // journey separately exercises the route over Workerd/D1/R2.
+        const f = await ledgerPackFixture({
+          screenPromotion: async (input) => {
+            if (input.kind === "synthesis") {
+              screeningCalls++;
+              screened = true;
+            }
+            return { decision: "pass", coarse_category: "benign-context", provider_status: "ok" };
+          },
+          beforeBatch: async () => {
+            if (!screened || beforeDraftCommit === undefined) return;
+            const mutate = beforeDraftCommit;
+            beforeDraftCommit = undefined;
+            await mutate();
+            changed = true;
+          },
+        });
+        const path = `${f.path}/synthesize`;
+        const key = `synthesis-authority-${change.replaceAll(" ", "-")}`;
+        const body = {
+          covers_through: Number(f.relation.seq),
+          body_md: "The exact claim is retained without upgrading its scientific standing.",
+          anchors: [{ target_kind: "claim", target_id: "C-1", target_version: 1 }],
+          omitted: [],
+          selection_policy: "Summarize the retained claim at this cut.",
+        };
+        const send = () =>
+          f.call(path, {
+            method: "POST",
+            headers: { "content-type": "application/json", "idempotency-key": key },
+            body: JSON.stringify(body),
+          });
+        const footprint = async () => ({
+          head: await f.db
+            .prepare("SELECT public_seq, chain_digest FROM problems WHERE id = 'P-4DSP'")
+            .first(),
+          events: (await f.db.prepare("SELECT id, seq FROM events ORDER BY problem_id, seq").all())
+            .results,
+          drafts: (
+            await f.db.prepare("SELECT synthesis_id FROM synthesis_drafts ORDER BY synthesis_id").all()
+          ).results,
+          replays: (
+            await f.db
+              .prepare("SELECT idempotency_key FROM session_write_replays WHERE scope = 'synthesize'")
+              .all()
+          ).results,
+        });
+        const before = await footprint();
+        beforeDraftCommit = async () => {
+          if (change === "session close") {
+            await f.post(`${f.path}/close`, {
+              handback: "Closed before the pending synthesis draft committed.",
+              promote: [],
+            });
+          } else if (change === "credential revocation") {
+            await new D1EnrollmentStore(f.db).revokeCredential({
+              sponsorId: f.binding.sponsorId,
+              fellowId: f.binding.fellowId,
+              credentialId: f.binding.credentialId,
+              eventId: `LEV-${"7".repeat(26)}`,
+              requestId: "7".repeat(64),
+              effectiveAt: Date.now(),
+            });
+          } else if (change === "membership removal") {
+            await f.db
+              .prepare("DELETE FROM problem_memberships WHERE problem_id = ? AND fellow_id = ?")
+              .bind("P-4DSP", f.binding.fellowId)
+              .run();
+          } else if (change === "observer downgrade") {
+            await f.db
+              .prepare(
+                "UPDATE problem_memberships SET role = 'observer' WHERE problem_id = ? AND fellow_id = ?",
+              )
+              .bind("P-4DSP", f.binding.fellowId)
+              .run();
+          } else if (change === "problem archival") {
+            await f.db
+              .prepare("UPDATE problems SET admission_mode = 'archived-read-only' WHERE id = ?")
+              .bind("P-4DSP")
+              .run();
+          } else if (change === "sponsor panic") {
+            await new D1EnrollmentStore(f.db).panicSponsor({
+              sponsorId: f.binding.sponsorId,
+              eventId: `LEV-${"8".repeat(26)}`,
+              requestId: "8".repeat(64),
+              effectiveAt: Date.now(),
+            });
+          } else {
+            await new D1EnrollmentStore(f.db).transitionFellow({
+              sponsorId: f.binding.sponsorId,
+              fellowId: f.binding.fellowId,
+              toStatus: "paused",
+              eventId: `LEV-${"9".repeat(26)}`,
+              requestId: "9".repeat(64),
+              effectiveAt: Date.now(),
+            });
+          }
+        };
+
+        const refused = await send();
+        expect(changed).toBe(true);
+        expect(screeningCalls).toBe(1);
+        expect(refused.status, await refused.clone().text()).toBe(
+          change === "session close" ? 409 : 403,
+        );
+        expect(ProblemDocumentSchema.parse(await refused.json()).code).toBe(
+          change === "session close" ? "SESSION_CLOSED" : "WRITE_REFUSED",
+        );
+        expect(await footprint()).toEqual(before);
+        expect(
+          await f.db
+            .prepare(
+              "SELECT status FROM public_write_attempt_reservations WHERE route = 'synthesize' AND idempotency_key = ?",
+            )
+            .bind(key)
+            .first<{ status: string }>(),
+        ).toEqual({ status: "settled_failed" });
+
+        // Refusal did not consume the replay identity. Once the steward
+        // restores access, the unchanged request can be retried safely.
+        if (change === "observer downgrade" || change === "problem archival") {
+          if (change === "observer downgrade") {
+            await f.db
+              .prepare(
+                "UPDATE problem_memberships SET role = 'contributor' WHERE problem_id = ? AND fellow_id = ?",
+              )
+              .bind("P-4DSP", f.binding.fellowId)
+              .run();
+          } else {
+            await f.db
+              .prepare("UPDATE problems SET admission_mode = 'open' WHERE id = ?")
+              .bind("P-4DSP")
+              .run();
+          }
+          const accepted = await send();
+          expect(accepted.status, await accepted.clone().text()).toBe(201);
+          expect(SynthesizeResponseSchema.parse(await accepted.json()).state).toBe("draft");
+          expect(screeningCalls).toBe(2);
+          const after = await footprint();
+          expect(after.head).toEqual(before.head);
+          expect(after.events).toEqual(before.events);
+          expect(after.drafts).toHaveLength(1);
+          expect(after.replays).toHaveLength(1);
+        }
+      });
+    }
+
+    test("accepted synthesis draft replays after session closure without another screen", async () => {
+      let screeningCalls = 0;
+      const f = await ledgerPackFixture({
+        screenPromotion: async (input) => {
+          if (input.kind === "synthesis") screeningCalls++;
+          return { decision: "pass", coarse_category: "benign-context", provider_status: "ok" };
+        },
+      });
+      const body = {
+        covers_through: Number(f.relation.seq),
+        body_md: "A private summary retained before closing the session.",
+        anchors: [{ target_kind: "claim", target_id: "C-1", target_version: 1 }],
+        omitted: [],
+        selection_policy: "Summarize the exact existing claim.",
+      };
+      const send = (key: string) =>
+        f.call(`${f.path}/synthesize`, {
+          method: "POST",
+          headers: { "content-type": "application/json", "idempotency-key": key },
+          body: JSON.stringify(body),
+        });
+      const first = await send("synthesis-before-close");
+      expect(first.status, await first.clone().text()).toBe(201);
+      const receipt = SynthesizeResponseSchema.parse(await first.json());
+      await f.post(`${f.path}/close`, { handback: "The private synthesis draft is saved.", promote: [] });
+      const replay = await send("synthesis-before-close");
+      expect(replay.status, await replay.clone().text()).toBe(200);
+      expect(SynthesizeResponseSchema.parse(await replay.json())).toEqual(receipt);
+      const fresh = await send("synthesis-after-close");
+      expect(fresh.status, await fresh.clone().text()).toBe(409);
+      expect(ProblemDocumentSchema.parse(await fresh.json()).code).toBe("SESSION_CLOSED");
+      expect(screeningCalls).toBe(1);
+      expect(
+        await f.db.prepare("SELECT COUNT(*) AS n FROM synthesis_drafts").first<{ n: number }>(),
+      ).toEqual({ n: 1 });
+      expect(
+        await f.db
+          .prepare("SELECT COUNT(*) AS n FROM session_write_replays WHERE scope = 'synthesize'")
+          .first<{ n: number }>(),
+      ).toEqual({ n: 1 });
+    });
+
     test("retains the original admission cutoff in private drafts after later statement review and revision", async () => {
       const screens: WorkersAIPromotionInput[] = [];
       const f = await fixture({
@@ -18388,7 +18593,7 @@ describe("committed promotion outbox nudge", () => {
         expect(synthesisScreens).toBe(2);
         expect(await footprint()).toEqual(before);
         expect(await f.db.prepare("SELECT state FROM synthesis_drafts WHERE synthesis_id = ?")
-          .bind(savedDraft.synthesis_id).first()).toEqual({ state: "draft" });
+          .bind(savedDraft.synthesis_id).first<{ state: string }>()).toEqual({ state: "draft" });
       });
     }
   });
