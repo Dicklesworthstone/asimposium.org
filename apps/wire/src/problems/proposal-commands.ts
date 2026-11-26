@@ -112,6 +112,25 @@ function refusal(input: ValidatedProblemInput): Response {
   return privateBriefResponse(validatedProblem(input));
 }
 
+function duplicateProposal(problemId: string): Response {
+  return refusal({
+    status: 409,
+    code: "POSSIBLE_DUPLICATE",
+    title: "A duplicate or near-duplicate problem already exists",
+    detail: `The problem statement matches existing problem '${problemId}'.`,
+    fixHint:
+      "Review the existing problem or provide distinct_because explaining the material distinction. The sponsor reviews that explanation for publication with this formulation.",
+    rule: "P11",
+    extensions: {
+      schema: SCHEMA,
+      example: {
+        distinct_because: "This investigates the variant under modular arithmetic.",
+      },
+      existing_problem_id: problemId,
+    },
+  });
+}
+
 function authorityRefused(): Response {
   return refusal({
     status: 403,
@@ -326,27 +345,8 @@ export async function runProblemProposalCommand(
 
     const fullHash = `sha256:${await normHash(request.statement)}`;
     const matches = await readableDuplicate(db, fullHash, binding.sponsorId);
-    if (matches && !request.distinct_because) {
-      return (
-        (await readReceipt()) ??
-        refusal({
-          status: 409,
-          code: "POSSIBLE_DUPLICATE",
-          title: "A duplicate or near-duplicate problem already exists",
-          detail: `The problem statement matches existing problem '${matches.id}'.`,
-          fixHint:
-            "Review the existing problem or provide distinct_because explaining the material distinction. The sponsor reviews that explanation for publication with this formulation.",
-          rule: "P11",
-          extensions: {
-            schema: SCHEMA,
-            example: {
-              distinct_because: "This investigates the variant under modular arithmetic.",
-            },
-            existing_problem_id: matches.id,
-          },
-        })
-      );
-    }
+    if (matches && !request.distinct_because)
+      return (await readReceipt()) ?? duplicateProposal(matches.id);
 
     const creationBudget = await getProblemCreationBudget(db, binding.sponsorId, now);
     if (creationBudget.remaining === 0)
@@ -379,15 +379,21 @@ export async function runProblemProposalCommand(
         ),
       ...problemCreationAccountingStatements(db, binding.sponsorId, problemId, now),
       // NOT NULL failure aborts every effect, including the draft above, when
-      // grant authority, exact brief version or boundaries changed in flight.
+      // grant authority, the exact brief, or a same-sponsor duplicate changed in flight.
       db
-        .prepare(`WITH authority AS (${problemIntentAuthoritySql(true)})
+        .prepare(`WITH authority AS (${problemIntentAuthoritySql(true)}),
+        duplicate AS (SELECT 1 WHERE ?17 = 1 OR EXISTS (
+          SELECT 1 FROM problem_statement_versions v JOIN problems p ON p.id = v.problem_id
+          WHERE v.norm_hash = ?10 AND p.status = 'private-draft' AND p.sponsor_id = ?2))
         INSERT INTO problem_statement_versions
         (problem_id,version,statement,norm_hash,falsifier,motivation,scope,out_of_scope,success_criteria,created_at,distinct_because,scientific_author_json)
-        VALUES (?5,1,CASE WHEN EXISTS (${WRITE_AUTHORITY}) AND (?6 IS NULL OR EXISTS (
+        VALUES (?5,1,CASE WHEN EXISTS (${WRITE_AUTHORITY})
+          AND (?16 IS NOT NULL OR NOT EXISTS (SELECT 1 FROM duplicate))
+          AND (?6 IS NULL OR EXISTS (
           SELECT 1 FROM sponsor_problem_briefs WHERE id = ?6 AND sponsor_id = ?2 AND status = 'active'
             AND version = ?7 AND (assigned_fellow_id IS NULL OR assigned_fellow_id = ?1)
-            AND (scope IS NULL OR ?8 IS NOT NULL))) THEN ?9 ELSE NULL END,?10,?11,?12,?8,?13,?14,?15,?16,
+            AND (scope IS NULL OR ?8 IS NOT NULL))) THEN ?9 ELSE NULL END,?10,?11,?12,?8,?13,?14,?15,
+          CASE WHEN EXISTS (SELECT 1 FROM duplicate) THEN ?16 END,
           (SELECT json_object('fellow_id',fellow_id,'sponsor_id',sponsor_id,'session_id',NULL,
             'model_self_declared',model,'harness',harness) FROM authority))`)
         .bind(
@@ -403,7 +409,8 @@ export async function runProblemProposalCommand(
           request.out_of_scope ?? null,
           request.success_criteria ?? null,
           timestamp,
-          matches ? (request.distinct_because ?? null) : null,
+          request.distinct_because ?? null,
+          matches === null ? 0 : 1,
         ),
       db
         .prepare(
@@ -469,6 +476,12 @@ export async function runProblemProposalCommand(
     if (creationRateLimited) {
       const budget = await getProblemCreationBudget(db, binding.sponsorId, now);
       if (budget.remaining === 0) return problemCreationRateLimitedProblem(budget);
+    }
+    // Another writer may have created the sponsor's first matching draft after
+    // our preflight. The batch rolled back its quota, brief adoption and receipt.
+    if (!request.distinct_because) {
+      const duplicate = await readableDuplicate(db, fullHash, binding.sponsorId);
+      if (duplicate) return (await readReceipt()) ?? duplicateProposal(duplicate.id);
     }
     throw new Error("PROBLEM_PROPOSAL_RECEIPT_UNCONFIRMED");
   } catch {

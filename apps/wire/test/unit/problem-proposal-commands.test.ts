@@ -104,6 +104,46 @@ test("an accepted key cannot identify changed prose, and an ordinary new-key dup
   expect(drafts(f)).toHaveLength(1);
 });
 
+for (const explanation of [undefined, "This version counts rooted trees with a prescribed depth."]) {
+  test(`a concurrent same-sponsor duplicate ${explanation ? "keeps its distinction" : "requires a distinction"} at commit`, async () => {
+    const f = await fixture();
+    const brief = await saveBrief(f);
+    let winnerId: string | undefined;
+    f.beforeCommit(async () => {
+      const winner = await f.propose(formulation, "duplicate-winner");
+      expect(winner.status).toBe(201);
+      winnerId = ProposeProblemResponseSchema.parse(await winner.json()).problem.id;
+    });
+    const request = {
+      ...formulation,
+      brief_id: brief.id,
+      expected_brief_version: brief.version,
+      ...(explanation ? { distinct_because: explanation } : {}),
+    };
+    const response = await f.propose(request, "duplicate-racer");
+    expect(winnerId).toBeDefined();
+    if (explanation) {
+      expect(response.status).toBe(201);
+      const admitted = ProposeProblemResponseSchema.parse(await response.json());
+      expect(admitted.problem.distinct_because).toBe(explanation);
+      expect(await (await f.propose(request, "duplicate-racer")).json()).toEqual(admitted);
+      expect(drafts(f)).toHaveLength(2);
+    } else {
+      expect(response.status).toBe(409);
+      expect(await response.json()).toMatchObject({
+        code: "POSSIBLE_DUPLICATE",
+        existing_problem_id: winnerId,
+      });
+      expect(drafts(f)).toHaveLength(1);
+      expect(f.sql.query("SELECT status FROM sponsor_problem_briefs WHERE id=?").get(brief.id)).toEqual({
+        status: "active",
+      });
+      expect(f.sql.query("SELECT * FROM problem_proposal_command_receipts").all()).toHaveLength(1);
+      expect((await getProblemCreationBudget(f.baseDb, f.principal.sponsorId, Date.now())).remaining).toBe(1);
+    }
+  });
+}
+
 test("a different command winning the same key rolls back every losing creation effect", async () => {
   const f = await fixture();
   let winner: unknown;
