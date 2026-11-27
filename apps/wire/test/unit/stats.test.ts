@@ -236,6 +236,36 @@ describe("Measured /stats.{json,md} face (asimposiumorg-rc-stats-runbooks-cost-m
     }
   });
 
+  test("collaboration covers every active problem and preserves the sponsor at session opening", async () => {
+    const sql = seedStatsDb();
+    try {
+      sql.exec(`WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i + 1 FROM n WHERE i < 1001)
+        INSERT INTO problems(id, created_at, updated_at, sponsor_id)
+        SELECT printf('P-SCALE-%04d', i), '2026-11-20T00:00:00Z', '2026-11-20T04:00:00Z',
+          'usr_alpha_0001' FROM n;
+        INSERT INTO sessions(session_id, fellow_id, problem_id, opened_at)
+        SELECT id || '-author', 'F-01AAAAAAAAAAAAAAAAAAAAAAAA', id, created_at
+        FROM problems WHERE id LIKE 'P-SCALE-%';
+        INSERT INTO sessions(session_id, fellow_id, problem_id, opened_at)
+        SELECT id || '-external', 'F-01BBBBBBBBBBBBBBBBBBBBBBBB', id,
+          CASE WHEN id <= 'P-SCALE-0500' THEN '2026-11-20T01:00:00Z'
+            ELSE '2026-11-20T03:00:00Z' END FROM problems WHERE id LIKE 'P-SCALE-%';
+        CREATE TABLE sponsor_fellow_transfers(transfer_id TEXT, fellow_id TEXT, status TEXT,
+          source_sponsor_id TEXT, target_sponsor_id TEXT, resolved_at INTEGER);
+        INSERT INTO sponsor_fellow_transfers VALUES('transfer', 'F-01BBBBBBBBBBBBBBBBBBBBBBBB',
+          'accepted', 'usr_beta_0002', 'usr_alpha_0001', unixepoch('2026-11-21') * 1000);
+        UPDATE enrollment_fellows SET sponsor_id = 'usr_alpha_0001'
+          WHERE fellow_id = 'F-01BBBBBBBBBBBBBBBBBBBBBBBB';`);
+      const { collaboration } = await loadPlatformStats(sqliteAsD1(sql));
+      expect(collaboration.active_problems_with_multiple_sponsors).toBe(1002);
+      expect(collaboration.multi_sponsor_active_problem_share.denominator).toBe(1003);
+      expect(collaboration.first_external_sponsor_sample_size).toBe(1002);
+      expect(collaboration.median_hours_to_first_external_sponsor).toBe(2.5);
+    } finally {
+      sql.close();
+    }
+  });
+
   test("published reproduction outcomes follow visibility of the source and its exact target", async () => {
     const { sqlite, db } = migratedSqliteD1();
     const now = "2026-11-20T00:00:00.000Z";
@@ -316,6 +346,12 @@ describe("Measured /stats.{json,md} face (asimposiumorg-rc-stats-runbooks-cost-m
       const restored = await quality();
       expect(restored.reproduction_pass_rate).toEqual({ numerator: 1, denominator: 1, rate: 1 });
       expect(restored.dead_ends_recorded).toBe(1);
+      control("problem", "hidden", 1);
+      const withheld = await loadPlatformStats(db, now);
+      expect(withheld.collaboration.public_problems).toBe(0);
+      expect(withheld.collaboration.active_problems).toBe(0);
+      expect(withheld.quality.dead_ends_recorded).toBe(0);
+      expect(withheld.quality.reproduction_pass_rate.denominator).toBe(0);
     } finally {
       sqlite.close();
     }

@@ -8,6 +8,7 @@ import {
 import type { Env } from "../env.ts";
 import {
   eventContentHiddenSql,
+  hiddenByContentControlSql,
   PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL,
 } from "../krater/public-content.ts";
 import { ScientificInputError } from "../ledger/scientific-checks.ts";
@@ -225,74 +226,70 @@ export async function loadPlatformStats(
   }
 
   // 1. Collaboration family (strictly scoped to listed public problems per Rule A2)
-  const publicProblemFilter = [
-    hasProblemStatus ? "status <> 'private-draft'" : "1=1",
-    hasProblemUnlisted ? "unlisted = 0" : "1=1",
-  ].join(" AND ");
-  const publicProblemFilterAliased = [
-    hasProblemStatus ? "p.status <> 'private-draft'" : "1=1",
-    hasProblemUnlisted ? "p.unlisted = 0" : "1=1",
-  ].join(" AND ");
-  const activeProblemFilter = hasProblemStatus
-    ? `status IN ('active', 'sharpening', 'under-result-review') AND ${hasProblemUnlisted ? "unlisted = 0" : "1=1"}`
-    : "1=1";
-  const activeProblemFilterAliased = hasProblemStatus
-    ? `p.status IN ('active', 'sharpening', 'under-result-review') AND ${hasProblemUnlisted ? "p.unlisted = 0" : "1=1"}`
-    : "1=1";
-  const publicScopedCount = (table: string, alias: string, extraWhere?: string): string => {
-    if (hasProblems) {
-      return `SELECT COUNT(*) AS value FROM ${table} ${alias} JOIN problems p ON p.id = ${alias}.problem_id WHERE ${publicProblemFilterAliased}${extraWhere ? ` AND (${extraWhere})` : ""}`;
-    }
-    return `SELECT COUNT(*) AS value FROM ${table} ${alias}${extraWhere ? ` WHERE ${extraWhere}` : ""}`;
-  };
+  const publicProblemFilter = `p.status <> 'private-draft' AND p.unlisted = 0${
+    tables.has("content_controls")
+      ? ` AND NOT ${hiddenByContentControlSql("p.id", "'problem'")}`
+      : ""
+  }`;
+  const activeProblemFilter = `${publicProblemFilter} AND p.status IN ('active', 'sharpening', 'under-result-review')`;
+  const publicScopedCount = (table: string, alias: string, extraWhere?: string): string =>
+    `SELECT COUNT(*) AS value FROM ${table} ${alias} JOIN problems p ON p.id = ${alias}.problem_id
+      WHERE ${publicProblemFilter}${extraWhere ? ` AND (${extraWhere})` : ""}`;
 
-  const publicProblems = hasProblems
-    ? await scalarInt(db, `SELECT COUNT(*) AS value FROM problems WHERE ${publicProblemFilter}`)
-    : 0;
-  const activeProblems = hasProblems
-    ? await scalarInt(db, `SELECT COUNT(*) AS value FROM problems WHERE ${activeProblemFilter}`)
-    : 0;
+  const publicProblems = await scalarInt(
+    db,
+    `SELECT COUNT(*) AS value FROM problems p WHERE ${publicProblemFilter}`,
+  );
+  const activeProblems = await scalarInt(
+    db,
+    `SELECT COUNT(*) AS value FROM problems p WHERE ${activeProblemFilter}`,
+  );
 
   let multiSponsorActiveProblems = 0;
-  const firstExternalHours: number[] = [];
-  if (hasProblems && hasSessions && hasFellows) {
-    const multiRows = await db
-      .prepare(
-        `SELECT p.id, COUNT(DISTINCT f.sponsor_id) AS sponsor_count
-         FROM problems p
-         JOIN sessions s ON s.problem_id = p.id
-         JOIN enrollment_fellows f ON f.fellow_id = s.fellow_id
-         WHERE ${activeProblemFilterAliased}
-         GROUP BY p.id
-         LIMIT 500`,
-      )
-      .all<{ id: string; sponsor_count: number }>();
-    multiSponsorActiveProblems = (multiRows.results ?? []).filter(
-      (r) => Number(r.sponsor_count) >= 2,
-    ).length;
-
-    if (hasProblemSponsor) {
-      const extRows = await db
-        .prepare(
-          `SELECT p.created_at AS problem_created_at, MIN(s.opened_at) AS first_ext_at
-           FROM problems p
-           JOIN sessions s ON s.problem_id = p.id
-           JOIN enrollment_fellows f ON f.fellow_id = s.fellow_id
-           WHERE ${publicProblemFilterAliased}
-             AND p.sponsor_id IS NOT NULL
-             AND f.sponsor_id <> p.sponsor_id
-           GROUP BY p.id
-           LIMIT 500`,
-        )
-        .all<{ problem_created_at: string; first_ext_at: string }>();
-      for (const row of extRows.results ?? []) {
-        const start = Date.parse(row.problem_created_at);
-        const firstExt = Date.parse(row.first_ext_at);
-        if (Number.isFinite(start) && Number.isFinite(firstExt) && firstExt >= start) {
-          firstExternalHours.push((firstExt - start) / 3_600_000);
-        }
-      }
-    }
+  let externalSampleSize = 0;
+  let medianExternalHours: number | null = null;
+  if (hasSessions && hasFellows) {
+    // A later bilateral transfer changes today's roster, never yesterday's
+    // collaboration. Recover the sponsor before the first subsequent transfer.
+    const sponsorAtOpen = tables.has("sponsor_fellow_transfers")
+      ? `COALESCE((SELECT transfer.source_sponsor_id FROM sponsor_fellow_transfers transfer
+           WHERE transfer.fellow_id = s.fellow_id AND transfer.status = 'accepted'
+             AND transfer.resolved_at > ROUND(unixepoch(s.opened_at, 'subsec') * 1000)
+           ORDER BY transfer.resolved_at, transfer.transfer_id LIMIT 1), f.sponsor_id)`
+      : "f.sponsor_id";
+    const publicSince = tables.has("events")
+      ? `(SELECT publication.created_at FROM events publication
+          WHERE publication.problem_id = p.id AND publication.object_id = p.id
+            AND publication.object_kind = 'problem' AND publication.type = 'problem.admitted'
+            AND publication.seq <= p.public_seq ORDER BY publication.seq LIMIT 1)`
+      : "p.created_at";
+    const row = await db
+      .prepare(`WITH participation AS (
+      SELECT p.id, ${activeProblemFilter} AS active,
+        ${hasProblemSponsor ? "p.sponsor_id" : "NULL"} AS problem_sponsor,
+        unixepoch(${publicSince}, 'subsec') AS published,
+        unixepoch(s.opened_at, 'subsec') AS opened, ${sponsorAtOpen} AS session_sponsor
+      FROM problems p JOIN sessions s ON s.problem_id = p.id
+      JOIN enrollment_fellows f ON f.fellow_id = s.fellow_id
+      WHERE ${publicProblemFilter}
+    ), per_problem AS (
+      SELECT id, active, COUNT(DISTINCT session_sponsor) AS sponsors,
+        MIN(CASE WHEN session_sponsor <> problem_sponsor AND opened >= published
+          THEN (opened - published) / 3600.0 END) AS first_hours
+      FROM participation GROUP BY id, active
+    ), ordered AS (
+      SELECT first_hours, ROW_NUMBER() OVER (ORDER BY first_hours) AS position,
+        COUNT(*) OVER () AS n FROM per_problem WHERE first_hours IS NOT NULL
+    )
+    SELECT (SELECT COUNT(*) FROM per_problem WHERE active AND sponsors >= 2) AS multi,
+      (SELECT COUNT(*) FROM ordered) AS sample_size,
+      (SELECT ROUND(AVG(first_hours), 4) FROM ordered
+        WHERE position IN ((n + 1) / 2, (n + 2) / 2)) AS median_hours`)
+      .first<{ multi: number; sample_size: number; median_hours: number | null }>();
+    if (!row) throw new Error("Public collaboration measurements are unavailable.");
+    multiSponsorActiveProblems = row.multi;
+    externalSampleSize = row.sample_size;
+    medianExternalHours = row.median_hours;
   }
 
   const sessionsOpened = hasSessions ? await scalarInt(db, publicScopedCount("sessions", "s")) : 0;
@@ -320,7 +317,7 @@ export async function loadPlatformStats(
     const problemRows = await db
       .prepare(
         `SELECT id, ${hasProblemSponsor ? "sponsor_id" : "NULL AS sponsor_id"}
-         FROM problems
+         FROM problems p
          WHERE ${activeProblemFilter}
          LIMIT 200`,
       )
@@ -480,8 +477,8 @@ export async function loadPlatformStats(
       active_problems: activeProblems,
       active_problems_with_multiple_sponsors: multiSponsorActiveProblems,
       multi_sponsor_active_problem_share: buildRate(multiSponsorActiveProblems, activeProblems),
-      median_hours_to_first_external_sponsor: median(firstExternalHours),
-      first_external_sponsor_sample_size: firstExternalHours.length,
+      median_hours_to_first_external_sponsor: medianExternalHours,
+      first_external_sponsor_sample_size: externalSampleSize,
       handback_completion_rate: buildRate(sessionsWithHandback, sessionsClosed),
     },
     quality: {
@@ -525,6 +522,11 @@ export async function loadPlatformStats(
       edge_cache_hit_ratio: UNAVAILABLE_UNTIL_DEPLOYED,
     },
     omitted: [
+      ...(tables.has("events")
+        ? [
+            "External-sponsor timing includes problems with a recorded public admission and a subsequent external session.",
+          ]
+        : []),
       ...(science.assessed < science.total
         ? [
             "Standing checks cover up to 16 claims ordered by problem and claim id. Review coverage and corroborated-awaiting-independence counts cover assessed claims only.",
