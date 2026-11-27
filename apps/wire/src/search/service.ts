@@ -27,6 +27,7 @@ import {
 import { readSearchContinuation, SearchContinuationError } from "./continuation";
 import { executeSearchPage } from "./page";
 import {
+  SEARCH_CLAIM_DISCOVERY_SQL,
   SEARCH_CLAIM_SOURCE_COLUMNS,
   SEARCH_CLAIM_SOURCE_SQL,
   SEARCH_EXACT_PROBLEM_SQL,
@@ -124,6 +125,7 @@ export async function executeSearch(
            JOIN problems p ON p.id = e.problem_id AND p.status <> 'private-draft' AND p.unlisted = 0
            WHERE job.kind = 'search.index' AND job.state = 'pending'
              AND ${PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL} AND ${SEARCH_PROBLEM_FILTER_SQL}
+             AND ${SEARCH_CLAIM_DISCOVERY_SQL}
            LIMIT 1`,
         )
         .bind(...searchProblemFilterBindings(pageQuery))

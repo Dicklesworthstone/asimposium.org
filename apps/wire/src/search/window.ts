@@ -2,6 +2,11 @@ import type { SearchResultItem } from "@asimposium/contracts";
 import { SEARCH_WINDOW_MAX, type SearchPageQuery } from "@asimposium/contracts/search-pagination";
 import type { D1Database } from "@cloudflare/workers-types";
 import {
+  offScopeClaimSql,
+  offScopeProblemSql,
+  offScopePublicationSql,
+} from "../discovery/public-scope.ts";
+import {
   eventContentHiddenSql,
   PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL,
 } from "../krater/public-content.ts";
@@ -61,6 +66,11 @@ export interface SearchWindow {
 export const SEARCH_PROBLEM_FILTER_SQL = `(? IS NULL OR p.status = ?)
   AND (? IS NULL OR EXISTS (SELECT 1 FROM json_each(p.areas) area WHERE area.value = ?))`;
 
+// Lexical ranking and its lag indicator share the global discovery scope.
+// An explicit reference still identifies its public object with its notice.
+export const SEARCH_CLAIM_DISCOVERY_SQL = `NOT ${offScopeProblemSql("p.id", "p.public_seq")}
+  AND NOT ${offScopeClaimSql("p.id", "claims.id", "p.public_seq")}`;
+
 export function searchProblemFilterBindings(query: SearchPageQuery): readonly (string | null)[] {
   return [query.status ?? null, query.status ?? null, query.area ?? null, query.area ?? null];
 }
@@ -117,6 +127,7 @@ JOIN claims ON claims.id = public_claim_fts.claim_id AND claims.problem_id = pub
   AND claims.statement = public_claim_fts.statement
 JOIN problems p ON p.id = claims.problem_id AND p.status <> 'private-draft' AND p.unlisted = 0
 WHERE public_claim_fts MATCH ? AND ${PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL}
+  AND ${SEARCH_CLAIM_DISCOVERY_SQL}
   AND ${SEARCH_PROBLEM_FILTER_SQL}
   AND NOT (claims.problem_id = ? AND claims.id = ?)
 ORDER BY rank ASC, public_claim_fts.problem_id ASC, public_claim_fts.claim_id ASC LIMIT ?`;
@@ -178,6 +189,7 @@ export const SEARCH_PROBLEM_KEYS_SQL = `${SEARCH_PROBLEM_SOURCES_SQL}
 SELECT 'problem' AS kind, ${SEARCH_PROBLEM_PIN_COLUMNS}, title, updated_at
 FROM readable_formulations
 WHERE (id LIKE ? ESCAPE '\\' OR title LIKE ? ESCAPE '\\') AND id <> ?
+  AND NOT ${offScopePublicationSql("readable_formulations.event_id")}
 ORDER BY id COLLATE BINARY ASC LIMIT ?`;
 
 /** A problem needs no claims or matching title words to be discoverable. */
@@ -185,6 +197,7 @@ export const SEARCH_PROBLEM_STATEMENT_KEYS_SQL = `${SEARCH_PROBLEM_SOURCES_SQL}
 SELECT 'problem-statement' AS kind, ${SEARCH_PROBLEM_PIN_COLUMNS}
 FROM readable_formulations
 WHERE id NOT IN (SELECT value FROM json_each(?)) AND statement LIKE ? ESCAPE '\\'
+  AND NOT ${offScopePublicationSql("readable_formulations.event_id")}
 ORDER BY id COLLATE BINARY ASC LIMIT ?`;
 
 export function verifiedSearchProblem(
@@ -225,6 +238,7 @@ JOIN selected ON selected.id = claims.id AND selected.problem_id = claims.proble
 JOIN problems p ON p.id = claims.problem_id AND p.status <> 'private-draft' AND p.unlisted = 0
 ${SEARCH_CLAIM_SOURCE_SQL}
 WHERE public_claim_fts MATCH ?
+  AND ${SEARCH_CLAIM_DISCOVERY_SQL}
 ORDER BY selected.ordinal`;
 
 // biome-ignore lint/suspicious/noControlCharactersInRegex: Control characters are not permitted in search identities.

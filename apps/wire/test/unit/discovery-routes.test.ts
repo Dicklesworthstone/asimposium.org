@@ -1777,6 +1777,55 @@ describe("area review needs on migrated SQLite (not D1 integration proof)", () =
 });
 
 describe("off-scope discovery boundaries on migrated SQLite (not D1 integration proof)", () => {
+  test("lexical search ranks only in-scope problems and claims while exact citations stay usable", async () => {
+    const { db, raw } = createMigratedDb();
+    try {
+      const formulation = seedScopeProblem(raw, "P-ALPHA");
+      seedPublicationNotice(raw, formulation, false, offScopeNotice);
+      seedScopeClaim(raw, "P-ALPHA", "C-1", 2);
+      seedScopeProblem(raw, "P-BETA");
+      const claim = seedScopeClaim(raw, "P-BETA", "C-1", 2);
+      seedPublicationNotice(raw, claim.eventId, false, offScopeNotice);
+      seedScopeClaim(raw, "P-BETA", "C-2", 3);
+      raw.run(`INSERT INTO public_claim_fts(claim_id,problem_id,statement)
+        SELECT id,problem_id,statement FROM claims`);
+      const app = createApp();
+      const search = async (q: string, kind: string) => {
+        const params = new URLSearchParams({ q, kind, limit: "1" });
+        const response = await app.fetch(
+          new Request(`https://a.asimposium.org/search.json?${params}`),
+          mockEnv(db),
+        );
+        expect(response.status).toBe(200);
+        return SearchResponseSchema.parse(await response.json());
+      };
+      for (const query of ["Scope fixture", "Published formulation"]) {
+        const page = await search(query, "problem");
+        expect(page.items.map((item) => item.id)).toEqual(["P-BETA"]);
+        expect(page.total_matches).toBe(1);
+        expect(page.cursor).toBeUndefined();
+      }
+      const page = await search("Exact statement", "claim");
+      expect(page.items.map((item) => [item.problem_id, item.id])).toEqual([["P-BETA", "C-2"]]);
+      expect(page.total_matches).toBe(1);
+      expect(page.cursor).toBeUndefined();
+      for (const [query, kind] of [
+        ["P-ALPHA", "problem"],
+        ["P-BETA#C-1", "claim"],
+      ] as const) {
+        expect((await search(query, kind)).items[0]).toMatchObject({
+          match_type: "exact_reference",
+          screening_notice: offScopeNotice,
+        });
+      }
+      seedScopeProblem(raw, "P-ALPHA", 2, 3);
+      expect((await search("Scope fixture", "problem")).total_matches).toBe(2);
+      expect((await search("Exact statement", "claim")).total_matches).toBe(2);
+    } finally {
+      raw.close();
+    }
+  });
+
   test("off-scope formulations leave global discovery while explicit work stays readable, and a clean successor restores discovery", async () => {
     const { db, raw } = createMigratedDb();
     try {
