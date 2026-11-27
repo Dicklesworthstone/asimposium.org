@@ -514,7 +514,7 @@ describe("human screening appeals", () => {
         decideScreeningAppeal(f.db, appellate, decision(a.appeal_id), "release"),
       ).rejects.toThrow("NOT_FOUND");
     }));
-  test("an automated rejection without attributable case ownership remains held", () =>
+  test("an automated rejection without attributable case ownership still refuses publication without fabricating a case", () =>
     withFixture(async (f) => {
       let screeningCalls = 0;
       const result = await screenPublicCandidate(
@@ -530,17 +530,17 @@ describe("human screening appeals", () => {
         f.input(),
       );
       expect(screeningCalls).toBe(1);
-      if (!(result instanceof Response)) throw new Error("Expected a screening hold");
-      expect(result.status).toBe(202);
+      if (!(result instanceof Response)) throw new Error("Expected a publication refusal");
+      expect(result.status).toBe(403);
       expect(await result.json()).toEqual({
-        code: "SCREENING_HOLD",
-        coarse_category: "provider-unavailable",
+        code: "POLICY_DENIED",
+        coarse_category: "injection",
         appeal: "SPONSOR_APPEAL_AVAILABLE",
       });
       expect(f.sql.query("SELECT COUNT(*) AS n FROM screening_cases").get()).toEqual({ n: 0 });
       expect(f.sql.query("SELECT COUNT(*) AS n FROM screening_refusals").get()).toEqual({ n: 0 });
     }));
-  test("direct automated 403 POLICY_DENIED persists an appealable QC case atomically and supports operator release (qot3)", () =>
+  test("direct automated 403 POLICY_DENIED retains a pending QC case for operator confirmation, independent appeal, and release (qot3)", () =>
     withFixture(async (f) => {
       const candidate = f.input();
       const rejectOnce = () =>
@@ -576,7 +576,7 @@ describe("human screening appeals", () => {
       expect(body.case_id).toMatch(/^QC-[0-9A-HJKMNP-TV-Z]{26}$/);
       const caseId = body.case_id as string;
 
-      // Retry of identical bytes returns the exact same QC case idempotently.
+      // Retry of identical bytes returns the exact same QC case idempotently without fabricating a human decision.
       const second = await rejectOnce();
       expect(second).toBeInstanceOf(Response);
       expect((second as Response).status).toBe(403);
@@ -584,59 +584,10 @@ describe("human screening appeals", () => {
       expect(f.sql.query("SELECT COUNT(*) AS n FROM screening_cases").get()).toEqual({ n: 1 });
       expect(f.sql.query("SELECT COUNT(*) AS n FROM screening_refusals").get()).toEqual({ n: 1 });
       expect(
-        f.sql.query("SELECT COUNT(*) AS n FROM moderation_log WHERE action='rejected'").get(),
+        f.sql.query("SELECT COUNT(*) AS n FROM moderation_log WHERE action='quarantined'").get(),
       ).toEqual({ n: 1 });
 
-      // Foreign sponsor cannot view or appeal the case.
-      expect((await sponsorScreeningCases(f.db, "usr_other", caseId)).cases).toEqual([]);
-      await expect(
-        submitScreeningAppeal(
-          f.db,
-          "usr_other",
-          { case_id: caseId, statement: explanation },
-          "foreign-direct",
-        ),
-      ).rejects.toThrow("NOT_FOUND");
-
-      // Accountable sponsor sees the directly-rejected case and submits an appeal.
-      const owned = await sponsorScreeningCases(f.db, SPONSOR, caseId);
-      expect(owned.cases).toHaveLength(1);
-      expect(owned.cases[0]?.state).toBe("rejected");
-      const appeal = await submitScreeningAppeal(
-        f.db,
-        SPONSOR,
-        { case_id: caseId, statement: explanation },
-        "appeal-direct-reject",
-      );
-
-      // Operator queue shows original_operator_id: null (no prior human operator).
-      const queue = await operatorScreeningAppeals(f.db, appeal.appeal_id);
-      expect(queue.appeals).toHaveLength(1);
-      expect(queue.appeals[0]?.original_operator_id).toBeNull();
-
-      // Appealing sponsor who is also an operator cannot decide their own appeal.
-      await expect(
-        decideScreeningAppeal(f.db, SPONSOR, decision(appeal.appeal_id), "self-direct"),
-      ).rejects.toThrow("REVIEWER");
-
-      // Any uninvolved allowlisted operator can release with fresh step-up auth.
-      const released = await decideScreeningAppeal(
-        f.db,
-        original,
-        decision(appeal.appeal_id, "release"),
-        "release-direct",
-      );
-      expect(released.state).toBe("released");
-      expect(released.audit_event_id).toMatch(/^OA-/);
-
-      // Exact-byte resubmission now publishes via operator-release without re-asking the model.
-      const screened = await f.screen(candidate);
-      if (screened instanceof Response) throw new Error(`Unexpected ${screened.status}`);
-      expect(screened.provenance.decision_path).toBe("operator-release");
-      await f.write(candidate, screened);
-      expect(f.state().events).toHaveLength(1);
-
-      // Automated rejection cases cannot be used as human-reviewed egregious cases for sponsor suspension.
+      // Unreviewed automated rejection cases cannot be used as human-reviewed egregious cases for sponsor suspension.
       const { suspendSponsor } = await import("../../src/moderation/sponsor-suspension");
       await expect(
         suspendSponsor(
@@ -654,9 +605,75 @@ describe("human screening appeals", () => {
           "suspend-auto-reject",
         ),
       ).rejects.toThrow("CASE");
+
+      // Operator confirms rejection before sponsor appeal opens; no fabricated decided_by.
+      expect(
+        (
+          await decideScreeningCase(f.db, original, {
+            caseId,
+            decision: "confirm_rejection",
+            reason,
+          })
+        ).ok,
+      ).toBe(true);
+      expect(
+        f.sql.query("SELECT COUNT(*) AS n FROM moderation_log WHERE action='rejected'").get(),
+      ).toEqual({ n: 1 });
+
+      // Foreign sponsor cannot view or appeal the case.
+      expect((await sponsorScreeningCases(f.db, "usr_other", caseId)).cases).toEqual([]);
+      await expect(
+        submitScreeningAppeal(
+          f.db,
+          "usr_other",
+          { case_id: caseId, statement: explanation },
+          "foreign-direct",
+        ),
+      ).rejects.toThrow("NOT_FOUND");
+
+      // Accountable sponsor sees the confirmed-rejected case and submits an appeal.
+      const owned = await sponsorScreeningCases(f.db, SPONSOR, caseId);
+      expect(owned.cases).toHaveLength(1);
+      expect(owned.cases[0]?.state).toBe("rejected");
+      const appeal = await submitScreeningAppeal(
+        f.db,
+        SPONSOR,
+        { case_id: caseId, statement: explanation },
+        "appeal-direct-reject",
+      );
+
+      // Operator queue preserves the real confirming operator for independent appellate review.
+      const queue = await operatorScreeningAppeals(f.db, appeal.appeal_id);
+      expect(queue.appeals).toHaveLength(1);
+      expect(queue.appeals[0]?.original_operator_id).toBe(original);
+
+      // Appealing sponsor and original confirming operator cannot decide the appeal.
+      await expect(
+        decideScreeningAppeal(f.db, SPONSOR, decision(appeal.appeal_id), "self-direct"),
+      ).rejects.toThrow("REVIEWER");
+      await expect(
+        decideScreeningAppeal(f.db, original, decision(appeal.appeal_id), "same-op-direct"),
+      ).rejects.toThrow("REVIEWER");
+
+      // An independent allowlisted operator can release with fresh step-up auth.
+      const released = await decideScreeningAppeal(
+        f.db,
+        appellate,
+        decision(appeal.appeal_id, "release"),
+        "release-direct",
+      );
+      expect(released.state).toBe("released");
+      expect(released.audit_event_id).toMatch(/^OA-/);
+
+      // Exact-byte resubmission now publishes via operator-release without re-asking the model.
+      const screened = await f.screen(candidate);
+      if (screened instanceof Response) throw new Error(`Unexpected ${screened.status}`);
+      expect(screened.provenance.decision_path).toBe("operator-release");
+      await f.write(candidate, screened);
+      expect(f.state().events).toHaveLength(1);
     }));
 
-  test("upholding an automated rejection appeal binds subsequent resubmissions against later model passes (qot3)", () =>
+  test("upholding an operator-confirmed rejection appeal binds subsequent resubmissions against later model passes (qot3)", () =>
     withFixture(async (f) => {
       const candidate = f.input(
         "For every positive integer n, an automated reject upheld by human review stays bound.",
@@ -680,6 +697,15 @@ describe("human screening appeals", () => {
       const caseId = body.case_id;
       if (!caseId) throw new Error("expected case_id");
 
+      expect(
+        (
+          await decideScreeningCase(f.db, original, {
+            caseId,
+            decision: "confirm_rejection",
+            reason,
+          })
+        ).ok,
+      ).toBe(true);
       const appeal = await submitScreeningAppeal(
         f.db,
         SPONSOR,
