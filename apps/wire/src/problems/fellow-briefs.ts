@@ -40,6 +40,23 @@ export function fellowMayReadAssignedBriefs(
   );
 }
 
+// Both the hello hint and the private directory must select the same assignments.
+const ACTIVE_ASSIGNMENT = "b.sponsor_id = ?2 AND b.assigned_fellow_id = ?1 AND b.status = 'active'";
+
+/** Only an authorized, successful empty read makes the directory optional. */
+export async function assignedBriefReadRequired(
+  db: D1Database,
+  binding: FellowCredentialBinding,
+): Promise<boolean> {
+  const row = await db
+    .prepare(`SELECT EXISTS (
+      SELECT 1 FROM sponsor_problem_briefs b WHERE ${ACTIVE_ASSIGNMENT}
+    ) AS assigned FROM (${problemIntentAuthoritySql(false)}) authority`)
+    .bind(binding.fellowId, binding.sponsorId, binding.credentialId, binding.tokenHash)
+    .first<{ assigned: number }>();
+  return row?.assigned !== 0;
+}
+
 interface BriefRow extends StoredProblemBoundaries {
   id: string | null;
   sponsor_id: string;
@@ -117,7 +134,7 @@ export function createFellowBriefRouter(options: {
           SELECT ${detail ? "b.*" : "b.id, b.title, b.updated_at"}
           FROM sponsor_problem_briefs b
           WHERE EXISTS (SELECT 1 FROM authority)
-            AND b.sponsor_id = ?2 AND b.assigned_fellow_id = ?1 AND b.status = 'active'
+            AND ${ACTIVE_ASSIGNMENT}
             AND ${detail ? "b.id = ?5" : "(?5 IS NULL OR b.id COLLATE BINARY > ?5)"}
           ORDER BY b.id COLLATE BINARY LIMIT ${detail ? 1 : FELLOW_PROBLEM_BRIEF_PAGE_SIZE + 1}
         ) SELECT a.fellow_status, a.event_budget, a.events_recorded, v.*

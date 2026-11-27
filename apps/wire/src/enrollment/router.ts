@@ -133,7 +133,7 @@ import { problemSlowModeHttp } from "../moderation/slow-mode-http.ts";
 import { sponsorSuspensionHttp } from "../moderation/sponsor-suspension-http.ts";
 import { getScreeningCase } from "../moderation/store.ts";
 import { getProblemCreationBudget } from "../problems/creation-quota.ts";
-import { fellowMayReadAssignedBriefs } from "../problems/fellow-briefs.ts";
+import { assignedBriefReadRequired, fellowMayReadAssignedBriefs } from "../problems/fellow-briefs.ts";
 import { rebuildSearchIndex, searchIndexHealth } from "../search/index-health";
 import { getRemainingBudget, parseSponsorLimit } from "../sessions/quota.ts";
 import { admitFellowRead, fellowReadBudgetHeaders } from "../sessions/read-quota.ts";
@@ -1525,9 +1525,37 @@ export async function buildHelloResponse(input: {
   // an unbound first session. It is a suggestion; the grant remains unbound.
   const sessionProblem =
     boundProblem ?? (openSessions?.length === 0 ? soleActiveAssignment : undefined);
-  // Fable §5.5 and the session admission path allow two open sessions.
+  const eventBudget = binding.grantedResources.eventBudget;
+  let grantHasCapacity = eventBudget === undefined;
+  if (db !== undefined && eventBudget !== undefined && eventBudget > 0) {
+    try {
+      // The admission route counts the same credential-attributed events. The
+      // indexed probe can stop at the budget even on a long-lived credential.
+      const row = await db
+        .prepare(`SELECT NOT EXISTS (SELECT 1 FROM events WHERE writer_credential_id = ?
+          LIMIT 1 OFFSET ?) AS available`)
+        .bind(binding.credentialId, eventBudget - 1)
+        .first<{ available: number }>();
+      grantHasCapacity = row?.available === 1;
+    } catch {
+      // Unknown grant usage cannot justify advertising a fresh session.
+    }
+  }
+  const briefEligible = fellowMayReadAssignedBriefs(binding, Date.now());
+  let briefReadRequired = true;
+  if (db !== undefined && briefEligible) {
+    try {
+      briefReadRequired = await assignedBriefReadRequired(db, binding);
+    } catch {
+      // Retain the authenticated directory read when its state is unknown.
+    }
+  }
+  // Session lifecycle is unscoped. Its grant lifetime and event budget still
+  // apply, and session admission rechecks the chosen problem before writing.
   const canOfferSessionOpen =
     binding.fellowStatus === "active" &&
+    (binding.grantedResources.fellowGrantExpiresAt ?? Infinity) > Date.now() &&
+    grantHasCapacity &&
     (openSessions?.length ?? 0) < 2 &&
     !openSessions?.some(({ problem_id }) => problem_id === boundProblem);
   let directiveReadRequired = true;
@@ -1595,13 +1623,14 @@ export async function buildHelloResponse(input: {
           },
         ]
       : []),
-    ...(fellowMayReadAssignedBriefs(binding, Date.now())
+    ...(briefEligible
       ? [
           {
-            action: "read" as const,
+            action: briefReadRequired ? ("read" as const) : ("reference" as const),
             url: `${service.stoaOrigin}/v1/problem-briefs`,
-            reason:
-              "Read private research briefs explicitly assigned to you by your current sponsor. Follow read_url for the complete intent, then draft your own formulation; a brief is not a public problem or scientific evidence.",
+            reason: briefReadRequired
+              ? "Check your assigned briefs. Follow read_url for the sponsor’s intent before drafting your own formulation."
+              : "No active briefs were assigned to you at this read. Check here for later assignments.",
           },
         ]
       : []),

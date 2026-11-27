@@ -8,8 +8,9 @@ import {
   type SaveProblemBriefRequest,
 } from "@asimposium/contracts";
 import { createApp } from "../../src/app.ts";
-import { createEnrollmentRouter } from "../../src/enrollment/router.ts";
+import { buildHelloResponse, createEnrollmentRouter } from "../../src/enrollment/router.ts";
 import type { Env } from "../../src/env.ts";
+import { writeLedgerEvent } from "../../src/krater/krater.ts";
 import {
   createFellowBriefRouter,
   fellowMayReadAssignedBriefs,
@@ -95,6 +96,76 @@ async function fixture(grants: Partial<MintEnrollmentRequest> = {}) {
   };
   return { ...f, reader: binding, readerToken: issued.token, router, request, save, env };
 }
+
+test("hello makes only a verified empty assigned-brief directory optional", async () => {
+  const f = await fixture();
+  const hint = async (db: Env["DB"]) => {
+    const face = await buildHelloResponse({ binding: f.reader, service: f.service, db });
+    return face.next_actions.find((item) => item.url.endsWith("/v1/problem-briefs"))?.action;
+  };
+  await f.save("peer-brief", { assigned_fellow_id: f.binding.fellowId });
+  expect(await hint(f.db)).toBe("reference");
+  await f.save("own-brief");
+  expect(await hint(f.db)).toBe("read");
+  f.sql.query("UPDATE sponsor_problem_briefs SET status='withdrawn' WHERE id='own-brief'").run();
+  expect(await hint(f.db)).toBe("reference");
+  const unavailable = {
+    prepare() {
+      throw new Error("database unavailable");
+    },
+  } as unknown as Env["DB"];
+  expect(await hint(unavailable)).toBe("read");
+});
+
+test("hello recommends opening a session only while the Fellow grant has capacity", async () => {
+  const f = await fixture({ requested_scopes: ["review"], event_budget: 1 });
+  const hello = async (binding = f.reader, db: Env["DB"] = f.db) => {
+    const face = await buildHelloResponse({ binding, service: f.service, db });
+    return face.next_actions.some((item) => item.action === "session.open");
+  };
+  expect(await hello()).toBe(true);
+  expect(
+    await hello({
+      ...f.reader,
+      grantedResources: { ...f.reader.grantedResources, fellowGrantExpiresAt: Date.now() - 1 },
+    }),
+  ).toBe(false);
+  expect(
+    await hello(
+      f.reader,
+      {
+        prepare() {
+          throw new Error("unavailable");
+        },
+      } as unknown as Env["DB"],
+    ),
+  ).toBe(false);
+  await writeLedgerEvent(
+    f.db,
+    {
+      problemId: f.target.problemId,
+      eventId: "E-hello-budget-used",
+      idempotencyKey: "hello-budget-used",
+      requestDigest: "a".repeat(64),
+      eventType: "hypothesis.created",
+      objectKind: "hypothesis",
+      objectId: "H-hello-budget",
+      objectVersion: 1,
+      payloadJson: JSON.stringify({ body_md: "Earlier research." }),
+      createdAt: new Date().toISOString(),
+      attribution: {
+        fellowId: f.reader.fellowId,
+        sponsorId: f.reader.sponsorId,
+        credentialId: f.reader.credentialId,
+        sessionId: "S-hello-budget",
+        modelSelfDeclared: f.reader.model,
+        harness: f.reader.harness,
+      },
+    },
+    { statementsAfterEvent: () => [] },
+  );
+  expect(await hello()).toBe(false);
+});
 
 test("hello leads an assigned Fellow from private sponsor intent into its own private draft", async () => {
   const f = await fixture();
