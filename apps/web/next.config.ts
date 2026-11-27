@@ -286,7 +286,7 @@ const nextConfig: AgoraNextConfig = {
         destination: `${stoaOrigin}/p/:slug/statements.${suffix}`,
         permanent: true,
       })),
-      ...["md", "json", "html"].map((suffix) => ({
+      ...["csl.json", "md", "json", "html", "bib"].map((suffix) => ({
         source: `/p/:slug/statements/:version.${suffix}`,
         destination: `${stoaOrigin}/p/:slug/statements/:version.${suffix}`,
         permanent: true,
