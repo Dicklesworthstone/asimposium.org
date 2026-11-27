@@ -5,7 +5,10 @@ import {
   ScientificProvenanceSchema,
 } from "@asimposium/contracts";
 import { hasStatementDefect } from "./dispositions.ts";
-import { scientificEvidenceClassEligible } from "./evidence-grounding.ts";
+import {
+  checkMatchesScientificTarget,
+  scientificEvidenceClassEligible,
+} from "./evidence-grounding.ts";
 
 /** Withdrawal or unavailable grounding removes positive authority, not history
  * or negative knowledge. The caller supplies one cursor-bounded snapshot and
@@ -19,6 +22,7 @@ export interface WithdrawalInputRow {
   readonly object_version: number;
   readonly target_version: number;
   readonly payload_sha256: string;
+  readonly content_digest?: string | null;
   readonly fellow_id: string;
   readonly withdrawn_event_id?: string | null;
   readonly withdrawn_kind?: string | null;
@@ -72,11 +76,18 @@ export function scientificInputEffects(
   const evidence = new Map(
     rows.filter((row) => row.type === "evidence.created").map((row) => [row.object_id, row]),
   );
+  const claimDigests = new Map(
+    rows
+      .filter((row) => row.type === "claim.created" || row.type === "claim.revised")
+      .map((row) => [`${row.claim_id}@${row.object_version}`, row.content_digest]),
+  );
   const dependents = new Map<string, Set<string>>();
   for (const row of rows) {
     if (row.type !== "evidence.created") continue;
     const payload = contents.get(row.event_id);
-    const references = payload ? evidenceDependencies(payload) : null;
+    const references = payload
+      ? evidenceDependencies(payload, claimDigests.get(`${row.claim_id}@${row.target_version}`))
+      : null;
     if (
       references === null ||
       !EvidenceResponseSchema.shape.computed_class.safeParse(payload?.computed_class).success
@@ -126,12 +137,14 @@ export function scientificInputEffects(
 
 function evidenceDependencies(
   payload: Record<string, unknown>,
+  claimDigest: string | null | undefined,
 ): ScientificEvidenceReference[] | null {
   const references: ScientificEvidenceReference[] = [];
   if (payload.falsification_check != null) {
     const check = GroundedFalsificationCheckSchema.safeParse(payload.falsification_check);
     if (
       !check.success ||
+      !checkMatchesScientificTarget(check.data, claimDigest, payload.direction) ||
       new Set(check.data.evidence.map((ref) => ref.evidence_id)).size !== check.data.evidence.length
     )
       return null;

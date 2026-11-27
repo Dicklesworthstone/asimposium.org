@@ -5,9 +5,12 @@ import {
   EvidenceGroundingError,
   readEvidenceGrounding,
 } from "../../src/ledger/evidence-grounding.ts";
-import { withGroundingFixture } from "./evidence-grounding-fixture.ts";
+import {
+  groundingClaim as claim,
+  groundingCheck,
+  withGroundingFixture,
+} from "./evidence-grounding-fixture.ts";
 
-const claim = { claimId: "C-1", version: 1 };
 const check = (reason: string) => (error: unknown) =>
   error instanceof EvidenceGroundingError && error.reason === reason;
 
@@ -44,6 +47,25 @@ for (const field of ["check", "method"] as const)
         check("unavailable"),
       );
     }));
+
+test("a derived source cannot ground a different statement or reverse a fired check", () =>
+  withGroundingFixture(async (f) => {
+    const base = f.add("E-base");
+    for (const [index, mismatch] of [
+      { target_digest: `sha256:${"b".repeat(64)}` },
+      { result: "fired" },
+    ].entries()) {
+      const middle = f.add(`E-mid${index}`, {
+        falsification_check: { ...groundingCheck([base]), ...mismatch },
+      });
+      const root = f.derived(`E-root${index}`, [middle], "method");
+      for (const reference of [middle, root])
+        await assert.rejects(
+          readEvidenceGrounding(f.db, "P-DEMO", claim, [reference]),
+          check("invalid"),
+        );
+    }
+  }));
 
 test("unrelated withdrawals do not invalidate a grounded route", () =>
   withGroundingFixture(async (f) => {
@@ -197,7 +219,7 @@ for (const remove of ["withdraw", "redact", "hide", "corrupt"] as const)
       const premise = f.add("E-premise");
       const original = f.add("E-proof", {
         computed_class: "assertion",
-        falsification_check: { evidence: [premise] },
+        falsification_check: groundingCheck([premise]),
       });
       assert.equal(
         (await readEvidenceGrounding(f.db, "P-DEMO", claim, [original], "full-write-up")).witnesses
@@ -253,7 +275,7 @@ for (const pins of [
 ])
   test(`malformed pins cannot disappear from traversal ${JSON.stringify(pins).slice(0, 60)}`, () =>
     withGroundingFixture(async (f) => {
-      const root = f.add("E-2", { falsification_check: { evidence: pins } });
+      const root = f.add("E-2", { falsification_check: { ...groundingCheck([]), evidence: pins } });
       await assert.rejects(
         readEvidenceGrounding(f.db, "P-DEMO", claim, [root]),
         EvidenceGroundingError,

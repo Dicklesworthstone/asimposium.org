@@ -7,11 +7,12 @@ import {
   readEvidenceGrounding,
 } from "../../src/ledger/evidence-grounding.ts";
 import { prepareScientificContentGuards } from "../../src/ledger/scientific-content-guards.ts";
+import { groundingCheck, groundingClaim } from "./evidence-grounding-fixture.ts";
 import { scientificContentFixture } from "./scientific-content-controls-fixture.ts";
 
 type Fixture = ReturnType<typeof scientificContentFixture>;
 const read = (f: Fixture, roots: readonly EvidenceReference[]) =>
-  readEvidenceGrounding(f.db, "P-DEMO", { claimId: "C-1", version: 1 }, roots);
+  readEvidenceGrounding(f.db, "P-DEMO", groundingClaim, roots);
 const unavailable = (error: unknown) =>
   error instanceof EvidenceGroundingError && error.reason === "unavailable";
 const invalid = (error: unknown) =>
@@ -162,7 +163,7 @@ test("both method and falsification-check dependencies honor current controls", 
   try {
     const method = f.evidence(1);
     const check = f.evidence(2);
-    const root = f.evidence(3, [method.ref], { falsification_check: { evidence: [check.ref] } });
+    const root = f.evidence(3, [method.ref], { falsification_check: groundingCheck([check.ref]) });
     assert.equal((await read(f, [root.ref])).witnesses.length, 3);
     f.control("#2");
     await assert.rejects(read(f, [root.ref]), unavailable);

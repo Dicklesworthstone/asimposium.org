@@ -1,3 +1,4 @@
+import { GroundedFalsificationCheckSchema } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
 import { eventContentHiddenSql, hiddenByContentControlSql } from "../krater/public-content.ts";
 import { scanFormalArtifact } from "./evidence-class.ts";
@@ -150,11 +151,26 @@ function references(value: unknown): EvidenceReference[] {
     return { evidence_id: ref.evidence_id, digest: ref.digest };
   });
 }
-function dependencies(payload: Record<string, unknown>): EvidenceReference[] {
+/** Evidence identity and version alone cannot bind a recorded check to a
+ * statement. The immutable claim digest and observed direction must agree. */
+export function checkMatchesScientificTarget(
+  check: { readonly target_digest: string; readonly result: string },
+  claimDigest: string | null | undefined,
+  direction: unknown,
+): boolean {
+  return (
+    check.target_digest === claimDigest &&
+    (check.result === "fired") === (direction === "refutes" || direction === "fails-to-reproduce")
+  );
+}
+
+function dependencies(payload: Record<string, unknown>, claimDigest: string): EvidenceReference[] {
   const result: EvidenceReference[] = [];
   if (payload.falsification_check != null) {
-    if (!record(payload.falsification_check)) throw new EvidenceGroundingError("invalid");
-    result.push(...references(payload.falsification_check.evidence));
+    const check = GroundedFalsificationCheckSchema.safeParse(payload.falsification_check);
+    if (!check.success || !checkMatchesScientificTarget(check.data, claimDigest, payload.direction))
+      throw new EvidenceGroundingError("invalid");
+    result.push(...references(check.data.evidence));
   }
   if (payload.scientific_provenance != null) {
     if (!record(payload.scientific_provenance)) throw new EvidenceGroundingError("invalid");
@@ -178,7 +194,7 @@ async function sha256(text: string): Promise<string> {
 export async function readEvidenceGrounding(
   db: D1Database,
   problemId: string,
-  claim: { readonly claimId: string; readonly version: number },
+  claim: { readonly claimId: string; readonly version: number; readonly contentDigest: string },
   requested: readonly EvidenceReference[],
   use: ScientificEvidenceUse = "grounding",
 ): Promise<{ roots: GroundedEvidence[]; witnesses: readonly GroundingWitness[] }> {
@@ -251,7 +267,7 @@ export async function readEvidenceGrounding(
     });
   }
   for (const source of resolved.values()) {
-    for (const pin of dependencies(source.payload)) {
+    for (const pin of dependencies(source.payload, claim.contentDigest)) {
       const dependency = resolved.get(pin.evidence_id);
       if (
         !dependency ||

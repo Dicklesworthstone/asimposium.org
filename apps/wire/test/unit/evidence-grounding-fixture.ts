@@ -97,7 +97,7 @@ export function groundingFixture() {
     return add(
       id,
       field === "check"
-        ? { falsification_check: { evidence: pins } }
+        ? { falsification_check: groundingCheck(pins) }
         : { scientific_provenance: { method: { evidence: pins } } },
     );
   }
@@ -105,6 +105,21 @@ export function groundingFixture() {
     sql.query("INSERT INTO scientific_withdrawals VALUES(?)").run(`event-${id}`);
   return { sql, db, add, derived, withdraw, calls: () => calls };
 }
+export const groundingClaim = {
+  claimId: "C-1",
+  version: 1,
+  contentDigest: `sha256:${"a".repeat(64)}`,
+};
+export function groundingCheck(evidence: readonly EvidenceReference[]) {
+  return {
+    target_digest: groundingClaim.contentDigest,
+    attempted_falsifier: "Compare the stated bound against the measured result.",
+    capable_of_failure: "A measurement outside the bound would disconfirm it.",
+    result: "survived",
+    evidence,
+  };
+}
+
 export async function withGroundingFixture(
   run: (f: ReturnType<typeof groundingFixture>) => Promise<void>,
 ) {

@@ -1102,6 +1102,41 @@ test("a confirming label cannot earn standing from an unsuccessful structured ve
   expect(reviewStateFromRecordedReviews(objection.reviewFacets)).toBe("contested");
 });
 
+test("a derived falsification check cannot corroborate a claim using a misbound ancestor", async () => {
+  const [claim, base, check, review] = await corpus();
+  if (!claim || !base || !check || !review || !check.payload_json)
+    throw new Error("Expected falsification corpus");
+  const original = JSON.parse(check.payload_json).falsification_check;
+  for (const [mismatch, expected] of [
+    [{ target_digest: `sha256:${"b".repeat(64)}` }, "open"],
+    [{ result: "fired" }, "open"],
+    [{}, "corroborated"],
+  ] as const) {
+    const middle = await changedPayload(check, {
+      falsification_check: { ...original, ...mismatch },
+    });
+    const derived = await changedPayload(
+      { ...check, seq: 4, event_id: "EVENT-4", object_id: "E-3" },
+      {
+        falsification_check: {
+          ...original,
+          evidence: [{ evidence_id: middle.object_id, digest: `sha256:${middle.payload_sha256}` }],
+        },
+      },
+    );
+    const folded = await foldScientificRows([
+      claim,
+      base,
+      middle,
+      derived,
+      { ...review, seq: 5, event_id: "EVENT-5" },
+    ]);
+    expect(folded.disposition).toBe(expected);
+    expect(folded.context.recorded_refutation_attempts).toBe(expected === "open" ? 0 : 2);
+    expect(folded.stale).toBe(expected === "open");
+  }
+});
+
 test("assertion-only reviews cannot upgrade standing or the positive review facet", async () => {
   const rows = await corpus();
   for (const basis of ["Looks right.", "**Looks correct!**", "I agree.", " ", undefined]) {
