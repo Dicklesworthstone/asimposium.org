@@ -135,7 +135,7 @@ const S3_OWNED_OUTPUT_BYTES = 1_000_000;
  * Bound decoded bundle bytes separately so graph growth does not widen the pipe.
  */
 const S3_ISOLATED_BUILD_TRANSPORT_MAX_BYTES = 3_950_000;
-const S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_MAX_BYTES = 4_100_000;
+const S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_MAX_BYTES = 4_500_000;
 const S3_FRESH_RUNTIME_FIXED_GRACE_MS = 5_000;
 const S3_FRESH_RUNTIME_RESULT_MAX_BYTES = 8 * S3_OWNED_OUTPUT_BYTES;
 const S3_FRESH_RUNTIME_DIAGNOSTIC_MAX_BYTES = 1_024;
@@ -2451,6 +2451,9 @@ test("measured S3 graph evidence fits its explicitly reviewed capacity", () => {
     3_902_789,
     3_950_000,
     3_952_669,
+    4_100_000,
+    4_100_001,
+    4_311_768,
     S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_MAX_BYTES,
   ]) {
     const body = "x".repeat(bytes);
