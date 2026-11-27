@@ -20,9 +20,10 @@ export const HERALD_DELIVERY_LIMITS = { batch: 4, timeoutMs: 5_000, maxBackoffMs
 // Every handshake, acknowledgement and wake uses the same current visibility
 // rule as public event tails. A retained problem row is not publication authority.
 // Dormant problems retain their ledger but also release live room sockets.
-export const HERALD_HEAD_SQL = `SELECT public_seq AS seq FROM problems
+const HERALD_HEAD_SCOPE_SQL = `FROM problems
   WHERE id = ? AND status NOT IN ('private-draft', 'dormant')
     AND NOT ${hiddenByContentControlSql("problems.id", "'problem'")}`;
+export const HERALD_HEAD_SQL = `SELECT public_seq AS seq ${HERALD_HEAD_SCOPE_SQL}`;
 export async function publicRoomHead(
   db: HeraldDatabase,
   id: string,
@@ -33,6 +34,27 @@ export async function publicRoomHead(
   if (results.length !== 1 || !roomCursor(results[0]?.seq))
     throw new Error("HERALD_HEAD_UNAVAILABLE");
   return { seq: results[0].seq };
+}
+
+/** Persistent SSE readers also need same-cursor visibility changes. Read the
+ * coalesced delivery generation in the same snapshot as the authorized head;
+ * this private transport marker is never exposed as a scientific cursor. */
+export async function publicRoomStreamHead(
+  db: HeraldDatabase,
+  id: string,
+): Promise<{ seq: number; generation: number } | null> {
+  if (!roomProblem(id)) throw new Error("HERALD_ROOM_ID_INVALID");
+  const { results } = await db
+    .prepare(`SELECT public_seq AS seq,
+      COALESCE((SELECT generation FROM herald_room_outbox WHERE problem_id = problems.id), 0)
+        AS generation ${HERALD_HEAD_SCOPE_SQL}`)
+    .bind(id)
+    .all<{ seq: number; generation: number }>();
+  const row = results[0];
+  if (results.length === 0) return null;
+  if (results.length !== 1 || !roomCursor(row?.seq) || !roomCursor(row?.generation))
+    throw new Error("HERALD_HEAD_UNAVAILABLE");
+  return { seq: row.seq, generation: row.generation };
 }
 export const HERALD_PENDING_SQL = `SELECT problem_id, generation, attempts FROM herald_room_outbox
   WHERE generation > delivered_generation AND retry_at <= ?

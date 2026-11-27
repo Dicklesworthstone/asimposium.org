@@ -377,6 +377,44 @@ describe("Agora Herald progressive WS -> SSE -> Poll upgrade (kfag)", () => {
   const notice = { data: JSON.stringify({ control: "resync", through: 2 }) };
 
   for (const transport of ["ws", "sse"]) {
+    test(`a quiet healthy ${transport} reconciles a hidden object when its wake is lost`, async () => {
+      let heads = 0;
+      let hidden = false;
+      const f = publicRoom(async (url, init) => {
+        assert.equal(String(url), "https://a.asimposium.org/p/P-DEMO.json");
+        assert.equal(init?.method, "HEAD", "live recovery reads validators, not global cursors");
+        heads++;
+        return hidden
+          ? new Response(null, { headers: { etag: '"withheld-object"' } })
+          : new Response(null, { status: 304, headers: { etag: '"p1"' } });
+      });
+      const socket = f.sockets[0]!;
+      if (transport === "ws") {
+        socket.emit("open");
+        socket.emit("message", notice);
+      } else {
+        socket.emit("error");
+        f.sources[0]!.emit("resync", notice);
+      }
+      await settle();
+      assert.equal(heads, 1);
+      hidden = true;
+      // The scientific cursor and transport stay healthy; no second resync
+      // arrives to rescue the reader from an omitted notification.
+      for (let i = 0; i < 3; i++) {
+        await f.clock.advance(20_000);
+        if (transport === "ws") socket.emit("message", { data: "pong" });
+      }
+      await settle();
+      assert.equal(f.watch.transport, transport);
+      assert.equal(heads, 2, "bounded reconciliation must inspect the exact rendered resource");
+      assert.equal(f.refreshes(), 1, "withdrawn bytes must trigger a server reread");
+      f.watch.stop();
+      assert.equal(f.clock.timers.size, 0);
+    });
+  }
+
+  for (const transport of ["ws", "sse"]) {
     test(`a single ${transport} notice recovers a failed validator read without another push`, async () => {
       let heads = 0;
       let polls = 0;

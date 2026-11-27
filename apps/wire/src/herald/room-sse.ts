@@ -14,8 +14,9 @@ import {
   roomProblem,
 } from "../../../../packages/contracts/src/herald-room-model.ts";
 import { SERVICE_ENVELOPE_HEADER } from "../auth/http.ts";
-import { type HeraldDatabase, publicRoomHead } from "./outbox.ts";
+import { type HeraldDatabase, publicRoomStreamHead } from "./outbox.ts";
 import { roomRefusal } from "./room-http.ts";
+import { heraldRoomSchemaReady } from "./runtime.ts";
 
 export interface HeraldSseOptions {
   readonly lifetimeMs?: number;
@@ -86,11 +87,12 @@ export async function heraldSseFetch(
   const since = parseRoomSince(url.searchParams);
   if (since === undefined) return roomRefusal("query", request.method);
   let db: HeraldDatabase | undefined;
-  let initialHead: { seq: number } | null;
+  let initialHead: { seq: number; generation: number } | null;
   try {
     db = env.DB;
     if (db === undefined) return roomRefusal("unavailable", request.method);
-    initialHead = await publicRoomHead(db, problem);
+    if (!(await heraldRoomSchemaReady(db))) return roomRefusal("unavailable", request.method);
+    initialHead = await publicRoomStreamHead(db, problem);
   } catch {
     return roomRefusal("unavailable", request.method);
   }
@@ -139,6 +141,7 @@ export async function heraldSseFetch(
         const startedAt = now();
         let lastKeepalive = startedAt;
         let announced = initialHead.seq;
+        let generation = initialHead.generation;
         if (!enqueue(`retry: ${HERALD_ROOM_LIMITS.retrySeconds * 1000}\n\n`)) return;
         if (!enqueue(`event: resync\ndata: ${roomNotice(problem, since, announced)}\n\n`)) return;
 
@@ -154,9 +157,9 @@ export async function heraldSseFetch(
           const ok = await sleep(Math.min(pollIntervalMs, remaining), internalAbort.signal);
           if (!ok || internalAbort.signal.aborted) break;
 
-          let current: { seq: number } | null;
+          let current: { seq: number; generation: number } | null;
           try {
-            current = await publicRoomHead(db, problem);
+            current = await publicRoomStreamHead(db, problem);
           } catch {
             enqueue(
               `event: reconnect\ndata: ${JSON.stringify({ retry_ms: HERALD_ROOM_LIMITS.retrySeconds * 1000 })}\n\n`,
@@ -167,13 +170,20 @@ export async function heraldSseFetch(
             enqueue(`event: closed\ndata: ${JSON.stringify({ reason: "access-ended" })}\n\n`);
             break;
           }
-          if (current.seq > announced) {
+          if (current.seq < announced) {
+            enqueue(
+              `event: reconnect\ndata: ${JSON.stringify({ retry_ms: HERALD_ROOM_LIMITS.retrySeconds * 1000 })}\n\n`,
+            );
+            break;
+          }
+          if (current.seq > announced || current.generation !== generation) {
             if (
               !enqueue(`event: resync\ndata: ${roomNotice(problem, announced, current.seq)}\n\n`)
             ) {
               break;
             }
             announced = current.seq;
+            generation = current.generation;
             lastKeepalive = now();
           } else if (now() - lastKeepalive >= keepaliveMs) {
             if (!enqueue(": keepalive\n\n")) break;

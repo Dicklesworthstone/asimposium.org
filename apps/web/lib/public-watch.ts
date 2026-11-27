@@ -283,6 +283,7 @@ export class PublicLedgerWatch {
   private heartbeatTimer: Timer | undefined;
   private liveDeadline: Timer | undefined;
   private reconnectTimer: Timer | undefined;
+  private reconcileTimer: Timer | undefined;
   private liveTransport: PublicWatchTransport = "poll";
 
   constructor(private readonly options: PublicWatchOptions) {
@@ -396,6 +397,10 @@ export class PublicLedgerWatch {
 
   private closeLiveTransports(): void {
     this.clearLiveDeadline();
+    if (this.reconcileTimer !== undefined) {
+      this.runtime.clearTimer(this.reconcileTimer);
+      this.reconcileTimer = undefined;
+    }
     if (this.heartbeatTimer !== undefined) {
       this.runtime.clearTimer(this.heartbeatTimer);
       this.heartbeatTimer = undefined;
@@ -462,6 +467,28 @@ export class PublicLedgerWatch {
     this.liveDeadline = this.runtime.setTimer(onTimeout, delay);
   }
 
+  /** Push is an optimization, never proof that the rendered bytes are current.
+   * A missed wake or a cached router refresh must not strand a healthy room on
+   * withdrawn content. Reconcile exact validators at the same bounded cadence
+   * as quiet polling, without polling /cursor or interrupting the live room. */
+  private armLiveReconciliation(generation: number): void {
+    if (this.reconcileTimer !== undefined) return;
+    this.reconcileTimer = this.runtime.setTimer(() => {
+      this.reconcileTimer = undefined;
+      if (
+        !this.running ||
+        !this.active ||
+        !this.configured ||
+        this.generation !== generation ||
+        this.liveTransport === "poll"
+      )
+        return;
+      this.forceProbe = true;
+      if (!this.polling) void this.probeTargetsOnly(generation);
+      this.armLiveReconciliation(generation);
+    }, PUBLIC_WATCH_INTERVAL_MS * PUBLIC_WATCH_RECONCILE_POLLS);
+  }
+
   private scheduleHeartbeat(
     sock: PublicWatchSocket,
     generation: number,
@@ -524,6 +551,7 @@ export class PublicLedgerWatch {
       if (through === undefined) return;
       receivedNotice = true;
       this.clearLiveDeadline();
+      this.armLiveReconciliation(generation);
       try {
         sock.send(JSON.stringify({ ack: through }));
       } catch {
@@ -582,6 +610,7 @@ export class PublicLedgerWatch {
       if (through === undefined) return;
       if (!receivedNotice) {
         receivedNotice = true;
+        this.armLiveReconciliation(generation);
         // EventSource hides keepalive comments. Even a quiet stream sends a
         // terminal event at the server's lifetime limit.
         this.armLiveDeadline(

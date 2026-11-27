@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 
 // Herald rooms (beads asimposiumorg-f37v / W7) on real local Workerd with the
-// exported HeraldRoom Durable Object, D1 migrations 0078/0157 and the production
+// exported HeraldRoom Durable Object, D1 migrations 0078/0157/0164 and the production
 // heraldRoomFetch/scheduleHeraldDelivery layering. A live sponsor-approved
 // Fellow credential upgrades to a WebSocket (101) with the room protocol; a
 // committed public write then reaches the open socket. Missing upgrade,
@@ -11,7 +11,8 @@ import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 // A database missing room delivery or moderation-wake schema refuses the
 // upgrade fail-closed instead of opening a room that misses a withdrawal.
 // Whole-problem moderation evicts idle sockets without advancing public_seq;
-// object moderation preserves room access, and a later restoration reopens it.
+// object moderation preserves room access and refreshes WS/SSE readers without
+// inventing an event. A later whole-problem restoration reopens the room.
 // A 45-day dormant transition evicts a settled live socket; public tails stay
 // readable, and accepted evidence reactivates the room through migration 0118.
 //
@@ -57,7 +58,11 @@ await runLocalWorkerJourney(
         "SELECT type, name, sql FROM sqlite_master WHERE name LIKE 'herald_room_%' AND sql IS NOT NULL ORDER BY CASE type WHEN 'table' THEN 0 ELSE 1 END",
       ).all()
     ).results;
-    assert.equal(heraldObjects.length, 8, "0078/0157 create one table, one index and six triggers");
+    assert.equal(
+      heraldObjects.length,
+      9,
+      "0078/0157/0164 create one table, one index and seven triggers",
+    );
     for (const { type, name } of [...heraldObjects].reverse())
       await env.DB.prepare(`DROP ${type.toUpperCase()} "${name}"`).run();
     const unmigrated = await open({
@@ -70,9 +75,13 @@ await runLocalWorkerJourney(
     const moderationWake = heraldObjects.find(
       ({ name }) => name === "herald_room_content_control_insert",
     );
+    const objectWake = heraldObjects.find(
+      ({ name }) => name === "herald_room_object_control_insert",
+    );
     assert.ok(moderationWake);
+    assert.ok(objectWake);
     for (const { name, sql } of heraldObjects)
-      if (name !== moderationWake.name) await env.DB.prepare(sql).run();
+      if (name !== moderationWake.name && name !== objectWake.name) await env.DB.prepare(sql).run();
     const missingModerationWake = await open({
       upgrade: "websocket",
       authorization: `Bearer ${viewer}`,
@@ -81,6 +90,18 @@ await runLocalWorkerJourney(
     assert.equal(missingModerationWake.status, 503, "missing moderation wake refuses the room");
     assert.equal((await missingModerationWake.json()).code, "ROOM_UNAVAILABLE");
     await env.DB.prepare(moderationWake.sql).run();
+    const missingObjectWake = await open({
+      upgrade: "websocket",
+      "sec-websocket-protocol": PROTOCOL,
+    });
+    assert.equal(missingObjectWake.status, 503, "missing object visibility wake refuses the room");
+    assert.equal((await missingObjectWake.json()).code, "ROOM_UNAVAILABLE");
+    const missingSseWake = await worker.fetch(`${origin}/p/${problem}/room/sse`, {
+      headers: { "User-Agent": userAgent },
+    });
+    assert.equal(missingSseWake.status, 503, "SSE cannot accept a stream that misses object hides");
+    assert.equal((await missingSseWake.json()).code, "ROOM_UNAVAILABLE");
+    await env.DB.prepare(objectWake.sql).run();
 
     // Refusals: non-upgrade gets 426; S-6 cookies and bogus bearer credentials get 401.
     // Per Fable §11 (kfag), public problem rooms also accept unauthenticated human viewers
@@ -209,9 +230,8 @@ await runLocalWorkerJourney(
     );
     await new Promise((resolve) => setTimeout(resolve, 500));
 
-    // Moderation is not scientific progress. An object hide keeps the problem
-    // room usable; a sponsor's whole-problem hide must wake and evict the idle
-    // socket through the same committed queue without needing another event.
+    // Moderation is not scientific progress. An object hide keeps the room
+    // usable but must refresh both WS and SSE readers at the same event cursor.
     const headBeforeHide = await env.DB.prepare("SELECT public_seq FROM problems WHERE id = ?")
       .bind(problem)
       .first();
@@ -222,41 +242,153 @@ await runLocalWorkerJourney(
         action,
         reason: "Exercise room visibility against current moderation.",
       });
-    await control("claim", `${problem}/${promoted.claim_id}`, "hide");
-    await fixtures.deliverHeraldTick();
-    assert.equal(socket.readyState, 1, "a claim hide does not close its public problem room");
-    await control("claim", `${problem}/${promoted.claim_id}`, "restore");
-    await sponsorCall(OWNER, "POST", `/v1/sponsors/problems/${problem}/hide`, "problem.hide", {
-      problem_id: problem,
-      reason: "Withdraw the problem while its room is idle.",
-      step_up_authenticated_at: Math.floor(Date.now() / 1000),
+    const streamAbort = new AbortController();
+    const stream = await worker.fetch(`${origin}/p/${problem}/room/sse`, {
+      headers: { "User-Agent": userAgent },
+      signal: streamAbort.signal,
     });
-    assert.deepEqual(
-      await env.DB.prepare("SELECT public_seq FROM problems WHERE id = ?").bind(problem).first(),
-      headBeforeHide,
-      "hiding a problem preserves its scientific cursor",
-    );
-    const hidden = await open({
-      upgrade: "websocket",
-      authorization: `Bearer ${viewer}`,
-      "sec-websocket-protocol": PROTOCOL,
-    });
-    assert.equal(hidden.status, 404, "current moderation refuses a new connection");
-    await hidden.text();
-    assert.equal((await fixtures.deliverHeraldTick()).retry, 0);
-    for (let i = 0; i < 100 && closes.length === 0; i++)
-      await new Promise((resolve) => setTimeout(resolve, 50));
-    assert.ok(closes[0]?.startsWith("1008:"), "the committed hide evicts the idle room");
-    await control("problem", problem, "restore");
-    const restored = await open({
-      upgrade: "websocket",
-      authorization: `Bearer ${viewer}`,
-      "sec-websocket-protocol": PROTOCOL,
-    });
-    assert.equal(restored.status, 101, "the current restoration reopens the room");
-    assert.ok(restored.webSocket);
-    restored.webSocket.accept();
-    restored.webSocket.close(1000, "done");
+    assert.equal(stream.status, 200);
+    const streamReader = stream.body.getReader();
+    const decoder = new TextDecoder();
+    const streamNotices = [];
+    let streamBytes = "";
+    let streamError;
+    const streamRead = (async () => {
+      try {
+        let buffer = "";
+        while (true) {
+          const part = await streamReader.read();
+          if (part.done) return;
+          const text = decoder.decode(part.value, { stream: true });
+          streamBytes += text;
+          buffer += text;
+          while (true) {
+            const boundary = buffer.indexOf("\n\n");
+            if (boundary < 0) break;
+            const frame = buffer.slice(0, boundary);
+            buffer = buffer.slice(boundary + 2);
+            if (!frame.startsWith("event: resync\n")) continue;
+            streamNotices.push(JSON.parse(frame.split("\ndata: ")[1]));
+          }
+        }
+      } catch (error) {
+        if (!streamAbort.signal.aborted) streamError = error;
+      }
+    })();
+    const waitForNotice = async (predicate, message) => {
+      for (let i = 0; i < 100 && !predicate(); i++)
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      assert.ok(predicate(), message);
+      assert.equal(streamError, undefined, "the live SSE stream remains readable");
+    };
+    try {
+      await waitForNotice(
+        () => streamNotices.length === 1,
+        "SSE announces its current public head",
+      );
+      const privateBefore = [messages.length, streamNotices.length];
+      await call(
+        `/v1/sessions/${session}/workshop`,
+        {
+          type: "scratch",
+          title: "Private room isolation control",
+          body_md: "PRIVATE-HERALD-VISIBILITY-CANARY",
+        },
+        author,
+        201,
+      );
+      await fixtures.deliverHeraldTick();
+      await new Promise((resolve) => setTimeout(resolve, 1700));
+      assert.deepEqual(
+        [messages.length, streamNotices.length],
+        privateBefore,
+        "a private workshop push must not wake either public subscriber",
+      );
+
+      for (const action of ["hide", "restore"]) {
+        const beforeControl = [messages.length, streamNotices.length];
+        await control("claim", `${problem}/${promoted.claim_id}`, action);
+        await fixtures.deliverHeraldTick();
+        await waitForNotice(
+          () => messages.length > beforeControl[0] && streamNotices.length > beforeControl[1],
+          `claim ${action} refreshes both live transports without another scientific event`,
+        );
+        assert.equal(socket.readyState, 1, `claim ${action} preserves its public problem room`);
+        assert.equal(JSON.parse(messages.at(-1)).through, headBeforeHide.public_seq);
+        assert.equal(streamNotices.at(-1).through, headBeforeHide.public_seq);
+        assert.deepEqual(
+          await env.DB.prepare("SELECT public_seq FROM problems WHERE id = ?")
+            .bind(problem)
+            .first(),
+          headBeforeHide,
+          "object visibility does not manufacture scientific progress",
+        );
+        const face = await worker.fetch(`${origin}/p/${problem}/claims/${promoted.claim_id}.json`, {
+          headers: { "User-Agent": userAgent },
+        });
+        assert.equal(
+          face.status,
+          action === "hide" ? 403 : 200,
+          `a ${action} notification leads to the current authoritative reader`,
+        );
+        const faceText = await face.text();
+        if (action === "hide") {
+          assert.equal(JSON.parse(faceText).code, "CONTENT_HIDDEN");
+          assert.ok(!faceText.includes("Zero squared is even in the room."));
+        } else {
+          assert.ok(faceText.includes("Zero squared is even in the room."));
+        }
+        await Promise.all(pending);
+        await new Promise((resolve) => setTimeout(resolve, 300));
+      }
+      for (const bytes of [messages.join("\n"), streamBytes]) {
+        assert.ok(!bytes.includes("PRIVATE-HERALD-VISIBILITY-CANARY"));
+        assert.ok(!bytes.includes("Zero squared is even in the room."));
+        assert.ok(!bytes.includes("Exercise room visibility"));
+      }
+      // A whole-problem hide must still wake and evict both idle transports.
+      await sponsorCall(OWNER, "POST", `/v1/sponsors/problems/${problem}/hide`, "problem.hide", {
+        problem_id: problem,
+        reason: "Withdraw the problem while its room is idle.",
+        step_up_authenticated_at: Math.floor(Date.now() / 1000),
+      });
+      assert.deepEqual(
+        await env.DB.prepare("SELECT public_seq FROM problems WHERE id = ?").bind(problem).first(),
+        headBeforeHide,
+        "hiding a problem preserves its scientific cursor",
+      );
+      const hidden = await open({
+        upgrade: "websocket",
+        authorization: `Bearer ${viewer}`,
+        "sec-websocket-protocol": PROTOCOL,
+      });
+      assert.equal(hidden.status, 404, "current moderation refuses a new connection");
+      await hidden.text();
+      assert.equal((await fixtures.deliverHeraldTick()).retry, 0);
+      await waitForNotice(
+        () =>
+          closes.length > 0 &&
+          streamBytes.includes('event: closed\ndata: {"reason":"access-ended"}'),
+        "the committed hide evicts both idle public transports",
+      );
+      assert.ok(closes[0]?.startsWith("1008:"));
+      await streamRead;
+      await control("problem", problem, "restore");
+      const restored = await open({
+        upgrade: "websocket",
+        authorization: `Bearer ${viewer}`,
+        "sec-websocket-protocol": PROTOCOL,
+      });
+      assert.equal(restored.status, 101, "the current restoration reopens the room");
+      assert.ok(restored.webSocket);
+      restored.webSocket.accept();
+      restored.webSocket.close(1000, "done");
+    } finally {
+      streamAbort.abort();
+      await streamReader.cancel().catch(() => {});
+      await streamRead;
+      streamReader.releaseLock();
+    }
 
     // A true dormancy transition evicts an existing Durable Object connection.
     // The ledger remains readable, and an ordinary evidence write reopens it.
@@ -375,21 +507,31 @@ await runLocalWorkerJourney(
     assert.ok(authorFellow && viewerFellow);
     const workshopScope = { fellow_id: authorFellow.fellow_id, problem_id: problem };
     const ticketFor = (sponsor = OWNER, scope = workshopScope, expected = 200) =>
-      sponsorCall(sponsor, "POST", "/v1/sponsors/workshop/room-ticket", "workshop.read", scope, expected);
-    const privateUrl = origin + "/v1/workshop-room?" +
+      sponsorCall(
+        sponsor,
+        "POST",
+        "/v1/sponsors/workshop/room-ticket",
+        "workshop.read",
+        scope,
+        expected,
+      );
+    const privateUrl =
+      origin +
+      "/v1/workshop-room?" +
       new URLSearchParams({ fellow: authorFellow.fellow_id, problem });
     const agoraOrigin = "https://staging.asimposium.org";
-    const privateOpen = (ticket, extraHeaders = {}) => worker.fetch(privateUrl, {
-      method: "POST",
-      headers: {
-        "User-Agent": userAgent,
-        origin: agoraOrigin,
-        accept: "text/event-stream",
-        "content-type": "application/json",
-        ...extraHeaders,
-      },
-      body: JSON.stringify(ticket === undefined ? {} : { auth: ticket }),
-    });
+    const privateOpen = (ticket, extraHeaders = {}) =>
+      worker.fetch(privateUrl, {
+        method: "POST",
+        headers: {
+          "User-Agent": userAgent,
+          origin: agoraOrigin,
+          accept: "text/event-stream",
+          "content-type": "application/json",
+          ...extraHeaders,
+        },
+        body: JSON.stringify(ticket === undefined ? {} : { auth: ticket }),
+      });
     const deadline = async (operation) => {
       let timer;
       try {
@@ -417,16 +559,24 @@ await runLocalWorkerJourney(
     assert.equal((await privateOpen()).status, 401, "anonymous stream has no private access");
     await ticketFor("usr_herald_viewer", workshopScope, 404);
     const otherTicket = await ticketFor("usr_herald_viewer", {
-      fellow_id: viewerFellow.fellow_id, problem_id: problem,
+      fellow_id: viewerFellow.fellow_id,
+      problem_id: problem,
     });
     assert.equal(
-      (await privateOpen(otherTicket.ticket)).status, 401,
+      (await privateOpen(otherTicket.ticket)).status,
+      401,
       "another sponsor's valid ticket cannot select this Fellow",
     );
     const minted = await ticketFor();
-    assert.equal((await privateOpen(minted.ticket, { origin: "https://outside.invalid" })).status, 401);
+    assert.equal(
+      (await privateOpen(minted.ticket, { origin: "https://outside.invalid" })).status,
+      401,
+    );
     assert.equal((await privateOpen(minted.ticket, { cookie: "session=forbidden" })).status, 401);
-    assert.equal((await privateOpen(minted.ticket, { authorization: "Bearer " + author })).status, 401);
+    assert.equal(
+      (await privateOpen(minted.ticket, { authorization: "Bearer " + author })).status,
+      401,
+    );
     const streamed = await privateOpen(minted.ticket);
     assert.equal(streamed.status, 200);
     assert.equal(streamed.headers.get("content-type"), "text/event-stream; charset=utf-8");
@@ -437,23 +587,26 @@ await runLocalWorkerJourney(
     const privateReader = streamed.body.getReader();
     let pendingFrame = "";
     const privateFrames = [];
-    const nextFrame = async () => deadline((async () => {
-      while (true) {
-        const boundary = pendingFrame.indexOf("\n\n");
-        if (boundary !== -1) {
-          const frame = pendingFrame.slice(0, boundary);
-          pendingFrame = pendingFrame.slice(boundary + 2);
-          const event = /^event: (.+)$/m.exec(frame)?.[1];
-          const raw = /^data: (.+)$/m.exec(frame)?.[1];
-          if (!event || !raw) continue;
-          privateFrames.push(frame);
-          return { event, data: JSON.parse(raw) };
-        }
-        const part = await privateReader.read();
-        assert.equal(part.done, false, "private room stays open until a bounded close");
-        pendingFrame += new TextDecoder().decode(part.value);
-      }
-    })());
+    const nextFrame = async () =>
+      deadline(
+        (async () => {
+          while (true) {
+            const boundary = pendingFrame.indexOf("\n\n");
+            if (boundary !== -1) {
+              const frame = pendingFrame.slice(0, boundary);
+              pendingFrame = pendingFrame.slice(boundary + 2);
+              const event = /^event: (.+)$/m.exec(frame)?.[1];
+              const raw = /^data: (.+)$/m.exec(frame)?.[1];
+              if (!event || !raw) continue;
+              privateFrames.push(frame);
+              return { event, data: JSON.parse(raw) };
+            }
+            const part = await privateReader.read();
+            assert.equal(part.done, false, "private room stays open until a bounded close");
+            pendingFrame += new TextDecoder().decode(part.value);
+          }
+        })(),
+      );
     try {
       const first = await nextFrame();
       assert.equal(first.event, "workshop-update");
@@ -461,7 +614,8 @@ await runLocalWorkerJourney(
       assert.equal(first.data.problem_id, problem);
       assert.equal(first.data.workshop_cursor, minted.workshop_cursor);
       assert.equal(
-        (await privateOpen(minted.ticket)).status, 401,
+        (await privateOpen(minted.ticket)).status,
+        401,
         "SSE cannot replay its consumed ticket",
       );
       const openPrivateSocket = async () => {
@@ -481,10 +635,12 @@ await runLocalWorkerJourney(
       const replayMessages = [];
       replay.addEventListener("message", (event) => replayMessages.push(String(event.data)));
       const replayClosed = new Promise((resolve) =>
-        replay.addEventListener("close", (event) => resolve(event.code)));
+        replay.addEventListener("close", (event) => resolve(event.code)),
+      );
       replay.send(JSON.stringify({ auth: minted.ticket }));
       assert.equal(
-        await deadline(replayClosed), 1008,
+        await deadline(replayClosed),
+        1008,
         "a ticket consumed by SSE also refuses WebSocket replay",
       );
       assert.deepEqual(replayMessages, []);
@@ -492,25 +648,39 @@ await runLocalWorkerJourney(
       const privateSocket = await openPrivateSocket();
       try {
         const connected = new Promise((resolve) =>
-          privateSocket.addEventListener("message", (event) => resolve(String(event.data))));
+          privateSocket.addEventListener("message", (event) => resolve(String(event.data))),
+        );
         privateSocket.send(JSON.stringify({ auth: wsTicket.ticket }));
         assert.equal(JSON.parse(await deadline(connected)).control, "workshop-update");
         assert.equal(
-          (await privateOpen(wsTicket.ticket)).status, 401,
+          (await privateOpen(wsTicket.ticket)).status,
+          401,
           "SSE refuses a ticket already consumed by WebSocket",
         );
       } finally {
         privateSocket.close(1000, "transport replay check complete");
       }
       const privateCanary = "PRIVATE_WORKSHOP_SSE_BODY_MUST_NEVER_STREAM";
-      await call("/v1/sessions/" + session + "/workshop", {
-        type: "note", title: "Private stream update", body_md: privateCanary,
-      }, author, 201);
+      await call(
+        "/v1/sessions/" + session + "/workshop",
+        {
+          type: "note",
+          title: "Private stream update",
+          body_md: privateCanary,
+        },
+        author,
+        201,
+      );
       const updated = await nextFrame();
       assert.equal(updated.event, "workshop-update");
       assert.ok(updated.data.workshop_cursor > first.data.workshop_cursor);
       assert.deepEqual(Object.keys(updated.data).sort(), [
-        "control", "fellow_id", "heartbeat", "problem_id", "schema", "workshop_cursor",
+        "control",
+        "fellow_id",
+        "heartbeat",
+        "problem_id",
+        "schema",
+        "workshop_cursor",
       ]);
       assert.ok(
         !privateFrames.join("").includes(privateCanary),
@@ -524,7 +694,8 @@ await runLocalWorkerJourney(
       });
       assert.deepEqual(await nextFrame(), { event: "closed", data: { reason: "access-ended" } });
       assert.equal(
-        (await deadline(privateReader.read())).done, true,
+        (await deadline(privateReader.read())).done,
+        true,
         "current revocation closes the live stream",
       );
       await ticketFor(OWNER, workshopScope, 404);
@@ -540,7 +711,7 @@ await runLocalWorkerJourney(
         status: "pass",
         messages: messages.length,
         boundary:
-          "local Workerd Durable Object + D1 0078/0118/0157; public WS and private WS/SSE replay, cursor-only update, and revocation; no deployed room or hibernation claim",
+          "local Workerd Durable Object + D1 0078/0118/0157/0164; public WS/SSE object hide/restore resync and whole-problem eviction, private WS/SSE replay, cursor-only update, and revocation; no deployed room or hibernation claim",
       }),
     );
   },

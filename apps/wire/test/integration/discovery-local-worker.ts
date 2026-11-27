@@ -113,6 +113,7 @@ export class KraterOutboxDrainer extends ProductionKraterOutboxDrainer {
 }
 
 import { deliverHeraldRooms } from "../../src/herald/outbox.ts";
+import { heraldSseFetch } from "../../src/herald/room-sse.ts";
 import {
   type HeraldRuntimeEnv,
   heraldRoomFetch,
@@ -871,33 +872,35 @@ export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
     const raw = request as unknown as Request;
     const response = await heraldRoomFetch(raw, this.env, () =>
       publicWatchFetch(raw, () =>
-        artifactPublicationFetch(raw, this.env, () =>
-          artifactFetch(
-            raw,
-            this.env,
-            () =>
-              app.fetch(
-                raw,
-                {
-                  ...this.env,
-                  AI: commentaryFixtureAI as unknown as Env["AI"],
-                  ARTIFACTS:
-                    heldPrivateBodyRead === null
-                      ? this.env.ARTIFACTS
-                      : heldPrivateBodyBucket(this.env.ARTIFACTS),
-                  DB:
-                    raceBeforeNextBatch === null &&
-                    raceAfterNextRead === null &&
-                    heldRead === null &&
-                    competingLedgerWriteBeforeNextBatch === null &&
-                    !captureDependencyGuardErrors
-                      ? this.env.DB
-                      : racingDb(this.env.DB),
-                },
-                this.ctx,
-              ),
-            () => artifactClock ?? Date.now(),
-            (task) => this.ctx.waitUntil(task),
+        heraldSseFetch(raw, this.env, () =>
+          artifactPublicationFetch(raw, this.env, () =>
+            artifactFetch(
+              raw,
+              this.env,
+              () =>
+                app.fetch(
+                  raw,
+                  {
+                    ...this.env,
+                    AI: commentaryFixtureAI as unknown as Env["AI"],
+                    ARTIFACTS:
+                      heldPrivateBodyRead === null
+                        ? this.env.ARTIFACTS
+                        : heldPrivateBodyBucket(this.env.ARTIFACTS),
+                    DB:
+                      raceBeforeNextBatch === null &&
+                      raceAfterNextRead === null &&
+                      heldRead === null &&
+                      competingLedgerWriteBeforeNextBatch === null &&
+                      !captureDependencyGuardErrors
+                        ? this.env.DB
+                        : racingDb(this.env.DB),
+                  },
+                  this.ctx,
+                ),
+              () => artifactClock ?? Date.now(),
+              (task) => this.ctx.waitUntil(task),
+            ),
           ),
         ),
       ),

@@ -34,6 +34,12 @@ function fixture() {
       "utf8",
     ),
   );
+  sql.exec(
+    readFileSync(
+      new URL("../../../../db/migrations/0164_herald_object_visibility_wake.sql", import.meta.url),
+      "utf8",
+    ),
+  );
   const queries: string[] = [];
   const db: HeraldDatabase = {
     prepare(query) {
@@ -353,12 +359,42 @@ describe("W7 coalesced transactional wake queue on real SQLite", () => {
       f.sql.close();
     }
   });
-  test("object, private-problem and unchanged visibility controls do not wake public rooms", () => {
+  test("object visibility changes wake current readers without inventing a scientific event", async () => {
+    const f = fixture();
+    try {
+      f.sql.exec("BEGIN");
+      f.sql.exec("INSERT INTO content_controls VALUES ('P-DEMO', 'C-1', 'hidden', 1)");
+      assert.equal(f.pending().length, 1, "a hidden object must refresh its live readers");
+      f.sql.exec("ROLLBACK");
+      assert.equal(f.pending().length, 0, "an aborted hide cannot announce a change");
+
+      f.sql.exec("INSERT INTO content_controls VALUES ('P-DEMO', 'C-1', 'hidden', 3)");
+      assert.equal(f.pending()[0]?.generation, 1);
+      assert.deepEqual(await publicRoomHead(f.db, "P-DEMO"), { seq: 1 });
+      assert.equal((await deliverHeraldRooms(f.db, f.namespace, () => NOW)).delivered, 1);
+      // Delayed historical controls and repeated hidden states cannot add work.
+      f.sql.exec(`INSERT INTO content_controls VALUES
+        ('P-DEMO', 'C-1', 'visible', 2),
+        ('P-DEMO', 'C-1', 'hidden', 4)`);
+      assert.equal(f.pending().length, 0);
+      f.sql.exec("INSERT INTO content_controls VALUES ('P-DEMO', 'C-1', 'visible', 5)");
+      assert.equal(f.pending()[0]?.generation, 2);
+      assert.equal((await deliverHeraldRooms(f.db, f.namespace, () => NOW)).delivered, 1);
+      assert.deepEqual(await publicRoomHead(f.db, "P-DEMO"), { seq: 1 });
+      assert.deepEqual(await f.calls[0]!.json(), { generation: 1 });
+      assert.deepEqual(await f.calls[1]!.json(), { generation: 2 });
+      assert.deepEqual(f.sql.prepare("SELECT COUNT(*) AS n FROM events").get(), { n: 1 });
+    } finally {
+      f.sql.close();
+    }
+  });
+  test("private-problem and unchanged visibility controls do not wake public rooms", () => {
     const f = fixture();
     try {
       f.sql.exec(`INSERT INTO content_controls VALUES
-        ('P-DEMO', 'C-1', 'hidden', 1),
+        ('P-DEMO', 'C-1', 'visible', 1),
         ('P-DEMO', 'problem', 'visible', 1),
+        ('P-PRIVATE', 'C-1', 'hidden', 1),
         ('P-PRIVATE', 'problem', 'hidden', 1)`);
       assert.equal(f.pending().length, 0);
     } finally {

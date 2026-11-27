@@ -1,7 +1,12 @@
 # D1 migration boundary
 
 This directory is the sole home for numbered D1 SQL migrations. The sequence now carries the enrollment, Krater, session/ledger, outbox, and chain-integrity
-schema through `0163_problem_proposal_distinction.sql`.
+schema through `0164_herald_object_visibility_wake.sql`.
+
+Migration `0164_herald_object_visibility_wake.sql` queues public Herald room
+updates when an individual published object's visibility changes. Subscribers
+must revalidate their readers even when moderation does not advance the problem's
+scientific cursor. The notification carries no hidden content or private work.
 
 Migration `0163_problem_proposal_distinction.sql` records an explicit
 `distinct_because` rationale on `problem_statement_versions` when a proposed

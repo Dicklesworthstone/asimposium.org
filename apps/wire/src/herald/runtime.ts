@@ -4,7 +4,7 @@ import {
 } from "../../../../packages/contracts/src/herald-room-model.ts";
 import { SERVICE_ENVELOPE_HEADER } from "../auth/http.ts";
 import type { Env } from "../env.ts";
-import { deliverHeraldRooms, type HeraldNamespace } from "./outbox.ts";
+import { deliverHeraldRooms, type HeraldDatabase, type HeraldNamespace } from "./outbox.ts";
 import { publicRoomRoute, workshopRoomRoute } from "./room-controller.ts";
 import { roomRefusal } from "./room-http.ts";
 
@@ -36,9 +36,9 @@ function workshopStreamCors(request: Request, agoraOrigin: string | undefined): 
   });
 }
 
-/** The delivery objects and whole-problem moderation wake trigger. Without
+/** The delivery objects and problem/object moderation wake triggers. Without
  * them a room could accept connections that writes or privacy withdrawals
- * never wake, so upgrades fail closed until 0078 and 0157 are applied. */
+ * never wake, so upgrades fail closed until 0078, 0157 and 0164 are applied. */
 export const HERALD_ROOM_SCHEMA_OBJECTS = [
   ["table", "herald_room_outbox"],
   ["index", "herald_room_outbox_pending"],
@@ -48,20 +48,21 @@ export const HERALD_ROOM_SCHEMA_OBJECTS = [
   ["trigger", "herald_room_content_redaction"],
   ["trigger", "herald_room_content_delete"],
   ["trigger", "herald_room_content_control_insert"],
+  ["trigger", "herald_room_object_control_insert"],
 ] as const;
 
 // Positive results only: a database that gains the schema is picked up on the next
 // upgrade, and a schema never loses it outside a restore (which restarts).
 const heraldSchemaReady = new WeakSet<object>();
 
-export async function heraldRoomSchemaReady(db: Env["DB"]): Promise<boolean> {
+export async function heraldRoomSchemaReady(db: HeraldDatabase): Promise<boolean> {
   if (heraldSchemaReady.has(db)) return true;
   const placeholders = HERALD_ROOM_SCHEMA_OBJECTS.map(() => "(type = ? AND name = ?)").join(" OR ");
-  const row = await db
+  const { results } = await db
     .prepare(`SELECT COUNT(*) AS n FROM sqlite_master WHERE ${placeholders}`)
     .bind(...HERALD_ROOM_SCHEMA_OBJECTS.flat())
-    .first<{ n: number }>();
-  const ready = row?.n === HERALD_ROOM_SCHEMA_OBJECTS.length;
+    .all<{ n: number }>();
+  const ready = results.length === 1 && results[0]?.n === HERALD_ROOM_SCHEMA_OBJECTS.length;
   if (ready) heraldSchemaReady.add(db);
   return ready;
 }
