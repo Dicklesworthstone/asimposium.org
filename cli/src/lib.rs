@@ -11,6 +11,7 @@
 // unoptimized debug builder chain exceeds newer clippy's stack-frame lint threshold.
 #![allow(unknown_lints, clippy::large_unopt_stack_frames)]
 
+mod artifacts;
 pub mod canonical_json;
 pub mod coordination;
 pub mod credentials;
@@ -26,6 +27,7 @@ pub mod validate;
 pub mod validation;
 pub mod watch;
 
+use artifacts::ArtifactCommand;
 use clap::Parser;
 use coordination::{InboxCommand, LeaseCommand, ReviewRequestCommand};
 use std::io::Read;
@@ -91,6 +93,11 @@ pub enum Command {
     Inbox {
         #[command(subcommand)]
         command: InboxCommand,
+    },
+    /// Recover your private artifact uploads and inspect the Worker's acknowledged parts.
+    Artifact {
+        #[command(subcommand)]
+        command: ArtifactCommand,
     },
     /// Invite a reviewer to a pinned claim, or read and respond to your private invitations.
     ReviewRequest {
@@ -500,6 +507,7 @@ impl Command {
                 | Self::Next { .. }
                 | Self::Triage { .. }
                 | Self::Inbox { .. }
+                | Self::Artifact { .. }
                 | Self::ReviewRequest { .. }
                 | Self::Lease { .. }
                 | Self::Session { .. }
@@ -772,6 +780,7 @@ pub fn run_cli(cli: &Cli) -> CliOutput {
     // Invalid local navigation must not prompt for a keychain credential.
     // These builders are pure and use the same checks as the dispatch below.
     let recovery_path = match &cli.command {
+        Command::Artifact { command } => command.read_path().map(|(path, _)| Some(path)),
         Command::Inbox { .. } | Command::Lease { .. } | Command::ReviewRequest { .. } => {
             match coordination::read_path(&cli.command) {
                 Ok(Some((path, _))) => Ok(Some(path)),
@@ -1714,6 +1723,10 @@ pub fn run_cli_with_fetch(
     };
 
     let (path, label) = match &cli.command {
+        Command::Artifact { command } => match command.read_path() {
+            Ok(read) => read,
+            Err(error) => return input_error(&error),
+        },
         Command::Inbox { .. } | Command::Lease { .. } | Command::ReviewRequest { .. } => {
             match coordination::read_path(&cli.command) {
                 Ok(Some(read)) => read,
@@ -1891,6 +1904,21 @@ pub fn run_cli_with_fetch(
                     }
                     _ => {
                         "Check asimp capabilities on the same --origin; retry this read later if the service is unavailable.\n"
+                    }
+                }
+            } else if matches!(&cli.command, Command::Artifact { .. }) {
+                match status {
+                    401 | 403 => {
+                        "Check your active Fellow credential and current problem access with asimp hello.\n"
+                    }
+                    400 | 422 => {
+                        "Check asimp artifact list --help and use the previous inventory page's next_after.\n"
+                    }
+                    404 => {
+                        "Run asimp artifact list on the same origin to recover accessible upload IDs.\n"
+                    }
+                    _ => {
+                        "Retry the same artifact read. Check asimp capabilities on the same origin if it remains unavailable.\n"
                     }
                 }
             } else if matches!(&cli.command, Command::ReviewRequest { .. }) {

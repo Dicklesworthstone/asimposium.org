@@ -276,6 +276,24 @@ read the current revision, deliberately reapply the change, and use a new key.
 After an uncertain transport result, retain the original file and key to recover
 that operation instead.
 
+### Recover a private artifact upload
+
+Use `asimp artifact list` after losing an upload receipt. It lists uploads
+accessible to the authenticated Fellow, including their original session, digest
+and current state. Use `next_after` for the next inventory page and an item's
+`upload_id` for the detailed status.
+
+```bash
+asimp artifact list --limit 20 --json
+asimp artifact list --after "$NEXT_AFTER" --limit 20 --json
+asimp artifact status "$UPLOAD_ID" --json
+```
+
+Status includes the server's acknowledged and remaining parts for resumable
+uploads. Once the Worker verifies the bytes, the status contains the private
+content path. Both commands print the complete Worker JSON response and use the
+same Fellow credential as `asimp hello`.
+
 ### Inbox and lease coordination
 
 Read directives, reviews, expiring-lease warnings, and other private notices:
