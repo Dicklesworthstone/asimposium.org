@@ -4492,7 +4492,10 @@ body > a.sr-only.focus\:not-sr-only:focus {
  * forced colours (where it is Canvas).
  */
 .site-header,
-.landing > .masthead {
+.landing > .masthead,
+.landing.moves-page > .moves-face > article > h1:first-child,
+.landing.moves-page > .moves-face > article > h1:first-child + p,
+.landing pre {
   --color-paper: var(--glaze);
   --color-card: var(--glaze-2);
   --color-sunk: color-mix(in srgb, #000 22%, var(--glaze));
@@ -5007,6 +5010,301 @@ body {
   display: flex;
   flex-wrap: wrap;
   gap: 0.35rem;
+}
+
+/* ── Restraint: one ornament, one book face, one button ─── */
+/*
+ * The vase is painted once, not on every surface. The neck is plain black
+ * glaze edged by a single gilt fillet, and the key band runs only round the
+ * foot. Cinzel stays for inscriptions: the name, page titles and small
+ * labels. Everything a reader scans or acts on (sections, navigation,
+ * buttons) is set in the book face, in sentence case, so a page reads as an
+ * edition rather than a monument.
+ */
+.site-header .frieze,
+.landing .meander,
+.home .home-loop::before,
+.home .home-loop::after {
+  display: none;
+}
+.site-header {
+  box-shadow: inset 0 -1px 0 color-mix(in srgb, var(--glaze-gilt) 32%, transparent);
+}
+@media (min-width: 64.01rem) and (min-height: 40rem) {
+  .site-header {
+    box-shadow:
+      inset 0 -1px 0 color-mix(in srgb, var(--glaze-gilt) 32%, transparent),
+      0 14px 30px -22px rgb(0 0 0 / 0.75);
+  }
+}
+.site-header-inner {
+  padding-block: 0.55rem;
+}
+@media (min-width: 64.01rem) {
+  .site-header-inner {
+    column-gap: 2rem;
+  }
+}
+.site-nav a {
+  padding-inline: 0.8rem;
+  font-variant-caps: normal;
+  font-size: 1.08rem;
+  font-weight: 500;
+  letter-spacing: 0.005em;
+  color: color-mix(in srgb, var(--glaze-ink) 80%, var(--glaze-muted));
+}
+.site-nav a:hover {
+  background: transparent;
+  color: var(--glaze-ink);
+}
+.site-nav a[aria-current="page"] {
+  background: transparent;
+  color: var(--color-clay);
+}
+.site-nav a::after,
+.site-nav a[aria-current="page"]::after {
+  content: "";
+  position: absolute;
+  left: 0.8rem;
+  right: 0.8rem;
+  bottom: 0.35rem;
+  height: 1px;
+  border-radius: 0;
+  background: currentColor;
+  transform: scaleX(0);
+  transform-origin: left center;
+  transition: transform 0.22s var(--ease);
+}
+.site-nav a:hover::after,
+.site-nav a[aria-current="page"]::after {
+  transform: scaleX(1);
+}
+.site-console {
+  padding-inline: 1.2rem;
+  border-radius: 999px;
+  font-variant-caps: normal;
+  font-size: 1.02rem;
+  letter-spacing: 0.01em;
+}
+
+/* Sections are headed in the book face; the Greek letter is a quiet numeral
+   set off by a hairline, not a struck coin. */
+.landing h2 {
+  font-family: var(--font-serif);
+  font-size: clamp(1.5rem, 1.22rem + 0.95vw, 2.05rem);
+  font-weight: 500;
+  letter-spacing: -0.005em;
+  line-height: 1.2;
+  padding-bottom: 0.7rem;
+}
+.landing h2:has(> .gr) {
+  align-items: baseline;
+  gap: 0.6em;
+}
+.landing h2 .gr {
+  width: auto;
+  height: auto;
+  padding-right: 0.6em;
+  border: 0;
+  border-right: 1px solid var(--color-rule);
+  border-radius: 0;
+  background: none;
+  box-shadow: none;
+  font-size: 0.8em;
+  line-height: 1.15;
+  vertical-align: baseline;
+}
+.landing .canonical-markdown-body > h3 {
+  font-family: var(--font-serif);
+  font-size: 1.55rem;
+  font-weight: 500;
+  letter-spacing: 0;
+}
+.landing .empty-state > p:first-child > strong:only-child {
+  font-family: var(--font-serif);
+  font-size: clamp(1.3rem, 1.15rem + 0.5vw, 1.6rem);
+  font-weight: 500;
+  letter-spacing: 0;
+}
+.home .reading-list li > a:first-child {
+  font-family: var(--font-serif);
+  font-size: 1.16rem;
+  letter-spacing: 0;
+}
+
+/* One button family: a pill in the book face. The filled clay pill commits;
+   the outlined one goes somewhere. */
+.btn-google,
+.btn-quiet,
+.landing a.btn-console,
+.public-ledger-live button,
+:is(.btn, .btn-action, .btn-primary, .btn-reject, .btn-active, .btn-pagination) {
+  border-radius: 999px;
+}
+@media (min-width: 52rem) {
+  .public-ledger-live {
+    border-radius: 999px;
+    padding-left: 1.2rem;
+  }
+}
+.btn-google,
+.landing a.btn-console {
+  padding: 0.6rem 1.5rem;
+  font-variant-caps: normal;
+  font-size: 1.04rem;
+  letter-spacing: 0.01em;
+}
+.btn-quiet {
+  padding: 0.42rem 1.1rem;
+}
+.home .hero-actions :is(.btn-google, a.btn-console),
+.home .hero-actions a.btn-quiet {
+  border-radius: 999px;
+}
+
+/* The front page's name is the only drop of the brand; the lede opens plainly
+   (a drop cap split "ASImposium" into "A" and "SImposium"). */
+.home .hero .lede::first-letter {
+  float: none;
+  padding: 0;
+  font-family: inherit;
+  font-size: inherit;
+  font-weight: inherit;
+  line-height: inherit;
+  color: inherit;
+}
+.home .home-loop {
+  padding-block: 0;
+}
+
+/* Code is a black-glaze well (the token scope above), left-set. A one-line
+   command strip is the same well, with a prompt that is not copied. */
+.landing pre {
+  padding: 0.95rem 1.15rem;
+  border-radius: var(--radius-lg);
+  text-align: left;
+  font-size: 0.86rem;
+}
+.landing .loop:has(> code:only-child) {
+  padding: 0.95rem 1.15rem;
+  border-color: var(--glaze-line);
+  border-radius: var(--radius-lg);
+  background: var(--glaze);
+  color: var(--glaze-ink);
+  text-align: left;
+  font-size: 0.86rem;
+  letter-spacing: 0;
+}
+.landing .loop:has(> code:only-child) > code {
+  padding: 0;
+  background: none;
+  color: inherit;
+}
+.landing .loop:has(> code:only-child) > code::before {
+  content: "$\00a0";
+  color: var(--glaze-gilt);
+}
+.home .hero-actions a.btn-quiet {
+  font-size: 1.04rem;
+}
+.landing .footer-meander > .tagline {
+  font-style: normal;
+}
+
+/*
+ * /moves: the shared serializer prints the page title and its note after the
+ * page's own register, so the register runs on over them and closes below
+ * the note.
+ */
+.landing.moves-page > .masthead {
+  margin-bottom: 0;
+  padding-bottom: 0;
+  border-image: linear-gradient(var(--glaze), var(--glaze)) fill 0 // 0 100vmax;
+}
+.landing.moves-page > .moves-face > article > h1:first-child,
+.landing.moves-page > .moves-face > article > h1:first-child + p {
+  margin: 0;
+  text-align: center;
+  border-image: linear-gradient(var(--glaze), var(--glaze)) fill 0 // 0 100vmax;
+}
+.landing.moves-page > .moves-face > article > h1:first-child {
+  padding: 0.55rem 0 0.85rem;
+  font-size: clamp(2.05rem, 1.25rem + 3.3vw, 3.5rem);
+  letter-spacing: 0.035em;
+  line-height: 1.08;
+}
+.landing.moves-page > .moves-face > article > h1:first-child + p {
+  margin-bottom: clamp(1.75rem, 1.1rem + 2.2vw, 2.75rem);
+  padding: 0 max(0px, (100% - 42rem) / 2) clamp(2rem, 1.2rem + 2.6vw, 3.2rem);
+  border-image: linear-gradient(to top, var(--glaze-clay) 0 3px, var(--glaze) 3px) fill 0 // 0
+    100vmax;
+  font-size: 1.04rem;
+  line-height: 1.6;
+}
+
+/* Tablets: the six sections share a row; each underline fits its word. */
+@media (max-width: 64rem) {
+  .site-nav ul {
+    justify-items: center;
+  }
+  .site-nav a {
+    width: auto;
+  }
+}
+/* Phones: the brand and actions on one row, the six sections on one ruled
+   row beneath, so the chrome costs about 100px, not 180. */
+@media (max-width: 40rem) {
+  .site-header-inner {
+    padding-block: 0.4rem 0;
+    row-gap: 0.15rem;
+  }
+  .site-nav {
+    border-top: 1px solid var(--color-line);
+  }
+  .site-nav ul {
+    display: flex;
+    justify-content: space-between;
+    gap: 0;
+  }
+  .site-nav a {
+    width: auto;
+    padding-inline: 0.3rem;
+    font-size: 1rem;
+  }
+  .site-nav a::after,
+  .site-nav a[aria-current="page"]::after {
+    left: 0.3rem;
+    right: 0.3rem;
+    bottom: 0.3rem;
+  }
+  .site-console {
+    padding-inline: 0.95rem;
+  }
+}
+@media (max-width: 23rem) {
+  .site-nav a {
+    padding-inline: 0.15rem;
+    font-size: 0.92rem;
+  }
+  .site-nav a::after,
+  .site-nav a[aria-current="page"]::after {
+    left: 0.15rem;
+    right: 0.15rem;
+  }
+  .site-header-inner {
+    column-gap: 0.4rem;
+  }
+  .site-wordmark-name {
+    font-size: 0.98rem;
+    letter-spacing: 0.03em;
+  }
+  .site-actions {
+    gap: 0.35rem;
+  }
+  .site-console {
+    padding-inline: 0.7rem;
+    font-size: 0.96rem;
+  }
 }
 
 @media print {
