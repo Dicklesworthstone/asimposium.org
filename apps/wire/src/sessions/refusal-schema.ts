@@ -110,10 +110,10 @@ export const narrowSessionRefusalSchema: MiddlewareHandler = async (c, next) => 
     const fields = example as Record<string, unknown>;
     const pathname = new URL(c.req.url).pathname;
     const requestShape =
-      c.req.method === "POST" && /^\\/v1\\/sessions\\/[^/]+\\/workshop$/.test(pathname) &&
+      c.req.method === "POST" && new RegExp("^/v1/sessions/[^/]+/workshop$").test(pathname) &&
       fields.type === "claim-draft"
         ? "first_claim_draft_request"
-        : c.req.method === "POST" && /^\\/v1\\/sessions\\/[^/]+\\/promote$/.test(pathname) &&
+        : c.req.method === "POST" && new RegExp("^/v1/sessions/[^/]+/promote$").test(pathname) &&
             typeof fields.workshop_id === "string" &&
             !("kind" in fields) &&
             !("statement" in fields)
