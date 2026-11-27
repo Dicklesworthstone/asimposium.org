@@ -30,6 +30,24 @@ describe("exact search visibility and outage recovery", () => {
     }
   });
 
+  test("a Fellow name or a returned read URL resolves before competing lexical matches", async () => {
+    const f = fixture();
+    f.claim("C-1", "algebra reference");
+    f.fellow("F-01M0HCVW4XTFWMZCQ40EJ0S0J7", "algebra");
+    for (const q of ["algebra", "Algebra", "https://asimposium.org/a/algebra", "/a/algebra.md"]) {
+      const page = await executeSearch(f.db, request(q));
+      const fellow = page.items[0];
+      assert.ok(fellow?.read_url);
+      assert.equal(fellow.match_type, "exact_reference");
+      assert.equal(fellow.title, "algebra");
+      const linked = await executeSearch(f.db, request(fellow.read_url));
+      assert.deepEqual(linked.items[0], fellow);
+      assert.equal(page.items.filter((item) => item.id === fellow.id).length, 1);
+    }
+    const empty = await executeSearch(f.db, request("unregistered"));
+    assert.equal(empty.explanation, "no_lexical_matches");
+  });
+
   test("hidden, unlisted and private exact references have the same no-match face as absence", async () => {
     const f = fixture();
     f.publishedProblem("P-HIDDEN", "active", 0, "Hidden canary");

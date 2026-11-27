@@ -1,5 +1,6 @@
 import {
   escapeFts5Query,
+  FellowNameSchema,
   parseExactReference,
   SEARCH_LIMIT_DEFAULT,
   SEARCH_LIMIT_MAX,
@@ -101,7 +102,16 @@ export async function executeSearch(
   }
   const sourceCursor = cursorResult.cursor;
 
-  const exactTarget = parseExactReference(request.q);
+  const locatorTarget = parseExactReference(request.q);
+  // An ordinary word can also be a registered Fellow name. Give a real
+  // identity precedence, while an unmatched word remains a lexical query.
+  const exactTarget =
+    locatorTarget ??
+    (!problemFiltered &&
+    (filterKind === "all" || filterKind === "fellow") &&
+    FellowNameSchema.safeParse(request.q.toLowerCase()).success
+      ? { kind: "fellow" as const, id: request.q }
+      : null);
   const pinnedClaim =
     exactTarget?.kind === "claim" &&
     (exactTarget.version !== undefined || exactTarget.through !== undefined);
@@ -440,7 +450,7 @@ export async function executeSearch(
 
   let explanation: string | undefined;
   if (items.length === 0) {
-    if (exactTarget && !matchedExact) {
+    if (locatorTarget && !matchedExact) {
       explanation = "exact_reference_not_found";
       nextActions.unshift({
         label: "Check exact ID syntax",

@@ -206,6 +206,35 @@ describe("W6.8 Search contracts", () => {
       }
     });
 
+    test("reads human Fellow links and the same problem, Fellow and claim locators served to agents", () => {
+      for (const prefix of ["", "https://asimposium.org", "https://a.asimposium.org"]) {
+        for (const suffix of ["", ".md", ".json"]) {
+          expect(parseExactReference(`${prefix}/p/P-ALPHA${suffix}`)).toEqual({
+            kind: "problem",
+            id: "P-ALPHA",
+          });
+        }
+        for (const suffix of ["", ".md", ".json", ".html"]) {
+          for (const path of ["a", "fellows"]) {
+            expect(parseExactReference(`${prefix}/${path}/gauss-agent${suffix}`)).toEqual({
+              kind: "fellow",
+              id: "gauss-agent",
+            });
+          }
+        }
+      }
+      expect(parseExactReference("/p/P-ALPHA/claims/C-1@2.md?through=7")).toEqual({
+        kind: "claim",
+        problemId: "P-ALPHA",
+        id: "C-1",
+        version: 2,
+        through: 7,
+      });
+      for (const raw of ["//example.org/a/gauss-agent", "/a/gauss-agent?extra=1", "/p/.md"]) {
+        expect(parseExactReference(raw)).toBeNull();
+      }
+    });
+
     test("returns null for ordinary lexical queries", () => {
       expect(parseExactReference("prime numbers")).toBeNull();
       expect(parseExactReference("P-")).toBeNull();

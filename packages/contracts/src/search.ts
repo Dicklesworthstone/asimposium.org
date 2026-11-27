@@ -33,7 +33,7 @@ export const EXACT_PROBLEM_CLAIM_REF_PATTERN =
   /^(?!.*--)(P-[A-Z0-9][A-Z0-9-]{1,30})[#/](C-[0-9]+(?:@[1-9][0-9]{0,15})?)$/;
 
 export const STABLE_URL_PATTERN =
-  /^https?:\/\/(?:[a-zA-Z0-9-]+\.)?asimposium\.org\/(?:p\/([A-Za-z0-9._:-]+)(?:#(C-[0-9]+(?:@[1-9][0-9]{0,15})?))?|fellows\/([A-Za-z0-9._:-]+))$/;
+  /^https?:\/\/(?:[a-zA-Z0-9-]+\.)?asimposium\.org\/(?:p\/([A-Za-z0-9._:-]+)(?:#(C-[0-9]+(?:@[1-9][0-9]{0,15})?))?|(?:fellows|a)\/([A-Za-z0-9._:-]+))$/;
 
 const CANONICAL_CLAIM_URL_PATTERN =
   /^https?:\/\/(?:[a-zA-Z0-9-]+\.)?asimposium\.org\/p\/([^/?#]+)\/claims\/([^/?#]+)(?:\?through=(0|[1-9][0-9]{0,14}))?$/;
@@ -155,7 +155,9 @@ export type ExactReferenceTarget =
 export function parseExactReference(rawQuery: string): ExactReferenceTarget | null {
   const query = rawQuery.trim();
 
-  const canonical = query.match(CANONICAL_CLAIM_URL_PATTERN);
+  // The Worker returns root-relative read_url values on its typed faces.
+  const locator = query.startsWith("/") ? `https://a.asimposium.org${query}` : query;
+  const canonical = locator.match(CANONICAL_CLAIM_URL_PATTERN);
   if (canonical?.[1] && canonical[2]) {
     try {
       const problemId = decodeURIComponent(canonical[1]);
@@ -173,15 +175,15 @@ export function parseExactReference(rawQuery: string): ExactReferenceTarget | nu
   }
 
   // 1. URL parsing
-  const urlMatch = query.match(STABLE_URL_PATTERN);
+  const urlMatch = locator.match(STABLE_URL_PATTERN);
   if (urlMatch) {
-    const problemSlugOrId = urlMatch[1];
+    const problemSlugOrId = urlMatch[1]?.replace(/\.(?:md|json)$/, "");
     const claimFragment = urlMatch[2];
-    const fellowSlugOrId = urlMatch[3];
+    const fellowSlugOrId = urlMatch[3]?.replace(/\.(?:md|json|html)$/, "");
     if (fellowSlugOrId) {
       return { kind: "fellow", id: fellowSlugOrId };
     }
-    if (problemSlugOrId) {
+    if (problemSlugOrId && PUBLIC_LEDGER_PROBLEM_ID_PATTERN.test(problemSlugOrId)) {
       if (claimFragment) {
         return claimReference(problemSlugOrId, claimFragment);
       }
