@@ -263,7 +263,9 @@ for (const rubric of ["statement-defect", "statement-fails-review"]) {
           2,
         );
         f.sql
-          .query("INSERT INTO claim_versions VALUES('P-DEMO','C-1',2,?,?,'conjecture')")
+          .query(
+            "INSERT INTO claim_versions(problem_id, claim_id, version, content_digest, statement, kind, editor_fellow_id) VALUES('P-DEMO','C-1',2,?,?,'conjecture','fellow-b')",
+          )
           .run(claimDigest("A precise revised statement."), "A precise revised statement.");
         const revised = await fold(f);
         assert.equal(revised.currentVersion, 2);
@@ -327,7 +329,9 @@ test("a hidden old version stays stale on its own read without contaminating a f
       2,
     );
     f.sql
-      .query("INSERT INTO claim_versions VALUES('P-DEMO','C-1',2,?,?,'conjecture')")
+      .query(
+        "INSERT INTO claim_versions(problem_id, claim_id, version, content_digest, statement, kind, editor_fellow_id) VALUES('P-DEMO','C-1',2,?,?,'conjecture','fellow-b')",
+      )
       .run(claimDigest("The revised precise bound."), "The revised precise bound.");
     control(f, "C-1@1");
     const current = await fold(f);
@@ -383,7 +387,9 @@ function addDependencyRoot(f: Fixture) {
   );
   f.sql.query("INSERT INTO claims VALUES('P-DEMO','C-2',?)").run(root.seq);
   f.sql
-    .query("INSERT INTO claim_versions VALUES('P-DEMO','C-2',1,?,?,'lemma')")
+    .query(
+      "INSERT INTO claim_versions(problem_id, claim_id, version, content_digest, statement, kind, editor_fellow_id) VALUES('P-DEMO','C-2',1,?,?,'lemma','fellow-b')",
+    )
     .run(
       claimDigest("The conclusion depends on the original bound.", "lemma"),
       "The conclusion depends on the original bound.",

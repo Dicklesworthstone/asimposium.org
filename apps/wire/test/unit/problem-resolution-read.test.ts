@@ -70,7 +70,8 @@ function fixture(synthesisChange: Record<string, unknown> = {}) {
   sql.exec(`
     CREATE TABLE problems(id TEXT PRIMARY KEY, public_seq INTEGER, status TEXT,
       unlisted INTEGER DEFAULT 0, current_statement_version INTEGER DEFAULT 1,
-      resolution_direction TEXT, resolution_summary TEXT, resolution_no_claim_boundary TEXT);
+      resolution_direction TEXT, resolution_summary TEXT, resolution_no_claim_boundary TEXT,
+      famous_guardrail TEXT);
     CREATE TABLE events(id TEXT PRIMARY KEY,problem_id TEXT,seq INTEGER,type TEXT,object_kind TEXT,
       object_id TEXT,object_version INTEGER,payload_sha256 TEXT,created_at TEXT,
       actor_fellow_id TEXT,actor_sponsor_id TEXT,actor_session_id TEXT,model_string_self_declared TEXT,harness TEXT,

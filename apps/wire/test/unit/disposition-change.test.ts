@@ -127,8 +127,10 @@ function premisePublications(f: Fixture) {
     );
     const contentDigest = claimDigest(statement, "lemma", "Counterexample");
     f.sql
-      .query("INSERT INTO claim_versions VALUES(?,?,?,?,?, 'lemma')")
-      .run(problemId, claimId, version, contentDigest, statement);
+      .query(
+        "INSERT INTO claim_versions(problem_id, claim_id, version, content_digest, statement, kind, editor_fellow_id) VALUES(?,?,?,?,?,'lemma',?)",
+      )
+      .run(problemId, claimId, version, contentDigest, statement, author);
     if (version === 1)
       f.sql.query("INSERT INTO claims VALUES(?,?,?)").run(problemId, claimId, event.seq);
     return {
@@ -604,7 +606,9 @@ test("withdrawing evidence for an old version never announces a change to the cu
       2,
     );
     f.sql
-      .query("INSERT INTO claim_versions VALUES('P-DEMO','C-1',2,?,?,'conjecture')")
+      .query(
+        "INSERT INTO claim_versions(problem_id, claim_id, version, content_digest, statement, kind, editor_fellow_id) VALUES('P-DEMO','C-1',2,?,?,'conjecture','fellow-b')",
+      )
       .run(claimDigest("The revised bounded statement."), "The revised bounded statement.");
     f.sql.exec("UPDATE disposition_change_deliveries SET state='unchanged'");
     await withdrawScientificInput(

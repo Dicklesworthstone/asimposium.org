@@ -376,10 +376,13 @@ for (const corruption of [
       f.sqlite
         .prepare("INSERT INTO content_controls VALUES ('P-PACK', ?, 'hidden', 1)")
         .run(`#${d.seq}`);
-    if (corruption === "invalid-receipt")
+    if (corruption === "invalid-receipt") {
       f.sqlite
         .prepare("UPDATE screening_publications SET provenance_json='{}' WHERE event_id=?")
         .run(d.id);
+      await assert.rejects(f.pack(), /PUBLIC_SCREENING_RECEIPT_UNAVAILABLE/);
+      return;
+    }
     const section = await f.pack(),
       body = edgeBodies(section)[0]!;
     assert.match(body, /Status: unavailable/);
@@ -410,12 +413,15 @@ for (const corruption of ["payload", "receipt"] as const) {
   test(`corrupt assertion ${corruption} does not produce an empty-graph baseline`, async () => {
     const f = fixture(),
       edge = await f.pair();
-    if (corruption === "payload")
+    if (corruption === "payload") {
       f.sqlite.prepare("UPDATE event_content SET payload_json='{}' WHERE event_id=?").run(edge.id);
-    else f.sqlite.prepare("INSERT INTO screening_publications VALUES (?, '{}')").run(edge.id);
-    const section = await f.pack();
-    assert.deepEqual(section.candidates, []);
-    assert.ok(section.omitted.some((o) => o.reason === "content_unavailable"));
+      const section = await f.pack();
+      assert.deepEqual(section.candidates, []);
+      assert.ok(section.omitted.some((o) => o.reason === "content_unavailable"));
+      return;
+    }
+    f.sqlite.prepare("INSERT INTO screening_publications VALUES (?, '{}')").run(edge.id);
+    await assert.rejects(f.pack(), /PUBLIC_SCREENING_RECEIPT_UNAVAILABLE/);
   });
 }
 

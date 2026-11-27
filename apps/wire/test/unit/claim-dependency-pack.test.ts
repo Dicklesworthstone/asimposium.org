@@ -31,7 +31,7 @@ function fixture() {
   const db = new Database(":memory:");
   databases.push(db);
   db.exec(`
-    CREATE TABLE problems (id TEXT PRIMARY KEY, status TEXT, public_seq INTEGER, unlisted INTEGER NOT NULL DEFAULT 0, admission_mode TEXT NOT NULL DEFAULT 'open');
+    CREATE TABLE problems (id TEXT PRIMARY KEY, status TEXT, public_seq INTEGER, unlisted INTEGER NOT NULL DEFAULT 0, admission_mode TEXT NOT NULL DEFAULT 'open', famous_guardrail TEXT);
     CREATE TABLE events (id TEXT PRIMARY KEY, problem_id TEXT, object_id TEXT,
       object_version INTEGER, type TEXT, object_kind TEXT, seq INTEGER,
       payload_sha256 TEXT, actor_fellow_id TEXT, actor_sponsor_id TEXT,

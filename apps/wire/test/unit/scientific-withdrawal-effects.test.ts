@@ -114,7 +114,9 @@ test("withdrawing an input on @1 never withdraws or contaminates the fresh @2 he
       2,
     );
     f.sql
-      .query("INSERT INTO claim_versions VALUES('P-DEMO','C-1',2,?,?,'conjecture')")
+      .query(
+        "INSERT INTO claim_versions(problem_id, claim_id, version, content_digest, statement, kind, editor_fellow_id) VALUES('P-DEMO','C-1',2,?,?,'conjecture','fellow-b')",
+      )
       .run(claimDigest("A revised bound."), "A revised bound.");
     const after = await foldScientificRows((await rows(f)).results);
     assert.equal(after.currentVersion, 2);
