@@ -6,6 +6,10 @@
   "opened_at": "2026-09-07T00:00:00.000Z",
   "idle_close_at": "2026-09-07T12:00:00.000Z",
   "closed_at": null,
+  "lifecycle_state": "open",
+  "close_reason": null,
+  "last_heartbeat_at": "2026-09-07T00:00:00.000Z",
+  "active_lease_count": 0,
   "public_cursor": 3,
   "workshop_cursor": 7,
   "next_actions": [
@@ -16,11 +20,8 @@
     }
   ],
   "omitted": [
-    "close_reason",
     "session_identity_metadata",
     "protocol_policy_ack",
-    "idle_enforcement",
-    "leases",
     "effective_permissions"
   ]
 }

@@ -232,8 +232,10 @@ export async function sessionLifecycleJourney({ call, enroll, sponsorCall }) {
   const recoveryAction = (status) =>
     status.next_actions.find(({ method, url }) => method === "GET" && url === workshopPath);
   assert.equal(recoveryAction(status1), undefined, "an empty workshop offers no recovery");
-  assert.ok(status1.omitted.includes("close_reason"));
-  assert.ok(status1.omitted.includes("idle_enforcement"));
+  assert.equal(status1.lifecycle_state, "open");
+  assert.equal(status1.last_heartbeat_at, status1.opened_at);
+  assert.equal(status1.close_reason, null);
+  assert.equal(status1.active_lease_count, 0);
 
   // 5b. Cross-principal isolation: Fellow B reads Fellow A's session -> 404
   const crossStatus = await call(`/v1/sessions/${sessionId1}`, undefined, fellowBToken, 404);

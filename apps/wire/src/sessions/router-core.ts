@@ -298,7 +298,7 @@ import {
   prepareHypothesisLifecycle,
   readableHypothesisTarget,
 } from "./hypothesis-lifecycle.ts";
-import { expireIdleSessions } from "./idle";
+import { expireIdleSessions, idleSessionNoticeId } from "./idle";
 import { releaseDirectAppendSessions, trackDirectAppendSession } from "./implicit-session";
 import {
   readDeadEndPack,
@@ -3019,23 +3019,38 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     const auth = await authenticate(c.req.raw);
     if (!auth.ok) return privateNoStore(auth.response);
     try {
+      const sessionId = c.req.param("id");
+      const now = new Date().toISOString();
       const row = await c.env.DB.prepare(
         `SELECT s.session_id, s.problem_id, s.intent, s.opened_at,
-           s.idle_close_at, s.closed_at, s.provenance_json, p.public_seq AS public_cursor,
+           s.last_heartbeat_at, s.idle_close_at, s.closed_at, s.provenance_json,
+           CASE WHEN s.closed_at IS NULL THEN NULL
+             WHEN s.close_keep_json IS NOT NULL AND s.close_discard_json IS NOT NULL THEN 'explicit'
+             WHEN s.implicit_inflight = 0 THEN 'direct-append'
+             WHEN EXISTS (SELECT 1 FROM fellow_inbox_notices n WHERE n.id = ?
+               AND n.fellow_id = s.fellow_id AND n.target_id = s.session_id) THEN 'idle'
+             ELSE 'unknown' END AS close_reason,
+           (SELECT COUNT(*) FROM leases l WHERE l.session_id = s.session_id
+             AND l.fellow_id = s.fellow_id AND l.problem_id = s.problem_id
+             AND l.status IN ('active', 'challenged') AND l.leased_until > ?) AS active_lease_count,
+           p.public_seq AS public_cursor,
            COALESCE((SELECT MAX(w.workshop_seq) FROM workshop_objects w
              WHERE w.problem_id = s.problem_id AND w.fellow_id = s.fellow_id), 0)
              AS workshop_cursor
          FROM sessions s JOIN problems p ON p.id = s.problem_id
          WHERE s.session_id = ? AND s.fellow_id = ?`,
       )
-        .bind(c.req.param("id"), auth.binding.fellowId)
+        .bind(await idleSessionNoticeId(sessionId), now, sessionId, auth.binding.fellowId)
         .first<{
           session_id: string;
           problem_id: string;
           intent: string | null;
           opened_at: string;
+          last_heartbeat_at: string;
           idle_close_at: string;
           closed_at: string | null;
+          close_reason: "explicit" | "idle" | "direct-append" | "unknown" | null;
+          active_lease_count: number;
           provenance_json: string | null;
           public_cursor: number;
           workshop_cursor: number;
@@ -3062,8 +3077,31 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         );
       const { provenance_json: provenanceJson, ...status } = row;
       const provenance = readSessionProvenance(provenanceJson);
+      const lifecycle =
+        row.closed_at !== null
+          ? "closed"
+          : row.idle_close_at <= now
+            ? "idle-deadline-passed"
+            : "open";
+      const problemBinding = auth.binding.grantedResources.problemBinding;
+      let canRead = problemBinding === undefined || problemBinding === row.problem_id;
+      if (canRead) {
+        try {
+          await requireSessionProblemAccess(c.env.DB, row.problem_id, auth.binding, {
+            readOnly: true,
+          });
+        } catch (error) {
+          if (
+            !(
+              error instanceof SessionProblemMissingError || error instanceof AdmissionRequiredError
+            )
+          )
+            throw error;
+          canRead = false;
+        }
+      }
       const nextActions =
-        row.closed_at === null
+        canRead && lifecycle === "open"
           ? [
               {
                 method: "GET",
@@ -3080,42 +3118,34 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               {
                 method: "GET",
                 url: "/v1/hello",
-                why: "This session is closed. Check current identity and available actions before opening another session.",
+                why: "Check current identity and available actions before starting another session.",
               },
             ];
-      const problemBinding = auth.binding.grantedResources.problemBinding;
-      if (
-        row.workshop_cursor > 0 &&
-        (problemBinding === undefined || problemBinding === row.problem_id)
-      ) {
-        try {
-          await requireSessionProblemAccess(c.env.DB, row.problem_id, auth.binding, {
-            readOnly: true,
-          });
-          nextActions.push({
-            method: "GET",
-            url: workshopDirectoryPath(row.session_id),
-            why: "Find your retained private work on this problem and follow its exact revision read URLs.",
-          });
-        } catch (error) {
-          if (
-            !(
-              error instanceof SessionProblemMissingError || error instanceof AdmissionRequiredError
-            )
-          )
-            throw error;
-        }
+      if (canRead && lifecycle === "open" && row.active_lease_count > 0) {
+        nextActions.push({
+          method: "GET",
+          url: `/v1/sessions/${sessionId}/leases`,
+          why: "Inspect current leases on this problem. Match session_id to find your session's reservations.",
+        });
+      }
+      if (canRead && row.workshop_cursor > 0) {
+        nextActions.push({
+          method: "GET",
+          url: workshopDirectoryPath(row.session_id),
+          why: "Find your retained private work on this problem and follow its exact revision read URLs.",
+        });
       }
       const body = SessionStatusResponseSchema.parse({
         ...status,
+        lifecycle_state: lifecycle,
+        active_lease_count: canRead ? row.active_lease_count : null,
         provenance,
         next_actions: nextActions,
         omitted: [
-          "close_reason",
+          ...(row.close_reason === "unknown" ? ["close_reason"] : []),
           ...(provenance === null ? ["session_identity_metadata"] : []),
           "protocol_policy_ack",
-          "idle_enforcement",
-          "leases",
+          ...(canRead ? [] : ["leases"]),
           "effective_permissions",
         ],
       });
@@ -3457,6 +3487,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         (raw) => SessionOpenResponseSchema.parse(JSON.parse(raw)),
         async () => {
           await requireSessionProblemAccess(db, parsed.data.problem_id, auth.binding);
+          // A fresh open reclaims the Fellow's overdue slots, just as a direct append does.
+          await expireIdleSessions(db, { fellowId: auth.binding.fellowId });
           const existing = await db
             .prepare(
               "SELECT session_id FROM sessions WHERE fellow_id = ? AND problem_id = ? AND closed_at IS NULL",

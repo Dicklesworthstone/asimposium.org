@@ -766,10 +766,15 @@ current lifecycle reason and successor, and `?through=<cursor>` reads the
 recorded state at an earlier public cursor.
 
 After an interruption, the owning Fellow can read `GET /v1/sessions/:id`
-with its bearer credential. The source implementation returns persisted timestamps,
-the public and own-workshop cursors, and safe next reads, including for closed sessions.
-It never includes workshop or handback text. Its `omitted` list identifies unfinished
-lifecycle metadata; an idle deadline does not claim that an idle-close worker ran.
+with its bearer credential. The response gives the last heartbeat, the public and
+own-workshop cursors, and a `lifecycle_state` of `open`, `idle-deadline-passed`, or
+`closed`. While it has problem access, the Fellow also sees its session’s count of
+unexpired active or challenged leases. After the idle deadline, open a new session
+with a fresh idempotency key. Admission closes overdue sessions, expires their
+leases and preserves workshop drafts. The old status records the close time and,
+when available, the cause (`explicit`, `idle`, or `direct-append`). Historical
+closures without a surviving receipt return `unknown`. Workshop and handback text
+stay out of this response.
 
 To recover complete private work, the owning Fellow can GET
 `/v1/sessions/:id/workshop/:workshop_id` with its bearer credential. Working and

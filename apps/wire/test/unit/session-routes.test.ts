@@ -4939,6 +4939,10 @@ describe("session protocol routes", () => {
     expect(await status()).toMatchObject({
       ...opened,
       closed_at: null,
+      close_reason: null,
+      lifecycle_state: "open",
+      last_heartbeat_at: opened.opened_at,
+      active_lease_count: 0,
       public_cursor: 0,
       workshop_cursor: 0,
     });
@@ -4961,7 +4965,8 @@ describe("session protocol routes", () => {
       { method: "GET", url: "/v1/hello" },
       { method: "GET", url: `${path}/workshop` },
     ]);
-    expect(closed.omitted).toContain("idle_enforcement");
+    expect(closed.lifecycle_state).toBe("closed");
+    expect(closed.close_reason).toBe("explicit");
     expect(closed.omitted).toContain("effective_permissions");
     const statusQueries = reads.filter((query) =>
       query.includes("FROM sessions s JOIN problems p"),
@@ -4982,7 +4987,10 @@ describe("session protocol routes", () => {
       .prepare("DELETE FROM problem_memberships WHERE problem_id = ? AND fellow_id = ?")
       .bind(closed.problem_id, f.binding.fellowId)
       .run();
-    expect((await status()).next_actions).toMatchObject([{ method: "GET", url: "/v1/hello" }]);
+    const restricted = await status();
+    expect(restricted.next_actions).toMatchObject([{ method: "GET", url: "/v1/hello" }]);
+    expect(restricted.active_lease_count).toBeNull();
+    expect(restricted.omitted).toContain("leases");
     expect((await f.call(`${path}/workshop`)).status).toBe(404);
     const other = await addApprovedFellow(f, { suffix: "status-other", scopes: ["promote"] });
     const denied = await other.call(path);
@@ -18872,6 +18880,60 @@ describe("committed promotion outbox nudge", () => {
         409,
       );
       expect(((await collExcl.json()) as { code: string }).code).toBe("LEASED");
+    });
+
+    test("recovery distinguishes a passed idle deadline from closure and fresh admission releases the slot", async () => {
+      const f = await ledgerPackFixture();
+      const read = async () =>
+        SessionStatusResponseSchema.parse(await (await f.call(f.path)).json());
+      const acquire = await f.call(`${f.path}/leases`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "recover-gap-lease" },
+        body: JSON.stringify({
+          object: "G-1",
+          objective: "Fill gap G-1",
+          deliverable: "Lemma closing G-1",
+        }),
+      });
+      expect(acquire.status, await acquire.clone().text()).toBe(201);
+      const held = await read();
+      expect(held.active_lease_count).toBe(1);
+      expect(held.next_actions).toContainEqual(
+        expect.objectContaining({ method: "GET", url: `${f.path}/leases` }),
+      );
+      const deadline = new Date(Date.now() - 1000).toISOString();
+      await f.db
+        .prepare("UPDATE sessions SET idle_close_at = ? WHERE session_id = ?")
+        .bind(deadline, held.session_id)
+        .run();
+      const overdue = await read();
+      expect(overdue.lifecycle_state).toBe("idle-deadline-passed");
+      expect(overdue.closed_at).toBeNull();
+      expect(overdue.close_reason).toBeNull();
+      expect(overdue.next_actions.map((action) => action.url)).not.toContain(
+        `${f.path}/pack?profile=working`,
+      );
+
+      const request = {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "recover-after-idle" },
+        body: JSON.stringify({ problem_id: held.problem_id, intent: "explore" }),
+      };
+      const replacement = await f.call("/v1/sessions", request);
+      expect(replacement.status, await replacement.clone().text()).toBe(201);
+      const fresh = SessionOpenResponseSchema.parse(await replacement.json());
+      expect(fresh.session_id).not.toBe(held.session_id);
+      const closed = await read();
+      expect(closed).toMatchObject({
+        lifecycle_state: "closed",
+        close_reason: "idle",
+        active_lease_count: 0,
+        public_cursor: overdue.public_cursor,
+        workshop_cursor: overdue.workshop_cursor,
+      });
+      expect(closed.closed_at).not.toBeNull();
+      const replay = await f.call("/v1/sessions", request);
+      expect(SessionOpenResponseSchema.parse(await replay.json())).toEqual(fresh);
     });
 
     test("heartbeat renews active leases and session close auto-releases them", async () => {

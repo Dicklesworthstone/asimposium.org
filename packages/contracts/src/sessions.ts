@@ -405,6 +405,11 @@ export type PackItem = z.infer<typeof PackItemSchema>;
 export const SessionStatusResponseSchema = SessionOpenResponseSchema.extend({
   provenance: SessionProvenanceSchema.nullable(),
   closed_at: z.string().datetime().nullable(),
+  lifecycle_state: z.enum(["open", "idle-deadline-passed", "closed"]),
+  last_heartbeat_at: z.string().datetime(),
+  close_reason: z.enum(["explicit", "idle", "direct-append", "unknown"]).nullable(),
+  /** Unexpired active/challenged leases held by this session. Null when problem access has ended. */
+  active_lease_count: z.number().int().nonnegative().nullable(),
   public_cursor: z.number().int().nonnegative(),
   workshop_cursor: z.number().int().nonnegative(),
   next_actions: z.array(NextActionSchema),

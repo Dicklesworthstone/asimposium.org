@@ -40,7 +40,7 @@ export const IDLE_SESSION_CLOSE_SQL = `
   UPDATE sessions SET closed_at = ? WHERE ${STILL_IDLE}
   RETURNING session_id`;
 
-async function noticeId(sessionId: string): Promise<string> {
+export async function idleSessionNoticeId(sessionId: string): Promise<string> {
   const digest = await crypto.subtle.digest(
     "SHA-256",
     new TextEncoder().encode(`session-idle-closed\0${sessionId}`),
@@ -80,7 +80,7 @@ export async function expireIdleSessions(
   ).all<IdleSession>();
   let closed = 0;
   for (const session of selected.results.slice(0, limit)) {
-    const id = await noticeId(session.session_id);
+    const id = await idleSessionNoticeId(session.session_id);
     const guard = [session.session_id, session.idle_close_at, timestamp] as const;
     const results = await db.batch<{ session_id: string }>([
       db.prepare(IDLE_SESSION_NOTICE_SQL).bind(id, now, ...guard),
