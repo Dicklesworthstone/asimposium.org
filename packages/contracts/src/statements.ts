@@ -147,7 +147,7 @@ export function statementHistoryPath(
 export function statementVersionPath(
   problem: string,
   version: number,
-  format: "json" | "md" | "html" | "human",
+  format: "json" | "md" | "html" | "human" | "bib" | "csl.json",
   query: StatementVersionQuery = {},
 ): string {
   return `/p/${encodeURIComponent(problem)}/statements/${version}${format === "human" ? "" : `.${format}`}${statementHistoryQueryString(query)}`;

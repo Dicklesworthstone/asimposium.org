@@ -1,11 +1,13 @@
 import { ProblemResolutionRecordSchema, SINGLE_TEAM_PROBLEM_NOTICE } from "@asimposium/contracts";
 import { citationsListPath } from "@asimposium/contracts/citations";
 import { evidenceListPath, reviewsListPath } from "@asimposium/contracts/research-lists";
+import { StatementVersionSelectorSchema } from "@asimposium/contracts/statements";
 import { synthesesListPath } from "@asimposium/contracts/syntheses";
 import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { CitationOmissions, CitationSummary } from "@/components/citations-view";
+import { StatementCitationLinks } from "@/components/statement-citation-links";
 import { ProblemClaimsBoard } from "@/components/problem-claims-board";
 import { ProblemRecentResearch, recentResearchQuery } from "@/components/problem-recent-research";
 import { ProblemRoster } from "@/components/problem-roster";
@@ -156,7 +158,11 @@ export default async function ProblemPage({ params, searchParams }: ProblemPageP
   }
   const face = result.data;
   const shareData = buildProblemShareCardData(face, deriveShareCardIncidentOptions(face));
-  const title = face.items.find((item) => item.kind === "problem-title")?.body ?? face.title;
+  const titleItem = face.items.find((item) => item.kind === "problem-title");
+  const title = titleItem?.body ?? face.title;
+  const formulationVersion = StatementVersionSelectorSchema.safeParse(
+    /^S@([1-9][0-9]*)-title$/.exec(titleItem?.id ?? "")?.[1],
+  );
   const formulation = face.items.filter(
     (item) =>
       item.kind !== "claim" &&
@@ -347,6 +353,10 @@ export default async function ProblemPage({ params, searchParams }: ProblemPageP
                   Read the complete current formulation (JSON)
                 </a>
               </p>
+              {formulationVersion.success && (
+                <StatementCitationLinks problem={face.problem} version={formulationVersion.data}
+                  cursor={face.cursor} origin={stoaOrigin} />
+              )}
             </section>
           )}
 

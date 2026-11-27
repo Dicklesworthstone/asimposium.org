@@ -183,6 +183,9 @@ test("exact statement pages distinguish the revision's scientific author from it
   };
   globalThis.fetch = mock(async () => Response.json(response)) as unknown as typeof fetch;
   const html = renderToStaticMarkup(await StatementPage(exactProps("5", { through: "40" })));
+  for (const format of ["bib", "csl.json"]) {
+    expect(html).toContain(`href="${PRODUCTION_STOA_ORIGIN}/p/P-DEMO/statements/5.${format}?through=40"`);
+  }
   expect(html).toContain("Scientific authorship at submission");
   expect(html).toContain("usr_scientific_author");
   expect(html).toContain("usr_publisher");

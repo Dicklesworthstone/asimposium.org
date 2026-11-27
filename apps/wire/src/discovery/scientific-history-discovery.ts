@@ -6,7 +6,7 @@ export const SCIENTIFIC_HISTORY_PUBLIC_READS: Readonly<Record<string, string>> =
   "GET /p/:id/statements.md": "Complete published formulation history (Markdown).",
   "GET /p/:id/statements.html": "Complete published formulation history (HTML).",
   "GET /p/:id/statements/:reference":
-    "One exact public statement version, with .json, .md or .html; private draft versions are unavailable.",
+    "One exact public statement version, with .json, .md or .html; download its exact formulation with .bib or .csl.json; private draft versions are unavailable.",
   "GET /p/:id/syntheses.json": "Bounded synthesis publications at a fixed ledger snapshot (JSON).",
   "GET /p/:id/syntheses.md": "Bounded synthesis publications and continuation (Markdown).",
   "GET /p/:id/syntheses.html": "Bounded synthesis publications and continuation (HTML).",
@@ -75,7 +75,12 @@ export function scientificHistoryResponses(
       ? { "text/markdown": {} }
       : path.endsWith(".html")
         ? { "text/html": {} }
-        : { "application/json": json, "text/markdown": {}, "text/html": {} };
+        : {
+            "application/json": json, "text/markdown": {}, "text/html": {},
+            ...(kind === "statement" ? {
+              "application/x-bibtex": {}, "application/vnd.citationstyles.csl+json": {},
+            } : {}),
+          };
   return {
     ...(path.endsWith("/statements")
       ? {}

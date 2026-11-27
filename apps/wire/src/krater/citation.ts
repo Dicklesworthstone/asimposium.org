@@ -32,6 +32,7 @@ import {
   type ScreeningPublicationNotice,
   ScreeningPublicationNoticeSchema,
 } from "@asimposium/contracts";
+import { type StatementResponse, statementVersionPath } from "@asimposium/contracts/statements";
 import { screeningNoticeText } from "@asimposium/render";
 
 export interface CitableClaim {
@@ -229,10 +230,10 @@ interface CitationTimes {
  * instant, or retrieved on the observed day, is a fact about now, not a
  * prediction. Only strictly-greater is refused.
  */
-function citationTimes(request: CitationRequest): CitationTimes {
-  const observedAt = exactUtcInstant(request.observedAt, "observed instant");
-  const publishedAt = exactUtcInstant(request.claim.publishedAt, "publication instant");
-  const accessDate = exactAccessDate(request.accessDate);
+function citationTimes(publication: string, accessed: string, observation: string): CitationTimes {
+  const observedAt = exactUtcInstant(observation, "observed instant");
+  const publishedAt = exactUtcInstant(publication, "publication instant");
+  const accessDate = exactAccessDate(accessed);
   const observedDate = observedAt.slice(0, 10);
   const publishedDate = publishedAt.slice(0, 10);
 
@@ -258,6 +259,11 @@ export function claimStableUrl(
   return `${exactHttpsOrigin(origin)}/p/${encodeURIComponent(problemId)}/claims/${encodeURIComponent(claimId)}@${exactStatementVersion(statementVersion)}`;
 }
 
+// Public ledger IDs are case-sensitive while BibTeX keys are not.
+function encodeCitationIdentifier(identifier: string): string {
+  return Array.from(identifier, (character) => character.charCodeAt(0).toString(16).padStart(2, "0")).join("");
+}
+
 /**
  * The cite key: boring, stable, filesystem- and BibTeX-safe. It includes the
  * statement version so two exact-version citations can coexist without one
@@ -266,14 +272,7 @@ export function claimStableUrl(
 export function citeKeyFor(problemId: string, claimId: string, statementVersion: number): string {
   if (!PublicLedgerProblemIdSchema.safeParse(problemId).success) invalidCitationInput("problem id");
   if (!ClaimIdSchema.safeParse(claimId).success) invalidCitationInput("claim id");
-  // Public ledger IDs predate the narrower session grammar. Encode their
-  // ASCII bytes: BibTeX rejects keys that differ only by letter case, so
-  // preserving case or merely replacing punctuation is insufficient.
-  const encode = (identifier: string): string =>
-    Array.from(identifier, (character) =>
-      character.charCodeAt(0).toString(16).padStart(2, "0"),
-    ).join("");
-  return `asimposium_${encode(problemId)}_${encode(claimId)}_v${exactStatementVersion(statementVersion)}`;
+  return `asimposium_${encodeCitationIdentifier(problemId)}_${encodeCitationIdentifier(claimId)}_v${exactStatementVersion(statementVersion)}`;
 }
 
 /** Escape the BibTeX-sensitive characters in free text. */
@@ -301,7 +300,7 @@ export function bibtexForClaim(request: CitationRequest): string {
   const snapshot = snapshotCitationRequest(request);
   const { claim, origin } = snapshot;
   validateClaimIdentity(claim);
-  const { accessDate, publishedDate } = citationTimes(snapshot);
+  const { accessDate, publishedDate } = citationTimes(claim.publishedAt, snapshot.accessDate, snapshot.observedAt);
   const key = citeKeyFor(claim.problemId, claim.claimId, claim.statementVersion);
   const url = claimStableUrl(origin, claim.problemId, claim.claimId, claim.statementVersion);
   const title = bibtexEscape(claim.statement.replace(/[\t\r\n]+/g, " "));
@@ -321,7 +320,7 @@ export function cslForClaim(request: CitationRequest): ClaimCitationCsl {
   const snapshot = snapshotCitationRequest(request);
   const { claim, origin } = snapshot;
   validateClaimIdentity(claim);
-  const { accessDate, publishedDate } = citationTimes(snapshot);
+  const { accessDate, publishedDate } = citationTimes(claim.publishedAt, snapshot.accessDate, snapshot.observedAt);
   const url = claimStableUrl(origin, claim.problemId, claim.claimId, claim.statementVersion);
   return ClaimCitationCslSchema.parse({
     id: citeKeyFor(claim.problemId, claim.claimId, claim.statementVersion),
@@ -349,4 +348,39 @@ export function cslForClaim(request: CitationRequest): ClaimCitationCsl {
       ],
     },
   });
+}
+
+/** The source Fellow authored the formulation; the acting sponsor admitted it. */
+export function citationForStatement(
+  face: StatementResponse,
+  publishedAt: string,
+  observedAt: string,
+  format: "bib" | "csl.json",
+): { body: string; filename: string } {
+  const { problem_id: problem, statement } = face;
+  // Preserve scientific characters and canonicalize ordinary typography for bibliography tools.
+  const title = statement.title.normalize("NFC").replace(/[\p{Z}\t\r\n]+/gu, " ");
+  if (!citationTextIsSafe(title, true) || !citationTextIsSafe(statement.source_fellow_id, false))
+    invalidCitationInput("unsafe statement citation text");
+  const { publishedDate, accessDate } = citationTimes(publishedAt, observedAt.slice(0, 10), observedAt);
+  const key = `asimposium_statement_${encodeCitationIdentifier(problem)}_v${statement.version}`;
+  const url = CANONICAL_CITATION_ORIGIN + statementVersionPath(problem, statement.version, "human");
+  const author = `ASImposium Fellow ${statement.source_fellow_id}`;
+  const note = `ASImposium problem ${problem}, published formulation S@${statement.version} (ledger event #${statement.publication.seq}).` +
+    (statement.screening_notice ? ` ${screeningNoticeText(statement.screening_notice)}` : "");
+  const body = format === "bib" ? [
+    `@misc{${key},`,
+    `  author = {{${bibtexEscape(author)}}},`,
+    `  title = {${bibtexEscape(title)}},`,
+    `  howpublished = {\\url{${url}}},`,
+    `  note = {${bibtexEscape(note)} Accessed ${accessDate}.},`,
+    `  year = {${publishedDate.slice(0, 4)}}`,
+    "}",
+  ].join("\n") : JSON.stringify({
+    id: key, type: "webpage", title, URL: url,
+    author: [{ literal: author }], note,
+    issued: { "date-parts": [publishedDate.split("-").map(Number)] },
+    accessed: { "date-parts": [accessDate.split("-").map(Number)] },
+  });
+  return { body, filename: `${key}.${format}` };
 }

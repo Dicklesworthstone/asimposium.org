@@ -10,6 +10,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { cache } from "react";
 import { PublicReadUnavailable } from "@/components/public-read-unavailable";
+import { StatementCitationLinks } from "@/components/statement-citation-links";
 import { StatementVersion } from "@/components/statement-version";
 import { stoaFetchStatementVersion } from "@/lib/public-statements";
 
@@ -138,6 +139,8 @@ export default async function StatementPage(props: StatementPageProps) {
             Canonical JSON
           </a>
         </p>
+        <StatementCitationLinks problem={face.problem_id} version={face.statement.version}
+          cursor={face.cursor} origin={result.origin} />
       </main>
     </>
   );

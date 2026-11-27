@@ -4,6 +4,7 @@ import {
   StatementResponseSchema,
 } from "@asimposium/contracts/statements";
 import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types";
+import { citationForStatement } from "../../src/krater/citation.ts";
 import { redactEventContent } from "../../src/krater/krater.ts";
 import { loadStatementHistory, loadStatementVersion } from "../../src/ledger/statements-read.ts";
 import { PROBLEM, STATEMENT_BOUNDARIES, statementsFixture } from "../support/statements-fixture.ts";
@@ -238,4 +239,55 @@ test("selectors reject ambiguous or unsafe versions and cuts without falling thr
   expect((await f.read(`/p/${PROBLEM}.md?statement=2&through=1`)).headers.get("location")).toBe(
     `/p/${PROBLEM}/statements/2.md?through=1`,
   );
+});
+
+test("problem citations pin the exact public formulation and original author across later revisions", async () => {
+  const f = await fixture();
+  const readVersion = (version: number, format: string, cut: number, init?: RequestInit) =>
+    f.read(`/p/${PROBLEM}/statements/${version}.${format}?through=${cut}`, init);
+  const original = StatementResponseSchema.parse(await (await readVersion(2, "json", 1)).json());
+  const revision = StatementResponseSchema.parse(await (await readVersion(3, "json", 2)).json());
+  const scientificTitle = { ...revision, statement: { ...revision.statement, title: "Cafe\u0301\u00a0{α} & β" } };
+  const issued = "2026-01-01T12:00:00.000Z";
+  const retrieved = "2026-02-05T08:00:00.000Z";
+  const styled = citationForStatement(scientificTitle, issued, retrieved, "csl.json");
+  expect(JSON.parse(styled.body)).toMatchObject({
+    title: "Café {α} & β",
+    issued: { "date-parts": [[2026, 1, 1]] },
+    accessed: { "date-parts": [[2026, 2, 5]] },
+  });
+  expect(citationForStatement(scientificTitle, issued, retrieved, "bib").body)
+    .toContain("Café \\{α\\} \\& β");
+  const cslResponse = await readVersion(3, "csl.json", 2);
+  expect(cslResponse.status).toBe(200);
+  expect(cslResponse.headers.get("content-type")).toContain("application/vnd.citationstyles.csl+json");
+  const csl = await cslResponse.json() as { id: string; author: unknown; URL: string; title: string; note: string };
+  expect(csl.title).toBe(revision.statement.title);
+  expect(csl.author).toEqual([{ literal: "ASImposium Fellow " + revision.statement.source_fellow_id }]);
+  expect(csl.URL).toBe(`https://asimposium.org/p/${PROBLEM}/statements/3`);
+  expect(csl.note).toContain("S@3");
+  const former = await (await readVersion(2, "csl.json", 2)).json() as { id: string; author: unknown };
+  expect(former.id).not.toBe(csl.id);
+  expect(former.author).toEqual([{ literal: "ASImposium Fellow " + original.statement.source_fellow_id }]);
+  const bibResponse = await readVersion(3, "bib", 2);
+  const bib = await bibResponse.text();
+  expect(bib).toContain(`@misc{${csl.id},`);
+  expect(bib).toContain(csl.URL);
+  expect(bibResponse.headers.get("content-disposition")).toBe(`attachment; filename="${csl.id}.bib"`);
+  expect(bibResponse.headers.get("content-location")).toBe(`/p/${PROBLEM}/statements/3.bib?through=2`);
+  for (const format of ["bib", "csl.json"]) {
+    expect((await readVersion(1, format, 2)).status).toBe(404); // Draft.
+    expect((await readVersion(3, format, 1)).status).toBe(404); // Before publication.
+    const head = await readVersion(3, format, 2, { method: "HEAD" });
+    expect(await head.text()).toBe("");
+    const options = { headers: { "if-none-match": head.headers.get("etag") ?? "" } };
+    expect((await readVersion(3, format, 2, options)).status).toBe(304);
+  }
+  control(f, "#2", "hidden", 1);
+  for (const format of ["bib", "csl.json"]) {
+    const hidden = await readVersion(3, format, 2, { headers: { "if-none-match": "*" } });
+    expect(hidden.status).toBe(404);
+    expect(hidden.headers.get("content-disposition")).toBeNull();
+    expect(await hidden.text()).not.toContain(revision.statement.source_fellow_id);
+  }
 });

@@ -58,7 +58,7 @@ const HISTORY_SQL = `WITH selected AS (
 )
 SELECT ${sourceFieldsSql(`e.seq IN (SELECT seq FROM selected ORDER BY seq ASC LIMIT ${STATEMENT_HISTORY_PAGE_SIZE})`)}
 FROM selected e ${SOURCE_JOINS_SQL} ORDER BY e.seq ASC`;
-const EXACT_SQL = `SELECT ${sourceFieldsSql("1=1")} FROM events e ${SOURCE_JOINS_SQL}
+const EXACT_SQL = `SELECT e.created_at AS published_at, ${sourceFieldsSql("1=1")} FROM events e ${SOURCE_JOINS_SQL}
   WHERE ${SOURCE_WHERE_SQL} AND e.object_version=? ORDER BY e.seq ASC LIMIT 2`;
 
 function checkedHead(value: Head | null | undefined, problem: string): Head {
@@ -175,7 +175,7 @@ export async function loadStatementVersion(
   problem: string,
   version: number,
   query: StatementVersionQuery = {},
-): Promise<{ face: StatementResponse; unlisted: boolean }> {
+): Promise<{ face: StatementResponse; publishedAt: string; unlisted: boolean }> {
   if (!Number.isSafeInteger(version) || version < 1) throw new StatementReadError("query");
   const { cursor } = await capturedHead(db, problem, query.through);
   const snapshot = await db.batch([
@@ -186,13 +186,14 @@ export async function loadStatementVersion(
     throw new StatementReadError("unavailable");
   const head = checkedHead(snapshot[0]?.results[0] as Head | undefined, problem);
   if (head.public_seq < cursor) throw new StatementReadError("unavailable");
-  const rows = snapshot[1]?.results as FormulationRow[] | undefined;
+  const rows = snapshot[1]?.results as (FormulationRow & { published_at: string })[] | undefined;
   if (!rows || rows.length > 1) throw new StatementReadError("unavailable");
   const row = rows[0];
   const statement =
     row?.object_version === version ? await publicVersion(problem, cursor, row) : undefined;
-  if (!statement) throw new StatementReadError("not-found");
+  if (!row || !statement) throw new StatementReadError("not-found");
   return {
+    publishedAt: row.published_at,
     face: StatementResponseSchema.parse({
       schema: STATEMENTS_SCHEMA_ID,
       problem_id: problem,

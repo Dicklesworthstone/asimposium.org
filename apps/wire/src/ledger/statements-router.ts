@@ -10,6 +10,7 @@ import {
 import { renderProjection } from "@asimposium/render";
 import { Hono } from "hono";
 import type { Env } from "../env.ts";
+import { citationForStatement } from "../krater/citation.ts";
 import { validatedProblem } from "../http/envelope.ts";
 import { statementFaceResponse, statementsProjection } from "./statements-face.ts";
 import {
@@ -133,7 +134,7 @@ export function createStatementRoutes(): Hono<{ Bindings: Env }> {
   app.on(["GET", "HEAD"], "/p/:id/statements/:reference", async (c) => {
     const problem = c.req.param("id");
     const reference = c.req.param("reference");
-    const match = /^([^.]+)\.(json|md|html)$(?![\s\S])/.exec(reference);
+    const match = /^([^.]+)\.(csl\.json|json|md|html|bib)$(?![\s\S])/.exec(reference);
     const version = StatementVersionSelectorSchema.safeParse(match?.[1] ?? reference);
     const params = new URL(c.req.url).searchParams;
     const query = StatementVersionQuerySchema.safeParse(Object.fromEntries(params));
@@ -146,9 +147,13 @@ export function createStatementRoutes(): Hono<{ Bindings: Env }> {
       return refusal("query", c.req.method);
     if (!match)
       return c.redirect(statementVersionPath(problem, version.data, "md", query.data), 308);
-    const format = match[2] as "json" | "md" | "html";
+    const format = match[2] as "json" | "md" | "html" | "bib" | "csl.json";
     try {
       const result = await loadStatementVersion(c.env.DB, problem, version.data, query.data);
+      if (format === "bib" || format === "csl.json") {
+        const citation = citationForStatement(result.face, result.publishedAt, new Date().toISOString(), format);
+        return await statementFaceResponse(c.req.raw, citation.body, format, result.face, result.unlisted, citation.filename);
+      }
       const body =
         format === "json"
           ? JSON.stringify(result.face)

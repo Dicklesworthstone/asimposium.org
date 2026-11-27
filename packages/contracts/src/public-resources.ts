@@ -143,7 +143,7 @@ export const PUBLIC_RESOURCE_REGISTRY: readonly PublicResourceEntry[] = Object.f
     json_url: "/p/:id/statements/:version.json",
     html_url: "/p/:id/statements/:version.html",
     human_route_key: "/r/p/:id/statement/:version",
-    allowed_suffixes: [".md", ".json", ".html"],
+    allowed_suffixes: [".md", ".json", ".html", ".bib", ".csl.json"],
     license_policy_id: LICENSE_POLICY_ID,
     license: CANONICAL_CONTENT_LICENSE,
     policy_url: CANONICAL_POLICY_URL,
