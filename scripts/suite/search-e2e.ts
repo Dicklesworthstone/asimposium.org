@@ -2,7 +2,11 @@ import { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { type SearchResponse, SearchResponseSchema } from "@asimposium/contracts";
+import {
+  ProblemGovernanceEventSchema,
+  type SearchResponse,
+  SearchResponseSchema,
+} from "@asimposium/contracts";
 import { createApp } from "../../apps/wire/src/app.ts";
 import type { Env } from "../../apps/wire/src/env.ts";
 
@@ -71,27 +75,39 @@ export function createSearchTestEnvironment(): {
 
   const canaryWorkshopSecret = "CANARY_PRIVATE_WORKSHOP_SECRET_98765";
 
-  // Seed public problems
+  // Seed public problems (advance public_seq step-by-step to satisfy KRATER_CHAIN_HEAD_MISMATCH trigger)
   sqlite.run(`
-    INSERT INTO problems (id, public_seq, created_at, updated_at)
-    VALUES ('P-RIEMANN-01', 1, '2026-08-20T00:00:00.000Z', '2026-08-20T00:00:00.000Z');
+    INSERT INTO problems (id, title, areas, status, current_statement_version, public_seq, created_at, updated_at)
+    VALUES ('P-RIEMANN-01', 'Riemann Zeta Zeros', '["number-theory"]', 'active', 1, 1, '2026-08-20T00:00:00.000Z', '2026-08-20T00:00:00.000Z');
 
-    INSERT INTO problems (id, public_seq, created_at, updated_at)
-    VALUES ('P-GOLDBACH-02', 1, '2026-08-21T00:00:00.000Z', '2026-08-21T00:00:00.000Z');
+    INSERT INTO problems (id, title, areas, status, current_statement_version, public_seq, created_at, updated_at)
+    VALUES ('P-GOLDBACH-02', 'Goldbach Even Sums', '["number-theory"]', 'active', 1, 1, '2026-08-21T00:00:00.000Z', '2026-08-21T00:00:00.000Z');
   `);
 
   // Seed public claims
-  sqlite.run(`
-    INSERT INTO claims (id, problem_id, statement, payload_sha256, source_seq, created_at)
-    VALUES ('C-101', 'P-RIEMANN-01', 'All nontrivial zeros of the zeta function have real part equal to one half.', '337c9cd0412d5b8c4e61fa710fcb9da10979bd3e6f8409dcbd1d3fc3a9d6c81e', 1, '2026-08-20T00:00:00.000Z');
-
-    INSERT INTO claims (id, problem_id, statement, payload_sha256, source_seq, created_at)
-    VALUES ('C-202', 'P-GOLDBACH-02', 'Every even integer greater than 2 can be expressed as sum of two primes.', '2b1ea4754d5b0a0b8379fa180be8249608c25b8cc5d8463cf7bd21e5ba6aa17b', 1, '2026-08-21T00:00:00.000Z');
-  `);
+  const riemannStatement =
+    "All nontrivial zeros of the zeta function have real part equal to one half.";
+  const goldbachStatement =
+    "Every even integer greater than 2 can be expressed as sum of two primes.";
+  const claimSeeds = [
+    {
+      id: "C-101",
+      problemId: "P-RIEMANN-01",
+      title: "Riemann Zeta Zeros",
+      statement: riemannStatement,
+      createdAt: "2026-08-20T00:00:00.000Z",
+    },
+    {
+      id: "C-202",
+      problemId: "P-GOLDBACH-02",
+      title: "Goldbach Even Sums",
+      statement: goldbachStatement,
+      createdAt: "2026-08-21T00:00:00.000Z",
+    },
+  ] as const;
 
   // These are SQL projection fixtures, not Workerd/D1 producer proof. Supply
-  // explicit source events so a bare claims/FTS row cannot grant publication.
-  // Each problem has its own sequence: both first claims start at one.
+  // explicit digest-verified source events so bare problem/claim/FTS rows cannot grant publication.
   sqlite.run(`
     UPDATE problems SET chain_version = 2, chain_digest = 'sha256:fixture-chain'
     WHERE id IN ('P-RIEMANN-01', 'P-GOLDBACH-02');
@@ -100,36 +116,71 @@ export function createSearchTestEnvironment(): {
     INSERT INTO krater_integrity_backfill (problem_id, state, legacy_event_count, chain_version)
     VALUES ('P-RIEMANN-01', 'complete', 0, 2), ('P-GOLDBACH-02', 'complete', 0, 2);
   `);
-  const sourceClaim = sqlite.prepare<
-    {
-      problem_id: string;
-      id: string;
-      source_seq: number;
-      payload_sha256: string;
-      created_at: string;
-    },
-    [string]
-  >("SELECT problem_id, id, source_seq, payload_sha256, created_at FROM claims WHERE id = ?");
-  for (const id of ["C-101", "C-202"]) {
-    const claim = sourceClaim.get(id);
-    if (!claim) throw new Error("Search fixture claim was not seeded");
+  for (const seed of claimSeeds) {
+    const problemPayload = JSON.stringify(
+      ProblemGovernanceEventSchema.parse({
+        action: "publish",
+        acting_principal: { type: "sponsor", id: "usr_search_fixture" },
+        source_fellow_id: "F-01JABCDEFGHJKMNPQRSTVWXYZ1",
+        previous_status: "private-draft",
+        previous_statement_version: 1,
+        problem: {
+          id: seed.problemId,
+          title: seed.title,
+          status: "sharpening",
+          current_statement_version: 1,
+          statement: `Formulation for ${seed.title}.`,
+          falsifier: "A finite counterexample.",
+          motivation: "Fixture problem formulation for search verification.",
+          updated_at: seed.createdAt,
+        },
+      }),
+    );
+    const problemDigest = createHash("sha256").update(problemPayload).digest("hex");
     sqlite
       .prepare(`INSERT INTO events (id, problem_id, seq, type, object_kind, object_id,
       object_version, payload_sha256, created_at, row_digest, chain_digest)
-      VALUES (?, ?, ?, 'claim.created', 'claim', ?, 1, ?, ?, 'sha256:fixture-row', 'sha256:fixture-chain')`)
+      VALUES (?, ?, 1, 'problem.admitted', 'problem', ?, 1, ?, ?, 'sha256:fixture-row-p', 'sha256:fixture-chain')`)
       .run(
-        `E-fixture-${id}`,
-        claim.problem_id,
-        claim.source_seq,
-        id,
-        claim.payload_sha256,
-        claim.created_at,
+        `E-fixture-${seed.problemId}`,
+        seed.problemId,
+        seed.problemId,
+        problemDigest,
+        seed.createdAt,
       );
     sqlite
       .prepare(
-        "INSERT INTO event_content (event_id, payload_sha256, payload_json) VALUES (?, ?, '{}')",
+        "INSERT INTO event_content (event_id, payload_sha256, payload_json) VALUES (?, ?, ?)",
       )
-      .run(`E-fixture-${id}`, claim.payload_sha256);
+      .run(`E-fixture-${seed.problemId}`, problemDigest, problemPayload);
+
+    const payloadJson = JSON.stringify({
+      claim_id: seed.id,
+      kind: "conjecture",
+      statement: seed.statement,
+      falsifier: "A finite counterexample.",
+    });
+    const payloadDigest = createHash("sha256").update(payloadJson).digest("hex");
+    sqlite
+      .prepare(
+        "UPDATE problems SET public_seq = 2, chain_digest = 'sha256:fixture-chain' WHERE id = ?",
+      )
+      .run(seed.problemId);
+    sqlite
+      .prepare(
+        "INSERT INTO claims (id, problem_id, statement, payload_sha256, source_seq, created_at) VALUES (?, ?, ?, ?, 2, ?)",
+      )
+      .run(seed.id, seed.problemId, seed.statement, payloadDigest, seed.createdAt);
+    sqlite
+      .prepare(`INSERT INTO events (id, problem_id, seq, type, object_kind, object_id,
+      object_version, payload_sha256, created_at, row_digest, chain_digest)
+      VALUES (?, ?, 2, 'claim.created', 'claim', ?, 1, ?, ?, 'sha256:fixture-row', 'sha256:fixture-chain')`)
+      .run(`E-fixture-${seed.id}`, seed.problemId, seed.id, payloadDigest, seed.createdAt);
+    sqlite
+      .prepare(
+        "INSERT INTO event_content (event_id, payload_sha256, payload_json) VALUES (?, ?, ?)",
+      )
+      .run(`E-fixture-${seed.id}`, payloadDigest, payloadJson);
   }
 
   // Seed public_claim_fts
