@@ -156,6 +156,7 @@ import {
   EnrollmentReplayConfigurationError,
   type EnrollmentResourceGrants,
   type EnrollmentService,
+  fellowCanAccessPrivateProblem,
   type FellowCredentialBinding,
   SPONSOR_ENROLLMENT_RATE_LIMIT_ATTEMPTS,
   SPONSOR_ENROLLMENT_RATE_LIMIT_WINDOW_MS,
@@ -1421,7 +1422,24 @@ export async function buildHelloResponse(input: {
   }
 
   let assignments: HelloAssignment[] | undefined;
-  let soleActiveAssignment: string | undefined;
+  const boundProblem = binding.grantedResources.problemBinding;
+  type ProblemAccessRow = {
+    problem_id: string;
+    status: string | null;
+    sponsor_id: string | null;
+    created_by_fellow_id: string | null;
+  };
+  const visibleToFellow = (row: ProblemAccessRow) =>
+    row.status !== null &&
+    (boundProblem === undefined || row.problem_id === boundProblem) &&
+    (row.status !== "private-draft" ||
+      fellowCanAccessPrivateProblem(
+        binding,
+        { id: row.problem_id, sponsorId: row.sponsor_id, creatorFellowId: row.created_by_fellow_id },
+        Date.now(),
+      ));
+  let activeAssignments: string[] = [];
+  let occupiedSlots = 0;
   let openSessions: HelloOpenSession[] | undefined;
   let protocolDigest: string | undefined;
   let protocolAcknowledged: boolean | undefined;
@@ -1439,16 +1457,17 @@ export async function buildHelloResponse(input: {
       const assignmentRows = await db
         .prepare(
           `SELECT pm.problem_id, pm.role, pm.joined_at,
-             p.title, p.status IN ('active', 'sharpening', 'under-result-review') AS active
+             p.title, p.status, p.sponsor_id, p.created_by_fellow_id,
+             p.status IN ('active', 'sharpening', 'under-result-review')
+               AND p.admission_mode <> 'archived-read-only' AS active
            FROM problem_memberships pm
            LEFT JOIN problems p ON pm.problem_id = p.id
              AND NOT ${hiddenByContentControlSql("p.id", "'problem'")}
            WHERE pm.fellow_id = ?
-           ORDER BY pm.joined_at ASC`,
+           ORDER BY pm.joined_at, pm.problem_id`,
         )
         .bind(binding.fellowId)
-        .all<{
-          problem_id: string;
+        .all<ProblemAccessRow & {
           role: "observer" | "contributor" | "steward" | "founding-steward";
           joined_at: string;
           title: string | null;
@@ -1456,11 +1475,9 @@ export async function buildHelloResponse(input: {
         }>();
 
       if (assignmentRows.results) {
-        const [only] = assignmentRows.results;
-        if (assignmentRows.results.length === 1 && only?.active === 1) {
-          soleActiveAssignment = only.problem_id;
-        }
-        assignments = assignmentRows.results.map((r) => ({
+        const visible = assignmentRows.results.filter(visibleToFellow);
+        activeAssignments = visible.filter((r) => r.active === 1).map((r) => r.problem_id);
+        assignments = visible.map((r) => ({
           problem_id: r.problem_id,
           role: r.role,
           joined_at: String(r.joined_at),
@@ -1471,22 +1488,27 @@ export async function buildHelloResponse(input: {
       // 2. Open sessions
       const sessionRows = await db
         .prepare(
-          `SELECT session_id, problem_id, opened_at, idle_close_at, intent
-           FROM sessions
-           WHERE fellow_id = ? AND closed_at IS NULL
-           ORDER BY opened_at ASC, session_id ASC`,
+          `SELECT s.session_id, s.problem_id, s.opened_at, s.idle_close_at, s.intent,
+             p.status, p.sponsor_id, p.created_by_fellow_id
+           FROM sessions s LEFT JOIN problems p ON p.id = s.problem_id
+             AND NOT ${hiddenByContentControlSql("p.id", "'problem'")}
+           WHERE s.fellow_id = ? AND s.closed_at IS NULL
+           ORDER BY s.opened_at, s.session_id`,
         )
         .bind(binding.fellowId)
-        .all<{
+        .all<ProblemAccessRow & {
           session_id: string;
-          problem_id: string;
           opened_at: string;
           idle_close_at: string;
           intent: "prove" | "refute" | "review" | "sharpen-statement" | "explore" | null;
         }>();
 
       if (sessionRows.results) {
-        openSessions = sessionRows.results.map((r) => ({
+        // Every live slot counts towards admission, even if the credential
+        // no longer has access to that session's problem.
+        const now = Date.now();
+        occupiedSlots = sessionRows.results.filter((r) => Date.parse(r.idle_close_at) > now).length;
+        openSessions = sessionRows.results.filter(visibleToFellow).map((r) => ({
           session_id: r.session_id,
           problem_id: r.problem_id,
           opened_at: String(r.opened_at),
@@ -1520,11 +1542,15 @@ export async function buildHelloResponse(input: {
     protocolDigest = currentProtocolDigest;
   }
 
-  const boundProblem = binding.grantedResources.problemBinding;
-  // A single visible active assignment provides a concrete starting point for
-  // an unbound first session. It is a suggestion; the grant remains unbound.
-  const sessionProblem =
-    boundProblem ?? (openSessions?.length === 0 ? soleActiveAssignment : undefined);
+  const now = Date.now();
+  const liveSessions = openSessions?.filter((s) => Date.parse(s.idle_close_at) > now);
+  const availableAssignments = activeAssignments.filter(
+    (id) => !liveSessions?.some((s) => s.problem_id === id),
+  );
+  const sessionProblem = boundProblem ??
+    (liveSessions !== undefined && availableAssignments.length === 1
+      ? availableAssignments[0]
+      : undefined);
   const eventBudget = binding.grantedResources.eventBudget;
   let grantHasCapacity = eventBudget === undefined;
   if (db !== undefined && eventBudget !== undefined && eventBudget > 0) {
@@ -1556,8 +1582,8 @@ export async function buildHelloResponse(input: {
     binding.fellowStatus === "active" &&
     (binding.grantedResources.fellowGrantExpiresAt ?? Infinity) > Date.now() &&
     grantHasCapacity &&
-    (openSessions?.length ?? 0) < 2 &&
-    !openSessions?.some(({ problem_id }) => problem_id === boundProblem);
+    occupiedSlots < 2 &&
+    !liveSessions?.some(({ problem_id }) => problem_id === boundProblem);
   let directiveReadRequired = true;
   if (
     db !== undefined &&
@@ -1672,12 +1698,12 @@ export async function buildHelloResponse(input: {
       url: `${service.stoaOrigin}/v1/triage`,
       reason: "Discover the single highest-EV next action across your assigned problems.",
     },
-    ...(assignments && assignments[0] !== undefined
+    ...(activeAssignments[0] !== undefined
       ? [
           {
             action: "problem.next" as const,
-            url: `${service.stoaOrigin}/v1/p/${assignments[0].problem_id}/next`,
-            reason: `Next recommended moves for problem ${assignments[0].problem_id}.`,
+            url: `${service.stoaOrigin}/v1/p/${activeAssignments[0]}/next`,
+            reason: `Next recommended moves for problem ${activeAssignments[0]}.`,
           },
         ]
       : []),
