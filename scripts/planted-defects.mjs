@@ -1625,18 +1625,20 @@ export const PLANTS = [
     id: "review-queue-ignores-problem-hide",
     bead: "1rtq",
     file: "apps/wire/src/discovery/review-queue-sql.ts",
-    // /reviews quotes a hidden problem's claims.
-    find: '  AND NOT ${hiddenByContentControlSql("p.id", "\'problem\'")}\nLIMIT 1`;',
-    replace: "LIMIT 1`;",
+    // /reviews quotes a hidden problem's claims while still filtering hidden claims.
+    find: '  AND NOT ${eventContentHiddenSql("h")}\n  AND NOT ${eventContentHiddenSql("a")}\nLIMIT 1`;',
+    replace:
+      "  AND NOT EXISTS (SELECT 1 FROM content_controls c WHERE c.problem_id = p.id AND c.target_ref = h.object_id AND c.visibility = 'hidden' AND c.version = (SELECT MAX(v.version) FROM content_controls v WHERE v.problem_id = c.problem_id AND v.target_ref = c.target_ref))\nLIMIT 1`;",
     command: LANE("content-hide-sweep"),
   },
   {
     id: "review-queue-quotes-hidden-claims",
     bead: "1rtq",
     file: "apps/wire/src/discovery/review-queue-sql.ts",
-    // /reviews quotes a hidden claim's statement.
-    find: '  AND NOT ${hiddenByContentControlSql("p.id", "h.object_id")}\n',
-    replace: "",
+    // /reviews quotes a hidden claim's statement while still filtering hidden problems.
+    find: '  AND NOT ${eventContentHiddenSql("h")}\n  AND NOT ${eventContentHiddenSql("a")}\nLIMIT 1`;',
+    replace:
+      "  AND NOT EXISTS (SELECT 1 FROM content_controls c WHERE c.problem_id = p.id AND c.target_ref = 'problem' AND c.visibility = 'hidden' AND c.version = (SELECT MAX(v.version) FROM content_controls v WHERE v.problem_id = c.problem_id AND v.target_ref = c.target_ref))\nLIMIT 1`;",
     command: LANE("content-hide-sweep"),
   },
   {
@@ -1667,8 +1669,8 @@ export const PLANTS = [
     replace: "",
     also: [
       {
-        find: "                       WHERE c.fellow_id = ?2), '')) < ?10\n",
-        replace: "                       WHERE c.fellow_id = ?2), '')) < ?10 + 1\n",
+        find: '       WHERE (${engagedPostureSinceSql("?2")}) IS NULL\n',
+        replace: "       WHERE (1 = 1)\n",
       },
     ],
     command: LANE("moderation"),
@@ -1678,9 +1680,9 @@ export const PLANTS = [
     bead: "ij2e",
     file: "apps/wire/src/moderation/posture.ts",
     // The sponsor's posture rows carry the refusal count again.
-    find: "      name: fellow.name,\n      quarantine_first: posture.quarantineFirst,",
+    find: "      name: fellow.name,\n      quarantine_first: fellow.engaged_since !== null,",
     replace:
-      "      name: fellow.name,\n      refusals_in_window: posture.refusalsInWindow,\n      quarantine_first: posture.quarantineFirst,",
+      "      name: fellow.name,\n      refusals_in_window: 1,\n      quarantine_first: fellow.engaged_since !== null,",
     command: LANE("moderation"),
   },
   {
@@ -1708,8 +1710,8 @@ export const PLANTS = [
     bead: "gyue",
     file: "apps/wire/src/enrollment/router.ts",
     // Hello and triage name a hidden problem's title.
-    find: '               AND NOT ${hiddenByContentControlSql("p.id", "\'problem\'")} THEN p.title END AS title',
-    replace: "               THEN p.title END AS title",
+    find: '           LEFT JOIN problems p ON pm.problem_id = p.id\n             AND NOT ${hiddenByContentControlSql("p.id", "\'problem\'")}',
+    replace: "           LEFT JOIN problems p ON pm.problem_id = p.id",
     command: LANE("content-hide-sweep"),
   },
   {
@@ -1872,8 +1874,8 @@ export const PLANTS = [
     file: "apps/wire/src/sessions/router-core.ts",
     // Packs show the disposition alone again; agents reading packs lose the
     // review-state facet the claim face shows (Fable §6.6).
-    find: "            ` · review: ${reviewState}` +\n",
-    replace: "",
+    find: "              ` · review: ${reviewState}`;",
+    replace: '              "";',
     command: LANE("dispositions"),
   },
   {
@@ -1963,26 +1965,26 @@ export const PLANTS = [
     file: "apps/wire/src/ledger/dispositions.ts",
     // The claim face reads a refute as support: the dispositions lane's
     // refuted claim then shows independently-checked instead of contested.
-    find: '        review.verdict === "refute" || review.verdict === "fails-to-reproduce"',
-    replace: '        review.verdict === "fails-to-reproduce"',
+    find: '        : review.verdict === "refute" || review.verdict === "fails-to-reproduce"',
+    replace: '        : review.verdict === "fails-to-reproduce"',
     command: LANE("dispositions"),
   },
   {
     id: "review-state-ignores-same-sponsor-objection",
     bead: "czbr",
     file: "apps/wire/src/ledger/dispositions.ts",
-    find: '  if (completed.some((review) => review.finding === "dispute")) return "contested";',
+    find: '  if (completed.some((review) => review.finding !== "support")) return "contested";',
     replace:
-      '  if (completed.some((review) => review.finding === "dispute" && tierAtLeast(review.tier, "T1"))) return "contested";',
+      '  if (completed.some((review) => review.finding !== "support" && tierAtLeast(review.tier, "T1"))) return "contested";',
     command: LANE("dispositions"),
   },
   {
     id: "review-state-ignores-weightless-objection",
     bead: "czbr",
     file: "apps/wire/src/ledger/dispositions.ts",
-    find: '  if (completed.some((review) => review.finding === "dispute")) return "contested";',
+    find: '  if (completed.some((review) => review.finding !== "support")) return "contested";',
     replace:
-      '  if (completed.some((review) => review.finding === "dispute" && review.verified)) return "contested";',
+      '  if (completed.some((review) => review.finding !== "support" && review.verified)) return "contested";',
     command: LANE("dispositions"),
   },
   {

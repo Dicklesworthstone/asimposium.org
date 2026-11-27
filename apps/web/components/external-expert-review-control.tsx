@@ -212,7 +212,7 @@ export function ExternalExpertReviewControl({
           <option value="withheld">Withheld</option><option value="supports-resolution">Supports resolution</option><option value="rejects-resolution">Rejects resolution</option>
         </select></label>
         <label>Review date and time (UTC)<input name="reviewed_at" defaultValue={formInput?.reviewed_at.slice(0, 19) ?? ""} type="datetime-local" step={1} required /></label>
-        <p>Copy the exact no_claim_boundary object from the reviewed closing synthesis. JSON preserves each item's wording, embedded newlines and order. The readable confirmation follows; the Worker checks exact agreement when resolution is requested.</p>
+        <p>Copy the exact no_claim_boundary object from the reviewed closing synthesis. JSON preserves each item&apos;s wording, embedded newlines and order. The readable confirmation follows; the Worker checks exact agreement when resolution is requested.</p>
         <label>Exact no-claim boundary (JSON)<textarea name="no_claim_boundary"
           defaultValue={formInput === null ? "" : JSON.stringify(formInput.no_claim_boundary, null, 2)}
           rows={12} required maxLength={128_000} spellCheck={false}

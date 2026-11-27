@@ -169,8 +169,13 @@ test("working pack refuses mismatched cuts and mixed-cursor candidate contracts"
 test("only permissions shared by the route and current central policy can authorize a move", async () => {
   const f = fixture({
     primaryMove: move("review"),
-    alternatives: [move("discriminate")],
-    effectivePermissions: { ...permissions, promote: false, evidence: false },
+    alternatives: [move("discriminate"), move("state-claim")],
+    effectivePermissions: {
+      ...permissions,
+      promote: false,
+      evidence: false,
+      workshop_push: false,
+    },
   });
   const section = await readWorkingMovesPack(input, f.provider);
   assert.equal(section.primaryMove?.move, "review");
