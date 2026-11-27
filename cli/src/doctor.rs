@@ -939,7 +939,7 @@ fn check_spool_health(
         )
     } else if retryable > 0 || unsent > 0 {
         Some(
-            "Run `asimp sync` to send unsent items and replay in-window retryable items with their exact original idempotency keys."
+            "Run `asimp sync` with each item's origin and local identity. For older items with no identity, confirm the original Fellow before using `sync --item ID --bind-legacy`."
                 .to_owned(),
         )
     } else if rejected > 0 {
@@ -1118,6 +1118,7 @@ mod tests {
         let make_item = |id: &str, state: SpoolState, attempted: Option<u64>| SpoolItem {
             id: id.into(),
             origin: "https://example.test".into(),
+            identity: Some("default".into()),
             path: "/v1/sessions/S-1/promote".into(),
             session_id: Some("S-1".into()),
             problem_id: Some("P-4DSP".into()),

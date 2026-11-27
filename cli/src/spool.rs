@@ -193,6 +193,10 @@ pub struct SyncArgs {
     #[arg(long, value_name = "ITEM_ID")]
     pub item: Option<String>,
 
+    /// Bind a legacy item to the selected local identity after confirming its original Fellow.
+    #[arg(long, requires = "item")]
+    pub bind_legacy: bool,
+
     /// Inspect what `sync` would retry, skip, or freeze as `unknown_commit` without sending any POSTs.
     #[arg(long)]
     pub dry_run: bool,
@@ -238,6 +242,8 @@ impl SpoolState {
 pub struct SpoolItem {
     pub id: String,
     pub origin: String,
+    /// Older queue records predate identity binding and require single-item recovery.
+    pub identity: Option<String>,
     pub path: String,
     pub session_id: Option<String>,
     pub problem_id: Option<String>,
@@ -261,9 +267,10 @@ pub struct SpoolItem {
 impl SpoolItem {
     pub fn to_disk_json(&self) -> Value {
         json!({
-            "schema": "asimp.spool-item.v1",
+            "schema": if self.identity.is_some() { "asimp.spool-item.v2" } else { "asimp.spool-item.v1" },
             "id": self.id,
             "origin": self.origin,
+            "identity": self.identity,
             "path": self.path,
             "session_id": self.session_id,
             "problem_id": self.problem_id,
@@ -291,9 +298,6 @@ impl SpoolItem {
         }
         let v: Value = serde_json::from_str(raw).map_err(|_| "Spool item is not valid JSON.")?;
         let obj = v.as_object().ok_or("Spool item is not a JSON object.")?;
-        if obj.get("schema").and_then(Value::as_str) != Some("asimp.spool-item.v1") {
-            return Err("Unrecognized spool item schema version.");
-        }
         let req_str = |k: &str| -> Result<String, &'static str> {
             obj.get(k)
                 .and_then(Value::as_str)
@@ -319,6 +323,11 @@ impl SpoolItem {
         let item = Self {
             id: req_str("id")?,
             origin: req_str("origin")?,
+            identity: match obj.get("schema").and_then(Value::as_str) {
+                Some("asimp.spool-item.v1") if opt_str("identity")?.is_none() => None,
+                Some("asimp.spool-item.v2") => Some(req_str("identity")?),
+                _ => return Err("Unrecognized spool item schema or identity binding."),
+            },
             path: req_str("path")?,
             session_id: opt_str("session_id")?,
             problem_id: opt_str("problem_id")?,
@@ -358,6 +367,10 @@ impl SpoolItem {
 
     fn validate(&self) -> Result<(), &'static str> {
         if !is_safe_spool_id(&self.id)
+            || self
+                .identity
+                .as_deref()
+                .is_some_and(|id| !crate::credentials::valid_identity(id))
             || self.origin.len() > 2048
             || self.path.len() > 2048
             || build_url(&self.origin, &self.path).is_err()
@@ -426,6 +439,7 @@ impl SpoolItem {
         json!({
             "id": self.id,
             "origin": self.origin,
+            "identity": self.identity,
             "path": self.path,
             "session_id": self.session_id,
             "problem_id": self.problem_id,
@@ -450,16 +464,12 @@ impl SpoolItem {
     /// ambiguous write landed on the server before deciding how to resolve it.
     pub fn reconciliation_commands(&self) -> Vec<String> {
         let mut cmds = Vec::new();
+        let identity = self.identity.as_deref().unwrap_or("YOUR_ORIGINAL_IDENTITY");
+        let prefix = format!("asimp --origin {} --identity={identity}", self.origin);
         if let Some(sid) = &self.session_id {
-            cmds.push(format!(
-                "asimp --origin {} session status {sid} --json",
-                self.origin
-            ));
+            cmds.push(format!("{prefix} session status {sid} --json"));
             if self.path.ends_with("/workshop") || self.path.ends_with("/promote") {
-                cmds.push(format!(
-                    "asimp --origin {} workshop list {sid} --json",
-                    self.origin
-                ));
+                cmds.push(format!("{prefix} workshop list {sid} --json"));
             }
         }
         if let Some(pid) = &self.problem_id {
@@ -469,7 +479,7 @@ impl SpoolItem {
             ));
         }
         if cmds.is_empty() {
-            cmds.push(format!("asimp --origin {} hello --json", self.origin));
+            cmds.push(format!("{prefix} hello --json"));
         }
         cmds.push(format!(
             "asimp spool resolve {} --as committed --event-id <EV-ID>  # or --as abandoned --reason \"...\"",
@@ -1124,6 +1134,11 @@ pub fn run_spool(cli: &Cli) -> CliOutput {
                     "Refused: only idempotency-keyed session/ledger write paths (/v1/sessions...) may be spooled. One-time enrollment and token exchanges must never be spooled or auto-retried.",
                 );
             }
+            if !crate::credentials::valid_identity(&cli.identity) {
+                return input_error(
+                    "Use a 1–64 character --identity containing letters, digits, hyphens or underscores.",
+                );
+            }
             if let Some(key) = idempotency_key
                 && !is_safe_idempotency_key(key)
             {
@@ -1230,6 +1245,7 @@ pub fn run_spool(cli: &Cli) -> CliOutput {
             let item = SpoolItem {
                 id: id.clone(),
                 origin,
+                identity: Some(cli.identity.clone()),
                 path: path.clone(),
                 session_id: session.clone().or_else(|| infer_session_id(path)),
                 problem_id: problem.clone(),
@@ -1277,8 +1293,8 @@ pub fn run_spool(cli: &Cli) -> CliOutput {
                     )
                 } else {
                     format!(
-                        "asimp spool: enqueued {} ({}) state=unsent client_occurred_at={}\nRun `asimp sync` when ready to drain.\n",
-                        item.id, item.path, item.client_occurred_at
+                        "asimp spool: enqueued {} ({}) state=unsent client_occurred_at={}\nRun `asimp --origin {} --identity={} sync` when ready to drain.\n",
+                        item.id, item.path, item.client_occurred_at, item.origin, cli.identity
                     )
                 },
                 stderr: String::new(),
@@ -1341,10 +1357,11 @@ pub fn run_spool(cli: &Cli) -> CliOutput {
             let mut out = String::new();
             for item in filtered {
                 out.push_str(&format!(
-                    "{}  {:14}  {}  attempts={}  occurred={}\n",
+                    "{}  {:14}  {}  identity={}  attempts={}  occurred={}\n",
                     item.id,
                     item.state.as_str(),
                     item.path,
+                    item.identity.as_deref().unwrap_or("(unbound)"),
                     item.attempts,
                     item.client_occurred_at
                 ));
@@ -1393,6 +1410,10 @@ pub fn run_spool(cli: &Cli) -> CliOutput {
                     if let Some(key) = &item.idempotency_key {
                         s.push_str(&format!("idempotency_key: {key}\n"));
                     }
+                    s.push_str(&format!(
+                        "identity: {}\n",
+                        item.identity.as_deref().unwrap_or("(unbound)")
+                    ));
                     if let Some(ev) = &item.server_event_id {
                         s.push_str(&format!("server_event_id: {ev}\n"));
                     }
@@ -1758,6 +1779,11 @@ pub fn run_sync_with_io(
     let Command::Sync(args) = &cli.command else {
         return input_error("Expected the sync command.");
     };
+    if !crate::credentials::valid_identity(&cli.identity) {
+        return input_error(
+            "Use a 1–64 character --identity containing letters, digits, hyphens or underscores.",
+        );
+    }
     let dir = match resolve_spool_dir(args.spool_dir.as_ref()) {
         Ok(d) => d,
         Err(msg) => return input_error(&msg),
@@ -1780,12 +1806,19 @@ pub fn run_sync_with_io(
         Ok(list) => list,
         Err(msg) => return input_error(&msg),
     };
-    if args
-        .item
-        .as_ref()
-        .is_some_and(|id| !items.iter().any(|item| &item.id == id && item.origin == origin))
-    {
-        return input_error("Selected spool item is absent for this origin; no writes were sent.");
+    if args.item.as_ref().is_some_and(|id| {
+        !items.iter().any(|item| {
+            &item.id == id
+                && item.origin == origin
+                && item
+                    .identity
+                    .as_ref()
+                    .is_none_or(|label| label == &cli.identity)
+        })
+    }) {
+        return input_error(
+            "Selected spool item is absent for this origin and local identity; no writes were sent.",
+        );
     }
 
     let effective_now = server_epoch_s.unwrap_or(local_epoch_s);
@@ -1801,6 +1834,7 @@ pub fn run_sync_with_io(
     let mut awaiting_server_clock = 0usize;
     let mut unknown_commit = 0usize;
     let mut skipped = 0usize;
+    let mut unbound = 0usize;
     let mut outcomes: Vec<Value> = Vec::new();
     let mut stderr_notices = String::new();
     let mut fatal_protocol: Option<ProtocolMismatch> = None;
@@ -1814,10 +1848,29 @@ pub fn run_sync_with_io(
         {
             continue;
         }
-        if item.origin != origin {
+        if item.origin != origin || item.identity.as_ref().is_some_and(|id| id != &cli.identity) {
             skipped += 1;
             continue;
         }
+        if item.identity.is_none() && !(args.bind_legacy && args.item.is_some()) {
+            if matches!(
+                item.state,
+                SpoolState::Unsent | SpoolState::InFlight | SpoolState::UnknownCommit
+            ) {
+                unbound += 1;
+                outcomes.push(json!({
+                    "id": item.id,
+                    "action": "original_identity_required",
+                    "remediation": "Inspect spool show, confirm the original Fellow with hello, then use --identity LABEL sync --item ID --bind-legacy on this origin."
+                }));
+            } else {
+                skipped += 1;
+            }
+            continue;
+        }
+        // For an explicitly selected legacy item the first state change (including
+        // the pre-POST durability barrier) persists this choice under the spool lock.
+        item.identity.get_or_insert_with(|| cli.identity.clone());
         // Hard replay-safety wall: even if a spool file was edited on disk, never
         // auto-retry a non-allowlisted path (e.g. enrollment/token exchange).
         if !is_replay_safe_write_path(&item.path) {
@@ -2087,12 +2140,14 @@ pub fn run_sync_with_io(
         };
     }
 
-    let clean = rejected == 0 && in_flight == 0 && unknown_commit == 0;
+    let clean = rejected == 0 && in_flight == 0 && unknown_commit == 0 && unbound == 0;
     let summary = json!({
         "schema": "asimp.sync.v1",
         "ok": clean,
         "dry_run": args.dry_run,
         "origin": origin,
+        "identity": cli.identity,
+        "unbound": unbound,
         "clock_source": clock_source,
         "effective_time": format_utc_rfc3339(effective_now),
         "committed": committed,
@@ -2128,6 +2183,9 @@ pub fn run_sync_with_io(
             "  ACTION REQUIRED: one or more attempted writes have an expired or unverifiable server replay window (state=unknown_commit). Run `asimp spool show <ID>` for read-only reconciliation commands; never rotate keys blindly.\n",
         );
     }
+    if unbound > 0 {
+        out.push_str("  Legacy items have no local identity. Inspect `asimp spool list`, confirm the original Fellow with `hello`, then use `--identity LABEL sync --item ID --bind-legacy` on the item's origin.\n");
+    }
     CliOutput {
         exit_code: if clean { 0 } else { 1 },
         stdout: out,
@@ -2152,6 +2210,7 @@ mod tests {
         SpoolItem {
             id: "SP-1000-recovery".into(),
             origin: "https://example.test".into(),
+            identity: Some("default".into()),
             path: "/v1/sessions/S-1/promote".into(),
             session_id: Some("S-1".into()),
             problem_id: Some("P-4DSP".into()),
@@ -2182,10 +2241,134 @@ mod tests {
             command: Command::Sync(Box::new(SyncArgs {
                 spool_dir: Some(dir.to_owned()),
                 item: None,
+                bind_legacy: false,
                 dry_run: false,
                 json: true,
             })),
         }
+    }
+
+    #[test]
+    fn sync_separates_identities_and_binds_legacy_before_its_first_send() {
+        let dir = test_dir("mixed-identities");
+        let mut own = test_item();
+        own.identity = Some("orchid".into());
+        save_item(&dir, &own).unwrap();
+        let other = SpoolItem {
+            id: "SP-1001-other".into(),
+            ..test_item()
+        };
+        save_item(&dir, &other).unwrap();
+        let legacy = SpoolItem {
+            id: "SP-1002-legacy".into(),
+            identity: None,
+            ..test_item()
+        };
+        save_item(&dir, &legacy).unwrap();
+        let origin = own.origin.as_str();
+        let mut cli = test_sync_cli(&dir);
+        cli.identity = "orchid".into();
+        let receipt = || {
+            Ok(SyncPostResponse {
+                status: 201,
+                body: r#"{"event_id":"EV-accepted"}"#.into(),
+                server_epoch_s: None,
+                deprecation: None,
+            })
+        };
+        let mut sends = 0;
+        let out = run_sync_with_io(
+            &cli,
+            origin,
+            "0.2.0-draft",
+            Some("token"),
+            Some(2000),
+            2000,
+            |_, _, _, _, _, _| {
+                sends += 1;
+                receipt()
+            },
+        );
+        let report: Value = serde_json::from_str(&out.stdout).unwrap();
+        assert_eq!(sends, 1);
+        assert_eq!(report["committed"], 1);
+        assert_eq!(report["unbound"], 1);
+        assert_eq!(report["skipped"], 1);
+        assert_eq!(out.exit_code, 1);
+        let items = load_all_items(&dir).unwrap();
+        assert_eq!(items[0].state, SpoolState::Committed);
+        assert_eq!(items[1].to_disk_json(), other.to_disk_json());
+        assert_eq!(items[2].to_disk_json(), legacy.to_disk_json());
+
+        let no_send =
+            |_: &str, _: &str, _: &str, _: &str, _: &str, _: &str| panic!("must not post");
+        let Command::Sync(args) = &mut cli.command else {
+            unreachable!()
+        };
+        args.item = Some(other.id.clone());
+        args.bind_legacy = true;
+        let wrong = run_sync_with_io(
+            &cli,
+            origin,
+            "0.2.0-draft",
+            Some("token"),
+            Some(2000),
+            2000,
+            no_send,
+        );
+        assert_eq!(wrong.exit_code, 2);
+        let Command::Sync(args) = &mut cli.command else {
+            unreachable!()
+        };
+        args.item = Some(legacy.id.clone());
+        args.bind_legacy = false;
+        let unbound = run_sync_with_io(
+            &cli,
+            origin,
+            "0.2.0-draft",
+            Some("token"),
+            Some(2000),
+            2000,
+            no_send,
+        );
+        assert_eq!(unbound.exit_code, 1);
+        let Command::Sync(args) = &mut cli.command else {
+            unreachable!()
+        };
+        args.bind_legacy = true;
+        args.dry_run = true;
+        let preview =
+            run_sync_with_io(&cli, origin, "0.2.0-draft", None, Some(2000), 2000, no_send);
+        assert_eq!(preview.exit_code, 0);
+        assert_eq!(
+            load_all_items(&dir).unwrap()[2].to_disk_json(),
+            legacy.to_disk_json()
+        );
+
+        let Command::Sync(args) = &mut cli.command else {
+            unreachable!()
+        };
+        args.dry_run = false;
+        let replay = run_sync_with_io(
+            &cli,
+            origin,
+            "0.2.0-draft",
+            Some("token"),
+            Some(2000),
+            2000,
+            |_, _, _, key, _, _| {
+                let bound = load_all_items(&dir).unwrap().remove(2);
+                assert_eq!(bound.identity.as_deref(), Some("orchid"));
+                assert_eq!(bound.idempotency_key.as_deref(), Some(key));
+                assert_eq!(bound.state, SpoolState::InFlight);
+                receipt()
+            },
+        );
+        assert_eq!(replay.exit_code, 0);
+        assert_eq!(
+            load_all_items(&dir).unwrap()[2].state,
+            SpoolState::Committed
+        );
     }
 
     #[test]
@@ -2199,6 +2382,8 @@ mod tests {
         let valid = item.to_disk_json();
         assert!(SpoolItem::from_disk_json(&valid.to_string()).is_ok());
         for (field, value) in [
+            ("identity", Value::Null),
+            ("identity", json!("invalid identity")),
             ("id", json!("../escape")),
             ("body_json", json!("{\"workshop_id\":\"W-changed\"}")),
             ("body_sha256", json!("0".repeat(64))),
@@ -2566,6 +2751,7 @@ mod tests {
         let base_item = SpoolItem {
             id: "SP-1000-abcdef012345".into(),
             origin: "https://example.test".into(),
+            identity: Some("default".into()),
             path: "/v1/sessions/S-1/promote".into(),
             session_id: Some("S-1".into()),
             problem_id: Some("P-4DSP".into()),
@@ -2633,6 +2819,7 @@ mod tests {
         let item_408 = SpoolItem {
             id: "SP-2000-timeout40800".into(),
             origin: origin.into(),
+            identity: Some("default".into()),
             path: "/v1/sessions/S-1/promote".into(),
             session_id: Some("S-1".into()),
             problem_id: Some("P-4DSP".into()),
@@ -2662,6 +2849,7 @@ mod tests {
             command: Command::Sync(Box::new(SyncArgs {
                 spool_dir: Some(dir.clone()),
                 item: Some(item_408.id.clone()),
+                bind_legacy: false,
                 dry_run: false,
                 json: true,
             })),
@@ -2702,6 +2890,7 @@ mod tests {
             command: Command::Sync(Box::new(SyncArgs {
                 spool_dir: Some(dir.clone()),
                 item: Some(bad_item.id.clone()),
+                bind_legacy: false,
                 dry_run: true,
                 json: true,
             })),

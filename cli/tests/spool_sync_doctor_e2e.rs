@@ -280,6 +280,7 @@ fn replay_window_expiry_freezes_unknown_commit_and_old_unsent_still_sends() {
     let expired_item = SpoolItem {
         id: "SP-1-expired".into(),
         origin: "https://example.test".into(),
+        identity: Some("default".into()),
         path: "/v1/sessions/S-1/promote".into(),
         session_id: Some("S-1".into()),
         problem_id: Some("P-4DSP".into()),
@@ -305,6 +306,7 @@ fn replay_window_expiry_freezes_unknown_commit_and_old_unsent_still_sends() {
     let old_draft = SpoolItem {
         id: "SP-2-olddraft".into(),
         origin: "https://example.test".into(),
+        identity: Some("default".into()),
         path: "/v1/sessions/S-1/workshop".into(),
         session_id: Some("S-1".into()),
         problem_id: Some("P-4DSP".into()),

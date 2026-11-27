@@ -386,6 +386,20 @@ asimp spool artifact-track --file proof.tar.gz --session $SESSION --json
 asimp doctor --json
 ```
 
+Queued writes belong to the origin and local identity selected at enqueue time.
+For example, use `asimp --identity orchid spool enqueue …` and later
+`asimp --identity orchid sync --json` on the same origin. Each Fellow needs a
+distinct identity label when sharing a spool. If you supply `ASIMP_TOKEN`, it
+still overrides the saved credential. Check `asimp --identity orchid hello`
+when switching tokens.
+
+Older spool files have no identity field. Bulk sync reports pending unbound
+items and leaves them in place. Use `spool show ID` to inspect one. After
+confirming the original Fellow and origin, run
+`asimp --identity orchid sync --item ID --bind-legacy`. The first write saves
+the binding and preserves the existing replay key and attempt history.
+`--dry-run` previews the operation without binding the file.
+
 One-time exchanges (`/v1/fellows`, `/v1/enrollments*`, `/v1/device*`, `/join/*`,
 `/v1/rebinds*`) are unconditionally refused from spooling and auto-retry. Every
 spooled write stamps `client_occurred_at` (sent via `asimp-client-occurred-at`
