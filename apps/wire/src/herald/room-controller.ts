@@ -628,14 +628,28 @@ export class HeraldRoomController {
       alive(signal);
       const head = await this.deps.workshopHead(sponsorId, fellowId, problemId);
       alive(signal);
-      for (const { socket, attachment } of entries) {
+      for (const { socket } of entries) {
         if (socket.readyState !== 1) continue;
-        if (head === null) {
+        // Another nudge may have delivered a newer head while this D1 read
+        // was in flight. Never send or restore the pre-await attachment.
+        const current = workshopRoomAttachment(socket);
+        if (
+          !current?.authenticated ||
+          current.sponsorId !== sponsorId ||
+          current.fellowId !== fellowId ||
+          current.problemId !== problemId ||
+          head === null
+        ) {
           closeRoomSocket(socket, 1008, "Workshop room access ended");
           continue;
         }
-        if (head.cursor > attachment.cursor) {
-          sendWorkshopNotice(socket, attachment, head.cursor);
+        const deliveryTime = this.now();
+        if (deliveryTime < current.connectedAt || deliveryTime >= current.expiresAt) {
+          closeRoomSocket(socket, 1008, "Workshop room authorization expired");
+          continue;
+        }
+        if (head.cursor > current.cursor) {
+          sendWorkshopNotice(socket, current, head.cursor);
         }
       }
     }

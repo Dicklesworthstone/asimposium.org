@@ -1,6 +1,9 @@
 import { Database } from "bun:sqlite";
 import { describe, test } from "bun:test";
 import assert from "node:assert/strict";
+import {
+  HERALD_ROOM_LIMITS as LIMITS,
+} from "../../../../packages/contracts/src/herald-room-model.ts";
 import type { HeraldDatabase } from "../../src/herald/outbox.ts";
 import {
   HeraldRoomController,
@@ -8,7 +11,12 @@ import {
   publicRoomRoute,
   type RoomRefusal,
 } from "../../src/herald/room-controller.ts";
-import { type RoomIdentity, type RoomSocket, roomAttachment } from "../../src/herald/room-core.ts";
+import {
+  type RoomIdentity,
+  type RoomSocket,
+  roomAttachment,
+  workshopRoomAttachment,
+} from "../../src/herald/room-core.ts";
 
 /** A transport/storage unit port, not a fake Cloudflare integration result.
  * Head/visibility SQL executes on real SQLite. The authority seam supplies
@@ -506,4 +514,136 @@ describe("Herald production controller ports", () => {
       f.sql.close();
     }
   });
+
+  test("alarm recovers a lost wake after hibernation without fabricating activity", async () => {
+    const f = fixture();
+    try {
+      assert.equal((await f.connect()).status, 200);
+      const socket = f.sockets[0]!;
+      f.setNow(NOW + 1000);
+      await f.controller.webSocketMessage(socket, '{"ack":1}');
+      f.sql.exec("UPDATE problems SET public_seq=3 WHERE id='P-DEMO'");
+      f.hibernate();
+      f.setNow(NOW + LIMITS.revalidateMs);
+      f.setPing(NOW + LIMITS.revalidateMs - 1000);
+      await f.controller.alarm();
+      assert.equal(socket.closed, undefined);
+      assert.deepEqual(socket.sent.map((frame) => JSON.parse(frame).through), [1, 3]);
+      assert.equal(roomAttachment(socket)?.acknowledged, 1);
+      assert.equal(roomAttachment(socket)?.pending, true);
+      await f.controller.webSocketMessage(socket, '{"ack":3}');
+      f.setNow(NOW + 2 * LIMITS.revalidateMs);
+      f.setPing(NOW + 2 * LIMITS.revalidateMs - 1000);
+      await f.controller.alarm();
+      assert.equal(socket.sent.length, 2, "an unchanged authorized head emits no activity");
+      assert.equal(roomAttachment(socket)?.acknowledged, 3);
+    } finally {
+      f.sql.close();
+    }
+  });
+
+  test("missed wakes coalesce behind one frame and still require authorization", async () => {
+    const f = fixture();
+    try {
+      await f.connect();
+      const socket = f.sockets[0]!;
+      for (const seq of [2, 3]) {
+        f.sql.prepare("UPDATE problems SET public_seq=? WHERE id='P-DEMO'").run(seq);
+        f.setNow(NOW + seq * 500);
+        await f.controller.alarm();
+      }
+      assert.equal(socket.sent.length, 1);
+      assert.equal(roomAttachment(socket)?.dirty, true);
+      f.setNow(NOW + 2000);
+      await f.controller.webSocketMessage(socket, '{"ack":1}');
+      assert.deepEqual(socket.sent.map((frame) => JSON.parse(frame).through), [1, 3]);
+      f.setIdentity(undefined);
+      f.sql.exec("UPDATE problems SET public_seq=4 WHERE id='P-DEMO'");
+      await f.controller.alarm();
+      assert.equal(socket.closed, 1008);
+      assert.equal(socket.sent.length, 2, "revocation never reveals the later cursor");
+    } finally {
+      f.sql.close();
+    }
+  });
+
+  for (const outcome of ["newer-head", "revoked", "expired"] as const) {
+    test(`a delayed private workshop head cannot overwrite ${outcome} socket state`, async () => {
+      const f = fixture();
+      let releaseRead!: (head: { cursor: number } | null) => void;
+      const delayedHead = new Promise<{ cursor: number } | null>((resolve) => {
+        releaseRead = resolve;
+      });
+      let readStarted!: () => void;
+      const started = new Promise<void>((resolve) => {
+        readStarted = resolve;
+      });
+      let now = NOW;
+      let headReads = 0;
+      const socket = new Socket();
+      socket.serializeAttachment({
+        v: 3,
+        mode: "workshop",
+        problemId: "P-DEMO",
+        fellowId: "F-1",
+        sponsorId: "S-1",
+        authenticated: true,
+        cursor: 1,
+        connectedAt: NOW,
+        authDeadlineAt: NOW + LIMITS.authDeadlineMs,
+        expiresAt: NOW + LIMITS.lifetimeMs,
+        lastMessageAt: NOW,
+      });
+      f.sockets.push(socket);
+      const controller = new HeraldRoomController({
+        db: {
+          prepare() {
+            throw new Error("private room must use its scoped authority reader");
+          },
+        },
+        port: {
+          ...f.port,
+          ownsWorkshop: (fellow, problem) => fellow === "F-1" && problem === "P-DEMO",
+        },
+        now: () => now,
+        validToken: () => false,
+        authenticate: async () => undefined,
+        workshopHead: async () => {
+          headReads++;
+          if (headReads === 1) {
+            readStarted();
+            return delayedHead;
+          }
+          return outcome === "revoked" ? null : { cursor: 3 };
+        },
+        refuse: (kind) => new Response(kind, { status: 503 }),
+      });
+      const wake = () =>
+        controller.fetch(
+          new Request("https://herald.internal/_herald/workshop/F-1/P-DEMO/nudge", {
+            method: "POST",
+          }),
+        );
+      const olderWake = wake();
+      try {
+        await started;
+        if (outcome === "expired") now = NOW + LIMITS.lifetimeMs;
+        else assert.equal((await wake()).status, 204);
+        releaseRead({ cursor: 2 });
+        assert.equal((await olderWake).status, 204);
+        if (outcome === "newer-head") {
+          assert.deepEqual(socket.sent.map((frame) => JSON.parse(frame).workshop_cursor), [3]);
+          assert.equal(workshopRoomAttachment(socket)?.cursor, 3);
+          assert.equal(socket.closed, undefined);
+        } else {
+          assert.deepEqual(socket.sent, []);
+          assert.equal(socket.closed, 1008);
+        }
+      } finally {
+        releaseRead(null);
+        await olderWake;
+        f.sql.close();
+      }
+    });
+  }
 });

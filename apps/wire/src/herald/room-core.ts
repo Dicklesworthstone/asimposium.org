@@ -419,7 +419,8 @@ export class HeraldRoomFanout {
     }
   }
 
-  /** Periodic bounded revocation/expiry sweep; not an event polling loop. */
+  /** Periodic authority/expiry sweep also recovers a missed post-commit wake.
+   * The head is already read for authorization; unchanged heads emit nothing. */
   revalidate(
     socket: RoomSocket,
     identity: RoomIdentity | undefined,
@@ -428,8 +429,12 @@ export class HeraldRoomFanout {
     lastPingAt: number | null,
   ): void {
     const a = this.authorized(socket, identity, head, now);
-    if (a && now - Math.max(a.connectedAt, a.lastMessageAt, lastPingAt ?? 0) > LIMITS.silenceMs)
+    if (!a || !head) return;
+    if (now - Math.max(a.connectedAt, a.lastMessageAt, lastPingAt ?? 0) > LIMITS.silenceMs) {
       closeRoomSocket(socket, 1001, "Room heartbeat expired");
+      return;
+    }
+    if (head.seq > a.announced) this.refresh(socket, identity, head, now);
   }
 
   private live(socket: RoomSocket, now: number): AnyPublicRoomAttachment | undefined {
