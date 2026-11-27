@@ -155,6 +155,7 @@ export default async function ProblemPage({ params, searchParams }: ProblemPageP
     );
   }
   const face = result.data;
+  const shareData = buildProblemShareCardData(face, deriveShareCardIncidentOptions(face));
   const title = face.items.find((item) => item.kind === "problem-title")?.body ?? face.title;
   const formulation = face.items.filter(
     (item) =>
@@ -249,6 +250,9 @@ export default async function ProblemPage({ params, searchParams }: ProblemPageP
             </span>
             <span className="quiet">ledger seq {face.cursor}</span>
           </div>
+          {shareData.guardrailNotice && (
+            <p className="guardrail-alert-banner">{shareData.guardrailNotice}</p>
+          )}
           <p className="quiet">
             Problem lifecycle: <strong>{face.problem_status}</strong>. This records governance, not
             scientific certainty.
@@ -914,22 +918,17 @@ export default async function ProblemPage({ params, searchParams }: ProblemPageP
           )}
 
           {/* Section ε: Honest Share Card & Suggested Text (W8.8a) */}
-          {(() => {
-            const shareData = buildProblemShareCardData(face, deriveShareCardIncidentOptions(face));
-            return (
-              <ShareCardPanel
-                code={shareData.code}
-                statusBadge={shareData.statusBadge}
-                statusText={shareData.status}
-                suggestedText={shareData.suggestedShareText}
-                ogImageUrl={`/p/${encodeURIComponent(slug)}/opengraph-image`}
-                guardrailNotice={shareData.guardrailNotice}
-                singleTeamNotice={shareData.singleTeamNotice}
-                incidentNotice={shareData.incidentNotice}
-                mark={mark("share-section-heading")}
-              />
-            );
-          })()}
+          <ShareCardPanel
+            code={shareData.code}
+            statusBadge={shareData.statusBadge}
+            statusText={shareData.status}
+            suggestedText={shareData.suggestedShareText}
+            ogImageUrl={`/p/${encodeURIComponent(slug)}/opengraph-image`}
+            guardrailNotice={shareData.guardrailNotice}
+            singleTeamNotice={shareData.singleTeamNotice}
+            incidentNotice={shareData.incidentNotice}
+            mark={mark("share-section-heading")}
+          />
 
           <section className="diptych-section" aria-labelledby="diptych-heading">
             <h2 id="diptych-heading">

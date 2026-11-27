@@ -22,7 +22,11 @@
  */
 
 import type { ClaimFaceResponse, HonorsResponse, ProblemFaceResponse } from "@asimposium/contracts";
-import { ProblemResolutionRecordSchema, SINGLE_TEAM_PROBLEM_NOTICE } from "@asimposium/contracts";
+import {
+  FAMOUS_PROBLEM_GUARDRAIL_NOTICE,
+  ProblemResolutionRecordSchema,
+  SINGLE_TEAM_PROBLEM_NOTICE,
+} from "@asimposium/contracts";
 import {
   HONORS_RECORD_DESCRIPTION,
   HONORS_RECORD_TITLE,
@@ -281,16 +285,10 @@ export function buildProblemShareCardData(
   const rawTitle = titleItem?.body ?? face.title;
   const title = shareExcerpt(rawTitle, "Public problem", 120);
 
-  // Determine if this is a famous problem
+  // Older Stoa deployments omit this field. Only their known identifiers
+  // use the legacy fallback; free-text titles cannot set resolution policy.
   const famous =
-    options.isFamousProblemOverride ??
-    isFamousProblem(
-      face.problem,
-      face.items.some(
-        (i) =>
-          i.kind === "problem-title" && /poincar|riemann|navier|hodge|yang[- ]mills/i.test(i.body),
-      ),
-    );
+    face.has_famous_guardrail ?? options.isFamousProblemOverride ?? isFamousProblem(face.problem);
 
   // Check for single-team problem
   const isSingleTeam = face.omitted.some(
@@ -309,7 +307,7 @@ export function buildProblemShareCardData(
   let statusText: string;
   let statusBadge: string;
   let statusKind: ShareCardStatusKind;
-  let guardrailNotice: string | undefined;
+  const guardrailNotice = famous ? FAMOUS_PROBLEM_GUARDRAIL_NOTICE : undefined;
   let singleTeamNotice: string | undefined;
   let scopeNotice: string | undefined;
   let incidentNotice: string | undefined;
@@ -367,8 +365,6 @@ export function buildProblemShareCardData(
 
     // Apply Famous-Problem Guardrail (§6.2)
     if (famous) {
-      guardrailNotice =
-        "Famous-problem guardrail: no resolution displayed without extraordinary evidence.";
       if (statusKind !== "under-result-review" && statusKind !== "resolved") {
         statusText = `${statusText} (unresolved)`;
       }
@@ -545,12 +541,9 @@ export function buildClaimShareCardData(
     },
   ];
 
-  const famous = options.isFamousProblemOverride ?? isFamousProblem(problemId);
-  let guardrailNotice: string | undefined;
-  if (famous) {
-    guardrailNotice =
-      "Famous-problem guardrail: no resolution displayed without extraordinary evidence.";
-  }
+  const famous =
+    face.has_famous_guardrail ?? options.isFamousProblemOverride ?? isFamousProblem(problemId);
+  const guardrailNotice = famous ? FAMOUS_PROBLEM_GUARDRAIL_NOTICE : undefined;
 
   const data: ShareCardData = {
     entityKind: "claim",

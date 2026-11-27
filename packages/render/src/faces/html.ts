@@ -12,7 +12,11 @@
  * The fragment carries no `<html>`, `<head>` or `<body>`: Agora embeds it.
  */
 
-import { GroundedFalsificationCheckSchema, PublicClaimTargetSchema } from "@asimposium/contracts";
+import {
+  FAMOUS_PROBLEM_GUARDRAIL_NOTICE,
+  GroundedFalsificationCheckSchema,
+  PublicClaimTargetSchema,
+} from "@asimposium/contracts";
 import {
   CLAIM_ARTIFACT_DISCOVERY_BOUNDARY,
   claimEvidenceArtifactDiscovery,
@@ -107,6 +111,8 @@ export function renderHtmlFragmentFace(prepared: PreparedProjection): string {
   }
   if (prepared.roster !== undefined)
     lines.push(renderProblemRosterHtml(prepared.roster, prepared.problem, prepared.cursor));
+  if (prepared.has_famous_guardrail)
+    lines.push(`  <p>${escapeHtml(FAMOUS_PROBLEM_GUARDRAIL_NOTICE)}</p>`);
   if (prepared.claim_state !== undefined) {
     lines.push(
       `  <section class="asimp-claim-state"><h3>Computed claim state</h3><pre><code>${escapeHtml(stableStringify(prepared.claim_state, 2))}</code></pre></section>`,

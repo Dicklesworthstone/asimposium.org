@@ -102,6 +102,8 @@ export interface Projection {
   readonly promotion_budget?: RateLimitBudget;
   /** Exact-version scientific standing, computed by the ledger reader. */
   readonly claim_state?: PublicClaimState;
+  /** Current resolution governance, independent of the scientific snapshot. */
+  readonly has_famous_guardrail?: boolean;
   /** Canonical lifecycle on a public problem digest; distinct from claim standing. */
   readonly problem_status?: ProblemFaceResponse["problem_status"];
   readonly roster?: PublicProblemRoster | undefined;

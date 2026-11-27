@@ -2314,6 +2314,20 @@ await runLocalWorkerJourney(async (context) => {
   await env.DB.prepare("UPDATE problems SET famous_guardrail = ? WHERE id = ?")
     .bind(famous, problemId)
     .run();
+  // The same governance classification applies to both the problem and an
+  // exact claim published before the classification changed.
+  const checkPublicGuardrail = async (expected) => {
+    const problem = await call(`/p/${problemId}.json`, undefined, undefined, 200);
+    const claim = await call(
+      `/p/${problemId}/claims/${c1Id}@1.json?through=${problem.cursor}`,
+      undefined, undefined, 200,
+    );
+    for (const face of [problem, claim]) {
+      assert.equal(face.has_famous_guardrail, expected);
+      assert.ok(!JSON.stringify(face).includes("Famous-problem guard control"));
+    }
+  };
+  await checkPublicGuardrail(true);
   const beforeFamous = await resolutionState();
   const famousRefusal = await govern(
     {
@@ -2328,6 +2342,7 @@ await runLocalWorkerJourney(async (context) => {
   await env.DB.prepare("UPDATE problems SET famous_guardrail = NULL WHERE id = ?")
     .bind(problemId)
     .run();
+  await checkPublicGuardrail(false);
   assert.equal(
     await fixtures.screeningCalls(),
     screensBeforeAdmissionRefusals,

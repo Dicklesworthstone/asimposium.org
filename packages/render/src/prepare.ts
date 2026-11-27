@@ -97,6 +97,8 @@ export interface PreparedProjection {
   readonly viewer?: ProjectionViewer;
   readonly promotion_budget?: RateLimitBudget;
   readonly claim_state?: PublicClaimState;
+  /** Current resolution governance, independent of the scientific snapshot. */
+  readonly has_famous_guardrail?: boolean;
   readonly problem_status?: Projection["problem_status"];
   readonly roster?: Projection["roster"];
   readonly fingerprint: string;
@@ -451,6 +453,14 @@ function snapshotProjection(value: Projection): Projection {
   ) {
     refuseUnreadableProjection("problem_status requires a public lifecycle on a problem digest");
   }
+  const guardrail = readProjectionMember(source, "has_famous_guardrail", "has_famous_guardrail");
+  const isClaimFace = kind === "claim-face" && schema === "asimposium.claim-face.v1";
+  if (
+    guardrail !== undefined &&
+    (typeof guardrail !== "boolean" || !(requiresProblemStatus || isClaimFace))
+  ) {
+    refuseUnreadableProjection("has_famous_guardrail requires a public problem or claim face");
+  }
   const rosterValue = readProjectionMember(source, "roster", "roster");
   let roster: Projection["roster"];
   if (rosterValue !== undefined) {
@@ -491,6 +501,7 @@ function snapshotProjection(value: Projection): Projection {
     ...(promotionBudget === undefined ? {} : { promotion_budget: promotionBudget }),
     ...(claimState === undefined ? {} : { claim_state: claimState }),
     ...(problemStatus?.success ? { problem_status: problemStatus.data } : {}),
+    ...(typeof guardrail === "boolean" ? { has_famous_guardrail: guardrail } : {}),
     ...(roster === undefined ? {} : { roster }),
   };
 }
@@ -1195,6 +1206,9 @@ export function prepareProjection(rawProjection: Projection): PreparedProjection
     ...(projection.problem_status === undefined
       ? {}
       : { problem_status: projection.problem_status }),
+    ...(projection.has_famous_guardrail === undefined
+      ? {}
+      : { has_famous_guardrail: projection.has_famous_guardrail }),
     ...(projection.roster === undefined ? {} : { roster: projection.roster }),
   });
 
@@ -1249,6 +1263,9 @@ export function prepareProjection(rawProjection: Projection): PreparedProjection
     ...(projection.problem_status === undefined
       ? {}
       : { problem_status: projection.problem_status }),
+    ...(projection.has_famous_guardrail === undefined
+      ? {}
+      : { has_famous_guardrail: projection.has_famous_guardrail }),
     ...(projection.roster === undefined ? {} : { roster: projection.roster }),
     fingerprint: contentFingerprint(fingerprintSource),
     neutralized,

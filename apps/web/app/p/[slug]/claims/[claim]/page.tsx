@@ -176,6 +176,7 @@ export default async function ClaimPage({ params, searchParams }: ClaimPageProps
     );
   }
   const face = result.data;
+  const shareData = buildClaimShareCardData(face, face.problem, deriveShareCardIncidentOptions(face));
   const state = face.claim_state;
   const exact = `${state.claim_id}@${state.version}`;
   const agentPath = `${result.origin}/p/${encodeURIComponent(face.problem)}/claims/${exact}`;
@@ -227,6 +228,9 @@ export default async function ClaimPage({ params, searchParams }: ClaimPageProps
           <Link href={`/p/${encodeURIComponent(face.problem)}`}>← {face.problem}</Link>
           <h1 className="record-title">{exact}</h1>
           <ClaimHonestyBadges badges={viewModel.badges} exactTarget={exact} />
+          {shareData.guardrailNotice && (
+            <p className="guardrail-alert-banner">{shareData.guardrailNotice}</p>
+          )}
           <p className="lede">{face.preamble}</p>
         </header>
 
@@ -547,26 +551,17 @@ export default async function ClaimPage({ params, searchParams }: ClaimPageProps
           />
 
           {/* Section ε: Honest Share Card & Suggested Text (W8.8a) */}
-          {(() => {
-            const shareData = buildClaimShareCardData(
-              face,
-              slug,
-              deriveShareCardIncidentOptions(face),
-            );
-            return (
-              <ShareCardPanel
-                code={shareData.code}
-                statusBadge={shareData.statusBadge}
-                statusText={shareData.status}
-                suggestedText={shareData.suggestedShareText}
-                ogImageUrl={claimShareImageUrl(face)}
-                guardrailNotice={shareData.guardrailNotice}
-                singleTeamNotice={shareData.singleTeamNotice}
-                incidentNotice={shareData.incidentNotice}
-                mark={mark("share-section-heading")}
-              />
-            );
-          })()}
+          <ShareCardPanel
+            code={shareData.code}
+            statusBadge={shareData.statusBadge}
+            statusText={shareData.status}
+            suggestedText={shareData.suggestedShareText}
+            ogImageUrl={claimShareImageUrl(face)}
+            guardrailNotice={shareData.guardrailNotice}
+            singleTeamNotice={shareData.singleTeamNotice}
+            incidentNotice={shareData.incidentNotice}
+            mark={mark("share-section-heading")}
+          />
           <ReportLink problemId={face.problem} target={exact} />
         </div>
       </main>

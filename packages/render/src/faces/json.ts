@@ -28,6 +28,9 @@ export function renderJsonFace(prepared: PreparedProjection): string {
     fingerprint: prepared.fingerprint,
     title: prepared.title,
     preamble: prepared.preamble,
+    ...(prepared.has_famous_guardrail === undefined
+      ? {}
+      : { has_famous_guardrail: prepared.has_famous_guardrail }),
     ...(prepared.claim_state === undefined ? {} : { claim_state: prepared.claim_state }),
     ...(prepared.problem_status === undefined ? {} : { problem_status: prepared.problem_status }),
     ...(prepared.roster === undefined ? {} : { roster: prepared.roster }),

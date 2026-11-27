@@ -1631,6 +1631,9 @@
             "retired"
           ]
         },
+        "has_famous_guardrail": {
+          "type": "boolean"
+        },
         "roster": {
           "type": "object",
           "properties": {
@@ -3964,6 +3967,9 @@
             "legacy_reviews"
           ],
           "additionalProperties": false
+        },
+        "has_famous_guardrail": {
+          "type": "boolean"
         }
       },
       "required": [

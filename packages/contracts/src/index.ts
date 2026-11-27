@@ -648,6 +648,7 @@ export {
   PublicLedgerProblemIdSchema,
   type PublicProblemRoster,
   PublicProblemRosterSchema,
+  FAMOUS_PROBLEM_GUARDRAIL_NOTICE,
   SINGLE_TEAM_PROBLEM_NOTICE,
 } from "./ledger.ts";
 export {

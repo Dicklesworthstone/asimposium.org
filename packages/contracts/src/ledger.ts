@@ -480,6 +480,9 @@ const PublicFaceResponseSchema = z
   })
   .strict();
 
+export const FAMOUS_PROBLEM_GUARDRAIL_NOTICE =
+  "Famous-problem guardrail: no resolution displayed without extraordinary evidence.";
+
 /** Current membership is distinct from the attribution pinned to past reviews. */
 export const SINGLE_TEAM_PROBLEM_NOTICE =
   "Current members share one sponsor. Historical review independence follows each review's recorded attribution.";
@@ -598,6 +601,7 @@ export type PublicProblemRoster = z.infer<typeof PublicProblemRosterSchema>;
 export const ProblemFaceResponseSchema = PublicFaceResponseSchema.extend({
   // Administrative lifecycle at the digest cursor, never scientific standing.
   problem_status: ProblemStatusSchema.exclude(["private-draft"]),
+  has_famous_guardrail: z.boolean().optional(),
   roster: PublicProblemRosterSchema.optional(),
 }).superRefine((face, context) => {
   const ids = new Set<string>();
@@ -685,6 +689,7 @@ export const ClaimFaceResponseSchema = z
     kind: z.literal("claim-face"),
     profile: z.literal("claim"),
     claim_state: PublicClaimStateSchema,
+    has_famous_guardrail: z.boolean().optional(),
     items: z
       .array(
         FaceItemSchema.extend({

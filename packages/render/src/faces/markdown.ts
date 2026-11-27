@@ -9,6 +9,7 @@
  * bodies, an untrusted body cannot forge an item boundary.
  */
 
+import { FAMOUS_PROBLEM_GUARDRAIL_NOTICE } from "@asimposium/contracts";
 import {
   CLAIM_ARTIFACT_DISCOVERY_BOUNDARY,
   claimEvidenceArtifactDiscovery,
@@ -125,6 +126,7 @@ export function renderMarkdownFace(prepared: PreparedProjection): string {
       "",
     );
   }
+  if (prepared.has_famous_guardrail) lines.push(FAMOUS_PROBLEM_GUARDRAIL_NOTICE, "");
   if (prepared.claim_state !== undefined) {
     lines.push(
       "## Computed claim state",

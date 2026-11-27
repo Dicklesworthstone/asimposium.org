@@ -1359,7 +1359,7 @@ describe("face wire format", () => {
     const db = new Database(":memory:");
     try {
       db.run(
-        "CREATE TABLE problems (id TEXT PRIMARY KEY, public_seq INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'active', unlisted INTEGER NOT NULL DEFAULT 0, title TEXT NOT NULL DEFAULT '', current_statement_version INTEGER NOT NULL DEFAULT 1)",
+        "CREATE TABLE problems (id TEXT PRIMARY KEY, public_seq INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'active', unlisted INTEGER NOT NULL DEFAULT 0, title TEXT NOT NULL DEFAULT '', current_statement_version INTEGER NOT NULL DEFAULT 1, famous_guardrail TEXT)",
       );
       db.run(
         "CREATE TABLE problem_statement_versions (problem_id TEXT, version INTEGER, statement TEXT, falsifier TEXT, motivation TEXT, PRIMARY KEY (problem_id, version))",
@@ -2705,6 +2705,7 @@ describe("W6.1 public faces: TOON, full pack, orders/moves, and claims", () => {
         updated_at TEXT NOT NULL DEFAULT '2026-08-14T00:00:00.000Z',
         unlisted INTEGER NOT NULL DEFAULT 0,
         current_statement_version INTEGER NOT NULL DEFAULT 1,
+        famous_guardrail TEXT,
         -- As db/migrations/0062_problem_governance.sql defines it; the public
         -- moves head reads it to skip archived read-only problems.
         admission_mode TEXT NOT NULL DEFAULT 'open'
@@ -3062,6 +3063,43 @@ describe("W6.1 public faces: TOON, full pack, orders/moves, and claims", () => {
         env,
       );
       expect(missing.status).toBe(404);
+    } finally {
+      db.close();
+    }
+  });
+
+  test("the problem guardrail changes public validators without exposing governance prose", async () => {
+    const { db, env } = makeFaceDb();
+    try {
+      const routes = createLedgerFaceRoutes();
+      const validators = new Map<string, string>();
+      for (const enabled of [false, true, false]) {
+        const guardrail = enabled ? JSON.stringify({
+          canonical_formulation: "Governance-only formulation",
+          variant_distinctions: "Separate research questions",
+          authoritative_references: ["https://example.org/reference"],
+          standing_banner: "Governance-only standing banner",
+        }) : null;
+        db.prepare("UPDATE problems SET famous_guardrail = ? WHERE id = 'P-TEST'").run(guardrail);
+        for (const suffix of [".json", ".md"]) {
+          const response = await routes.fetch(new Request(`https://a.asimposium.org/p/P-TEST${suffix}`, {
+            headers: { "if-none-match": validators.get(suffix) ?? "" },
+          }), env);
+          expect(response.status).toBe(200);
+          const body = await response.text();
+          expect(body).not.toContain("Governance-only");
+          if (suffix === ".json") {
+            const face = ProblemFaceResponseSchema.parse(JSON.parse(body));
+            expect(face.has_famous_guardrail).toBe(enabled);
+            expect(face.cursor).toBe(10);
+          } else {
+            expect(body.includes("Famous-problem guardrail")).toBe(enabled);
+          }
+          const etag = response.headers.get("etag");
+          if (!etag) throw new Error("Public face has no validator");
+          validators.set(suffix, etag);
+        }
+      }
     } finally {
       db.close();
     }

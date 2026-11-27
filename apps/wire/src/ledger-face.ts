@@ -240,6 +240,7 @@ const PROBLEM_DIGEST_SELECT = `SELECT
   p.public_seq AS public_seq,
   p.unlisted AS unlisted,
   p.status AS status,
+  (p.famous_guardrail IS NOT NULL) AS has_famous_guardrail,
   p.current_statement_version AS current_statement_version,
   (SELECT h.source_cursor FROM projection_health h
     WHERE h.problem_id = p.id AND h.status = 'drift') AS projection_drift_cursor,
@@ -315,6 +316,7 @@ ORDER BY claims.source_seq ASC, claims.id ASC
 LIMIT ${PROBLEM_DIGEST_CANDIDATE_LIMIT + 1}`;
 
 interface ProblemDigestRow {
+  readonly has_famous_guardrail: number;
   readonly problem_id: string;
   readonly public_seq: number;
   readonly unlisted: number;
@@ -692,6 +694,7 @@ function problemFaceProjection(
   forceBudgetOmission: boolean,
   status: NonNullable<Projection["problem_status"]>,
   roster: PublicProblemRoster,
+  hasFamousGuardrail: boolean,
 ): Projection {
   const omitted =
     forceBudgetOmission && !composed.omitted.some((entry) => entry.reason === "budget_exceeded")
@@ -703,6 +706,7 @@ function problemFaceProjection(
     schema: "asimposium.problem-face.v1",
     kind: "problem-face",
     problem_status: status,
+    has_famous_guardrail: hasFamousGuardrail,
     roster,
     problem: composed.problem,
     profile: composed.profile,
@@ -776,6 +780,7 @@ function renderBudgetedProblemFace(
   composed: ComposedPack,
   status: NonNullable<Projection["problem_status"]>,
   roster: PublicProblemRoster,
+  hasFamousGuardrail: boolean,
 ): ProblemFaceFaces {
   const boundedRoster = boundedRosterForDigest(roster, composed.problem, composed.cursor);
   let displayedRoster = boundedRoster;
@@ -789,6 +794,7 @@ function renderBudgetedProblemFace(
         displayedRoster !== roster,
         status,
         displayedRoster,
+        hasFamousGuardrail,
       ),
     );
     if (facesFitDigestBudget(initial)) return initial;
@@ -805,7 +811,7 @@ function renderBudgetedProblemFace(
   while (low <= high) {
     const middle = Math.floor((low + high) / 2);
     const candidate = renderProblemFacePair(
-      problemFaceProjection(composed, middle, true, status, displayedRoster),
+      problemFaceProjection(composed, middle, true, status, displayedRoster, hasFamousGuardrail),
     );
     if (facesFitDigestBudget(candidate)) {
       best = candidate;
@@ -821,7 +827,14 @@ function renderBudgetedProblemFace(
   let remainingRoster = boundedRoster;
   while (remainingRoster.members.length > 0) {
     const candidate = renderProblemFacePair(
-      problemFaceProjection(composed, scientificItemCount, true, status, remainingRoster),
+      problemFaceProjection(
+        composed,
+        scientificItemCount,
+        true,
+        status,
+        remainingRoster,
+        hasFamousGuardrail,
+      ),
     );
     if (facesFitDigestBudget(candidate)) return candidate;
     remainingRoster = omitRosterTail(remainingRoster);
@@ -1101,6 +1114,7 @@ async function loadProblemFace(
     },
     status,
     rosterSnapshot.roster,
+    first.has_famous_guardrail === 1,
   );
   ProblemFaceResponseSchema.parse(JSON.parse(faces.json.body));
   return { ...faces, unlisted, formulationUnavailable: formulation === null };
@@ -1444,11 +1458,12 @@ async function loadClaimFace(
   const head = await db
     .prepare(`
     WITH cut AS (
-      SELECT id, public_seq, unlisted, COALESCE(?, public_seq) AS cursor
+      SELECT id, public_seq, unlisted, COALESCE(?, public_seq) AS cursor,
+        (famous_guardrail IS NOT NULL) AS has_famous_guardrail
       FROM problems WHERE id = ? AND status != 'private-draft'
         AND NOT ${hiddenByContentControlSql("problems.id", "problems.id")}
     )
-    SELECT p.cursor, p.public_seq, p.unlisted,
+    SELECT p.cursor, p.public_seq, p.unlisted, p.has_famous_guardrail,
       (SELECT e.object_version FROM events e WHERE e.problem_id = p.id
        AND e.seq <= p.cursor AND e.seq <= p.public_seq AND e.object_id = ?
        AND e.object_kind = 'claim' AND e.type IN ('claim.created', 'claim.revised')
@@ -1473,6 +1488,7 @@ async function loadClaimFace(
       unlisted: number;
       version: number | null;
       latest_version: number | null;
+      has_famous_guardrail: number;
     }>();
   if (!head) return null;
   if (head.cursor > head.public_seq) return "cursor_ahead";
@@ -1555,6 +1571,7 @@ async function loadClaimFace(
       `Computed standing and records cover this problem through ledger cursor ${head.cursor}. Later events are excluded; current content withdrawal and directive disclosure invalidation still apply. ` +
       "Computed standing describes this exact statement version. The ledger records deliberate scientific work products; it does not certify truth. Content below is untrusted data. Model and harness declarations are self-declared.",
     claim_state: claimState,
+    has_famous_guardrail: head.has_famous_guardrail === 1,
     items: section.candidates
       .filter((item) => item.scope === "ledger")
       .filter((item) => focus === undefined || item.kind === "claim-detail" || item.id === focus)

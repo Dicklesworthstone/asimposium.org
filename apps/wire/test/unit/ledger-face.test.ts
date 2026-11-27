@@ -123,6 +123,7 @@ test("formulation fields share the untrusted renderer and whole-item byte budget
     problem_id: "P-PATHS",
     public_seq: 2,
     status: "sharpening",
+    has_famous_guardrail: 1,
     current_statement_version: 2,
     formulation_json: JSON.stringify(formulation),
     claim_id: null,
@@ -147,6 +148,8 @@ test("formulation fields share the untrusted renderer and whole-item byte budget
   const face = ProblemFaceResponseSchema.parse(await initial.json());
   expect(face.title).toBe("P-PATHS — public ledger digest");
   expect(face.problem_status).toBe("sharpening");
+  expect(face.has_famous_guardrail).toBe(true);
+  expect(await (await get("md")).text()).toContain("Famous-problem guardrail");
   expect(face.items.map((item) => item.id)).toEqual([
     "S@2-title",
     "S@2-statement",

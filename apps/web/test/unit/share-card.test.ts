@@ -415,6 +415,31 @@ describe("Problem Share Card View Model", () => {
     expect(data.suggestedShareText).toContain("Famous-problem guardrail");
   });
 
+  test("both share cards follow the recorded guardrail even when names suggest the opposite", () => {
+    for (const enabled of [true, false]) {
+      const problem = enabled ? "P-100" : "P-RH";
+      const face = createMinimalProblemFace({ problem, has_famous_guardrail: enabled });
+      for (const card of [
+        buildProblemShareCardData(face),
+        buildClaimShareCardData(
+          createMinimalClaimFace({ problem, has_famous_guardrail: enabled }),
+          problem,
+        ),
+      ]) {
+        expect(card.isFamousProblem).toBe(enabled);
+        expect(card.suggestedShareText.includes("Famous-problem guardrail")).toBe(enabled);
+        expect(
+          renderToStaticMarkup(renderShareCard(card)).includes("Famous-problem guardrail"),
+        ).toBe(enabled);
+      }
+    }
+    const legacy = createMinimalProblemFace();
+    const title = legacy.items.find((item) => item.kind === "problem-title");
+    if (!title) throw new Error("Problem title fixture missing");
+    const ordinary = { ...legacy, items: [{ ...title, body: "Computing a Riemann sum" }] };
+    expect(buildProblemShareCardData(ordinary).isFamousProblem).toBe(false);
+  });
+
   test("single-team notice describes current membership without denying historical independent reviews", () => {
     const face = createMinimalProblemFace({
       omitted: [{ reason: "single_team" }],
