@@ -7,7 +7,16 @@ import {
 } from "@asimposium/contracts/statements";
 import type { Projection, ProjectionItem } from "@asimposium/render";
 
-export type StatementFaceFormat = "json" | "md" | "html" | "bib" | "csl.json";
+import { ifNoneMatchMatches } from "../http/representation.ts";
+
+export const STATEMENT_FACE_MEDIA = {
+  md: "text/markdown",
+  json: "application/json",
+  html: "text/html",
+  bib: "application/x-bibtex",
+  "csl.json": "application/vnd.citationstyles.csl+json",
+} as const;
+export type StatementFaceFormat = keyof typeof STATEMENT_FACE_MEDIA;
 export const STATEMENT_FACE_MAX_BYTES = 1024 * 1024;
 
 function statementItems(statement: PublicStatementVersion): ProjectionItem[] {
@@ -109,11 +118,15 @@ export function statementsProjection(
             },
           ]
         : []),
-      ...(!history ? (["bib", "csl.json"] as const).map((format) => ({
-        method: "GET" as const,
-        url: statementVersionPath(face.problem_id, face.statement.version, format, { through: face.cursor }),
-        why: `Cite this published formulation as ${format === "bib" ? "BibTeX" : "CSL-JSON"}.`,
-      })) : []),
+      ...(!history
+        ? (["bib", "csl.json"] as const).map((format) => ({
+            method: "GET" as const,
+            url: statementVersionPath(face.problem_id, face.statement.version, format, {
+              through: face.cursor,
+            }),
+            why: `Cite this published formulation as ${format === "bib" ? "BibTeX" : "CSL-JSON"}.`,
+          }))
+        : []),
       ...versions.map((statement) => ({
         method: "GET" as const,
         url: statementVersionPath(face.problem_id, statement.version, "md", {
@@ -163,19 +176,24 @@ export async function statementFaceResponse(
   let location: string;
   let next: string | undefined;
   if ("statements" in face) {
-    if (format === "bib" || format === "csl.json") throw new Error("Citations require an exact statement");
-    location = statementHistoryPath(face.problem_id, format, { through: face.cursor, after: face.after });
+    if (format === "bib" || format === "csl.json")
+      throw new Error("Citations require an exact statement");
+    location = statementHistoryPath(face.problem_id, format, {
+      through: face.cursor,
+      after: face.after,
+    });
     if (face.next_after !== null)
-      next = statementHistoryPath(face.problem_id, format, { through: face.cursor, after: face.next_after });
+      next = statementHistoryPath(face.problem_id, format, {
+        through: face.cursor,
+        after: face.next_after,
+      });
   } else {
-    location = statementVersionPath(face.problem_id, face.statement.version, format, { through: face.cursor });
+    location = statementVersionPath(face.problem_id, face.statement.version, format, {
+      through: face.cursor,
+    });
   }
-  const mediaTypes = {
-    json: "application/json", md: "text/markdown", html: "text/html",
-    bib: "application/x-bibtex", "csl.json": "application/vnd.citationstyles.csl+json",
-  };
   const headers = new Headers({
-    "content-type": mediaTypes[format] + "; charset=utf-8",
+    "content-type": STATEMENT_FACE_MEDIA[format] + "; charset=utf-8",
     "cache-control": unlisted ? "private, no-store" : "public, max-age=0, must-revalidate",
     "x-content-type-options": "nosniff",
     "content-location": location,
@@ -189,10 +207,19 @@ export async function statementFaceResponse(
       "default-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'",
     );
   if (next) headers.append("link", `<${next}>; rel="next"`);
+  if ("statement" in face) {
+    for (const citation of ["bib", "csl.json"] as const) {
+      const href = statementVersionPath(face.problem_id, face.statement.version, citation, {
+        through: face.cursor,
+      });
+      headers.append(
+        "link",
+        `<${href}>; rel="alternate"; type="${STATEMENT_FACE_MEDIA[citation]}"`,
+      );
+    }
+  }
   if (filename) headers.set("content-disposition", `attachment; filename="${filename}"`);
-  const matches = (request.headers.get("if-none-match") ?? "")
-    .split(",")
-    .some((value) => [etag, `W/${etag}`, "*"].includes(value.trim()));
+  const matches = ifNoneMatchMatches(request.headers.get("if-none-match"), etag);
   return new Response(matches || request.method === "HEAD" ? null : body, {
     status: matches ? 304 : 200,
     headers,

@@ -10,9 +10,15 @@ import {
 import { renderProjection } from "@asimposium/render";
 import { Hono } from "hono";
 import type { Env } from "../env.ts";
-import { citationForStatement } from "../krater/citation.ts";
 import { validatedProblem } from "../http/envelope.ts";
-import { statementFaceResponse, statementsProjection } from "./statements-face.ts";
+import { selectMediaFace } from "../http/representation.ts";
+import { citationForStatement } from "../krater/citation.ts";
+import {
+  STATEMENT_FACE_MEDIA,
+  type StatementFaceFormat,
+  statementFaceResponse,
+  statementsProjection,
+} from "./statements-face.ts";
 import {
   loadStatementHistory,
   loadStatementVersion,
@@ -145,14 +151,35 @@ export function createStatementRoutes(): Hono<{ Bindings: Env }> {
       repeated(params)
     )
       return refusal("query", c.req.method);
-    if (!match)
-      return c.redirect(statementVersionPath(problem, version.data, "md", query.data), 308);
-    const format = match[2] as "json" | "md" | "html" | "bib" | "csl.json";
+    if (!match) {
+      const selected = selectMediaFace(c.req.header("accept") ?? "", STATEMENT_FACE_MEDIA, "md");
+      return new Response(null, {
+        status: 308,
+        headers: {
+          location: statementVersionPath(problem, version.data, selected, query.data),
+          vary: "Accept",
+          "cache-control": "private, no-store",
+        },
+      });
+    }
+    const format = match[2] as StatementFaceFormat;
     try {
       const result = await loadStatementVersion(c.env.DB, problem, version.data, query.data);
       if (format === "bib" || format === "csl.json") {
-        const citation = citationForStatement(result.face, result.publishedAt, new Date().toISOString(), format);
-        return await statementFaceResponse(c.req.raw, citation.body, format, result.face, result.unlisted, citation.filename);
+        const citation = citationForStatement(
+          result.face,
+          result.publishedAt,
+          new Date().toISOString(),
+          format,
+        );
+        return await statementFaceResponse(
+          c.req.raw,
+          citation.body,
+          format,
+          result.face,
+          result.unlisted,
+          citation.filename,
+        );
       }
       const body =
         format === "json"

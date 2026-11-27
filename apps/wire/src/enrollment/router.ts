@@ -94,6 +94,7 @@ import { readActiveDirectivePage } from "../directives/active-page.ts";
 import { enqueueSponsorNotificationIfConfigured } from "../email/transactional-email.ts";
 import type { Env } from "../env.ts";
 import { validatedProblem } from "../http/envelope.ts";
+import { ifNoneMatchMatches, selectMediaFace } from "../http/representation.ts";
 import {
   confirmInboxReadAuthority,
   getInboxFeedbackSummary,
@@ -133,7 +134,10 @@ import { problemSlowModeHttp } from "../moderation/slow-mode-http.ts";
 import { sponsorSuspensionHttp } from "../moderation/sponsor-suspension-http.ts";
 import { getScreeningCase } from "../moderation/store.ts";
 import { getProblemCreationBudget } from "../problems/creation-quota.ts";
-import { assignedBriefReadRequired, fellowMayReadAssignedBriefs } from "../problems/fellow-briefs.ts";
+import {
+  assignedBriefReadRequired,
+  fellowMayReadAssignedBriefs,
+} from "../problems/fellow-briefs.ts";
 import { rebuildSearchIndex, searchIndexHealth } from "../search/index-health";
 import { getRemainingBudget, parseSponsorLimit } from "../sessions/quota.ts";
 import { admitFellowRead, fellowReadBudgetHeaders } from "../sessions/read-quota.ts";
@@ -156,8 +160,8 @@ import {
   EnrollmentReplayConfigurationError,
   type EnrollmentResourceGrants,
   type EnrollmentService,
-  fellowCanAccessPrivateProblem,
   type FellowCredentialBinding,
+  fellowCanAccessPrivateProblem,
   SPONSOR_ENROLLMENT_RATE_LIMIT_ATTEMPTS,
   SPONSOR_ENROLLMENT_RATE_LIMIT_WINDOW_MS,
   SponsorEnrollmentRateLimitError,
@@ -316,115 +320,13 @@ function jsonContentTypeRequiredResponse(
 type CapsuleFace = "json" | "html" | "markdown";
 
 const CAPSULE_FACE_MEDIA: Readonly<Record<CapsuleFace, string>> = {
+  markdown: "text/markdown",
   json: "application/json",
   html: "text/html",
-  markdown: "text/markdown",
 };
 
-/** Parse one quality value. Invalid or duplicate q parameters refuse the range. */
-function acceptQuality(parameters: readonly string[]): number {
-  let quality: number | undefined;
-  for (const parameter of parameters) {
-    const [name, value, ...rest] = parameter.trim().split("=");
-    if (name?.toLowerCase() !== "q") continue;
-    if (quality !== undefined || value === undefined || rest.length !== 0) return 0;
-    const normalized = value.trim();
-    if (!/^(?:0(?:\.\d{0,3})?|\.\d{1,3}|1(?:\.0{0,3})?)$/.test(normalized)) return 0;
-    quality = Number(normalized);
-  }
-  return quality ?? 1;
-}
-
-interface AcceptedMediaRange {
-  readonly type: string;
-  readonly subtype: string;
-  readonly quality: number;
-}
-
-/** Split an HTTP list outside quoted strings, retaining escapes for later validation. */
-function splitHeaderList(header: string, delimiter: "," | ";"): string[] {
-  const values: string[] = [];
-  let current = "";
-  let quoted = false;
-  let escaped = false;
-  for (const character of header) {
-    if (escaped) {
-      current += character;
-      escaped = false;
-      continue;
-    }
-    if (quoted && character === "\\") {
-      current += character;
-      escaped = true;
-      continue;
-    }
-    if (character === '"') quoted = !quoted;
-    if (character === delimiter && !quoted) {
-      values.push(current.trim());
-      current = "";
-      continue;
-    }
-    current += character;
-  }
-  values.push(current.trim());
-  return values;
-}
-
-function acceptedMediaRanges(accept: string): readonly AcceptedMediaRange[] {
-  const ranges: AcceptedMediaRange[] = [];
-  for (const item of splitHeaderList(accept, ",")) {
-    const [mediaRange, ...parameters] = splitHeaderList(item, ";");
-    const parts = mediaRange?.split("/") ?? [];
-    if (parts.length !== 2) continue;
-    const type = parts[0]?.trim().toLowerCase() ?? "";
-    const subtype = parts[1]?.trim().toLowerCase() ?? "";
-    if (type === "" || subtype === "" || (type === "*" && subtype !== "*")) continue;
-    ranges.push({ type, subtype, quality: acceptQuality(parameters) });
-  }
-  return ranges;
-}
-
-/** Most-specific media ranges win; equal-quality faces prefer canonical Markdown. */
 function selectCapsuleFace(accept: string): CapsuleFace {
-  const ranges = acceptedMediaRanges(accept);
-  const quality = new Map<CapsuleFace, number>();
-  for (const face of Object.keys(CAPSULE_FACE_MEDIA) as CapsuleFace[]) {
-    const [faceType, faceSubtype] = CAPSULE_FACE_MEDIA[face].split("/") as [string, string];
-    let specificity = -1;
-    let effectiveQuality = 0;
-    for (const range of ranges) {
-      const matchesType = range.type === "*" || range.type === faceType;
-      const matchesSubtype = range.subtype === "*" || range.subtype === faceSubtype;
-      if (!matchesType || !matchesSubtype) continue;
-      const candidateSpecificity = range.type === "*" ? 0 : range.subtype === "*" ? 1 : 2;
-      if (candidateSpecificity > specificity) {
-        specificity = candidateSpecificity;
-        effectiveQuality = range.quality;
-      } else if (candidateSpecificity === specificity) {
-        effectiveQuality = Math.max(effectiveQuality, range.quality);
-      }
-    }
-    if (specificity >= 0) quality.set(face, effectiveQuality);
-  }
-
-  const highest = Math.max(0, ...quality.values());
-  for (const face of ["markdown", "json", "html"] as const) {
-    if ((quality.get(face) ?? 0) === highest && highest > 0) return face;
-  }
-
-  // Accept negotiation is a courtesy (Fable §7.3). If nothing supported is
-  // acceptable, disregard the field and retain the canonical Markdown face.
-  return "markdown";
-}
-
-/** GET uses weak comparison: W/"tag" and "tag" refer to the same face. */
-function ifNoneMatchMatches(header: string | undefined, etag: string): boolean {
-  if (header === undefined) return false;
-  return splitHeaderList(header, ",").some((candidate) => {
-    if (candidate === "*") return true;
-    const opaque = candidate.startsWith("W/") ? candidate.slice(2) : candidate;
-    return opaque === etag;
-  });
+  return selectMediaFace(accept, CAPSULE_FACE_MEDIA, "markdown");
 }
 
 async function strongEtag(face: "json" | "html" | "markdown", body: string): Promise<string> {
@@ -1435,7 +1337,11 @@ export async function buildHelloResponse(input: {
     (row.status !== "private-draft" ||
       fellowCanAccessPrivateProblem(
         binding,
-        { id: row.problem_id, sponsorId: row.sponsor_id, creatorFellowId: row.created_by_fellow_id },
+        {
+          id: row.problem_id,
+          sponsorId: row.sponsor_id,
+          creatorFellowId: row.created_by_fellow_id,
+        },
         Date.now(),
       ));
   let activeAssignments: string[] = [];
@@ -1467,12 +1373,14 @@ export async function buildHelloResponse(input: {
            ORDER BY pm.joined_at, pm.problem_id`,
         )
         .bind(binding.fellowId)
-        .all<ProblemAccessRow & {
-          role: "observer" | "contributor" | "steward" | "founding-steward";
-          joined_at: string;
-          title: string | null;
-          active: number | null;
-        }>();
+        .all<
+          ProblemAccessRow & {
+            role: "observer" | "contributor" | "steward" | "founding-steward";
+            joined_at: string;
+            title: string | null;
+            active: number | null;
+          }
+        >();
 
       if (assignmentRows.results) {
         const visible = assignmentRows.results.filter(visibleToFellow);
@@ -1496,12 +1404,14 @@ export async function buildHelloResponse(input: {
            ORDER BY s.opened_at, s.session_id`,
         )
         .bind(binding.fellowId)
-        .all<ProblemAccessRow & {
-          session_id: string;
-          opened_at: string;
-          idle_close_at: string;
-          intent: "prove" | "refute" | "review" | "sharpen-statement" | "explore" | null;
-        }>();
+        .all<
+          ProblemAccessRow & {
+            session_id: string;
+            opened_at: string;
+            idle_close_at: string;
+            intent: "prove" | "refute" | "review" | "sharpen-statement" | "explore" | null;
+          }
+        >();
 
       if (sessionRows.results) {
         // Every live slot counts towards admission, even if the credential
@@ -1547,7 +1457,8 @@ export async function buildHelloResponse(input: {
   const availableAssignments = activeAssignments.filter(
     (id) => !liveSessions?.some((s) => s.problem_id === id),
   );
-  const sessionProblem = boundProblem ??
+  const sessionProblem =
+    boundProblem ??
     (liveSessions !== undefined && availableAssignments.length === 1
       ? availableAssignments[0]
       : undefined);
@@ -1662,7 +1573,8 @@ export async function buildHelloResponse(input: {
       : []),
     ...(openSessions ?? []).slice(0, 2).map(({ session_id, problem_id, idle_close_at }) => {
       const statusUrl = `${service.stoaOrigin}/v1/sessions/${session_id}`;
-      const resumable = Date.parse(idle_close_at) > Date.now() &&
+      const resumable =
+        Date.parse(idle_close_at) > Date.now() &&
         (boundProblem === undefined || boundProblem === problem_id);
       return {
         action: "read" as const,

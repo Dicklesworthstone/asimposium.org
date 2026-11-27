@@ -261,7 +261,9 @@ export function claimStableUrl(
 
 // Public ledger IDs are case-sensitive while BibTeX keys are not.
 function encodeCitationIdentifier(identifier: string): string {
-  return Array.from(identifier, (character) => character.charCodeAt(0).toString(16).padStart(2, "0")).join("");
+  return Array.from(identifier, (character) =>
+    character.charCodeAt(0).toString(16).padStart(2, "0"),
+  ).join("");
 }
 
 /**
@@ -300,7 +302,11 @@ export function bibtexForClaim(request: CitationRequest): string {
   const snapshot = snapshotCitationRequest(request);
   const { claim, origin } = snapshot;
   validateClaimIdentity(claim);
-  const { accessDate, publishedDate } = citationTimes(claim.publishedAt, snapshot.accessDate, snapshot.observedAt);
+  const { accessDate, publishedDate } = citationTimes(
+    claim.publishedAt,
+    snapshot.accessDate,
+    snapshot.observedAt,
+  );
   const key = citeKeyFor(claim.problemId, claim.claimId, claim.statementVersion);
   const url = claimStableUrl(origin, claim.problemId, claim.claimId, claim.statementVersion);
   const title = bibtexEscape(claim.statement.replace(/[\t\r\n]+/g, " "));
@@ -320,7 +326,11 @@ export function cslForClaim(request: CitationRequest): ClaimCitationCsl {
   const snapshot = snapshotCitationRequest(request);
   const { claim, origin } = snapshot;
   validateClaimIdentity(claim);
-  const { accessDate, publishedDate } = citationTimes(claim.publishedAt, snapshot.accessDate, snapshot.observedAt);
+  const { accessDate, publishedDate } = citationTimes(
+    claim.publishedAt,
+    snapshot.accessDate,
+    snapshot.observedAt,
+  );
   const url = claimStableUrl(origin, claim.problemId, claim.claimId, claim.statementVersion);
   return ClaimCitationCslSchema.parse({
     id: citeKeyFor(claim.problemId, claim.claimId, claim.statementVersion),
@@ -362,25 +372,37 @@ export function citationForStatement(
   const title = statement.title.normalize("NFC").replace(/[\p{Z}\t\r\n]+/gu, " ");
   if (!citationTextIsSafe(title, true) || !citationTextIsSafe(statement.source_fellow_id, false))
     invalidCitationInput("unsafe statement citation text");
-  const { publishedDate, accessDate } = citationTimes(publishedAt, observedAt.slice(0, 10), observedAt);
+  const { publishedDate, accessDate } = citationTimes(
+    publishedAt,
+    observedAt.slice(0, 10),
+    observedAt,
+  );
   const key = `asimposium_statement_${encodeCitationIdentifier(problem)}_v${statement.version}`;
   const url = CANONICAL_CITATION_ORIGIN + statementVersionPath(problem, statement.version, "human");
   const author = `ASImposium Fellow ${statement.source_fellow_id}`;
-  const note = `ASImposium problem ${problem}, published formulation S@${statement.version} (ledger event #${statement.publication.seq}).` +
+  const note =
+    `ASImposium problem ${problem}, published formulation S@${statement.version} (ledger event #${statement.publication.seq}).` +
     (statement.screening_notice ? ` ${screeningNoticeText(statement.screening_notice)}` : "");
-  const body = format === "bib" ? [
-    `@misc{${key},`,
-    `  author = {{${bibtexEscape(author)}}},`,
-    `  title = {${bibtexEscape(title)}},`,
-    `  howpublished = {\\url{${url}}},`,
-    `  note = {${bibtexEscape(note)} Accessed ${accessDate}.},`,
-    `  year = {${publishedDate.slice(0, 4)}}`,
-    "}",
-  ].join("\n") : JSON.stringify({
-    id: key, type: "webpage", title, URL: url,
-    author: [{ literal: author }], note,
-    issued: { "date-parts": [publishedDate.split("-").map(Number)] },
-    accessed: { "date-parts": [accessDate.split("-").map(Number)] },
-  });
+  const body =
+    format === "bib"
+      ? [
+          `@misc{${key},`,
+          `  author = {{${bibtexEscape(author)}}},`,
+          `  title = {${bibtexEscape(title)}},`,
+          `  howpublished = {\\url{${url}}},`,
+          `  note = {${bibtexEscape(note)} Accessed ${accessDate}.},`,
+          `  year = {${publishedDate.slice(0, 4)}}`,
+          "}",
+        ].join("\n")
+      : JSON.stringify({
+          id: key,
+          type: "webpage",
+          title,
+          URL: url,
+          author: [{ literal: author }],
+          note,
+          issued: { "date-parts": [publishedDate.split("-").map(Number)] },
+          accessed: { "date-parts": [accessDate.split("-").map(Number)] },
+        });
   return { body, filename: `${key}.${format}` };
 }
