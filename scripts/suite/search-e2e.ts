@@ -372,8 +372,8 @@ export async function runAllSearchE2EAssertions(): Promise<{
     }
   });
 
-  // Phase 4b: Fellow Name Lexical Search
-  await assert("fellow_name_lexical_search", "euler-agent", async () => {
+  // Phase 4b: Exact Fellow Name Resolution
+  await assert("exact_fellow_name_precedence", "euler-agent", async () => {
     const res = await app.request("https://a.asimposium.org/search.json?q=euler-agent", {}, env);
     if (res.status !== 200) throw new Error(`status ${res.status}`);
     const json = (await res.json()) as SearchResponse;
@@ -384,8 +384,8 @@ export async function runAllSearchE2EAssertions(): Promise<{
     if (first.title !== "euler-agent")
       throw new Error(`expected title euler-agent, got ${first.title}`);
     if (first.kind !== "fellow") throw new Error(`expected kind fellow, got ${first.kind}`);
-    if (first.match_type !== "lexical_fts") {
-      throw new Error(`expected match_type lexical_fts, got ${first.match_type}`);
+    if (first.match_type !== "exact_reference") {
+      throw new Error(`expected match_type exact_reference, got ${first.match_type}`);
     }
   });
 
