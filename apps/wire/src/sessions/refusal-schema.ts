@@ -100,12 +100,38 @@ export const narrowSessionRefusalSchema: MiddlewareHandler = async (c, next) => 
   ) {
     return;
   }
+  // A saved-draft or first-claim refusal can carry a server-authored example
+  // narrower than the general route union. Prefer its exact contract without
+  // inspecting or replaying an untrusted request body. Ambiguous examples keep
+  // the general route schema so a different publication form is not mis-taught.
+  const example = (problem as { example?: unknown }).example;
+  let selectedUrl = url;
+  if (example !== null && typeof example === "object" && !Array.isArray(example)) {
+    const fields = example as Record<string, unknown>;
+    const pathname = new URL(c.req.url).pathname;
+    const requestShape =
+      c.req.method === "POST" && /^\\/v1\\/sessions\\/[^/]+\\/workshop$/.test(pathname) &&
+      fields.type === "claim-draft"
+        ? "first_claim_draft_request"
+        : c.req.method === "POST" && /^\\/v1\\/sessions\\/[^/]+\\/promote$/.test(pathname) &&
+            typeof fields.workshop_id === "string" &&
+            !("kind" in fields) &&
+            !("statement" in fields)
+          ? "promote_saved_draft_request"
+          : undefined;
+    if (requestShape) {
+      const specificPath = `/schemas/sessions.v1/${requestShape}.json`;
+      if (getPublicSchemaSlice(specificPath) !== undefined) {
+        selectedUrl = `https://a.asimposium.org${specificPath}`;
+      }
+    }
+  }
   const headers = new Headers(response.headers);
   headers.delete("content-length");
   // Hono's res setter copies the previous response's headers (including a
   // stale content-length) onto the new one; clear it first.
   c.res = undefined;
-  c.res = new Response(JSON.stringify({ ...(problem as object), schema: url }), {
+  c.res = new Response(JSON.stringify({ ...(problem as object), schema: selectedUrl }), {
     status: response.status,
     statusText: response.statusText,
     headers,
