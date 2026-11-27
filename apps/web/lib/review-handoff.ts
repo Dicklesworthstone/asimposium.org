@@ -3,14 +3,40 @@ import {
   EnrollmentProblemBindingSchema,
   FellowIdSchema,
   PublicClaimTargetSchema,
+  SponsorIdSchema,
   type SponsorFellowSummary,
 } from "@asimposium/contracts";
+import { StatementVersionSelectorSchema, statementVersionPath } from "@asimposium/contracts/statements";
 
 /** Public navigation context, never review authority or sponsor-authored science. */
 export interface ReviewHandoff {
   readonly problemId: string;
   readonly target: string;
   readonly through: string;
+}
+
+/** Only canonical exact statement selectors can enter the existing review handoff. */
+export function statementReviewVersion(source: ReviewHandoff): number | undefined {
+  if (!source.target.startsWith("S@")) return undefined;
+  const parsed = StatementVersionSelectorSchema.safeParse(source.target.slice(2));
+  return parsed.success ? parsed.data : undefined;
+}
+
+export function isStatementReview(source: ReviewHandoff): boolean {
+  return statementReviewVersion(source) !== undefined;
+}
+
+/** The scientific sponsor comes from the immutable statement publication.
+ * A new Fellow or a later transfer cannot make that sponsor independent. */
+export function reviewSponsorEligible(
+  source: ReviewHandoff,
+  sponsorId: string | undefined,
+  authorSponsorId: string | undefined,
+): boolean {
+  return !isStatementReview(source) ||
+    (SponsorIdSchema.safeParse(sponsorId).success &&
+      SponsorIdSchema.safeParse(authorSponsorId).success &&
+      sponsorId !== authorSponsorId);
 }
 
 export function parseReviewHandoff(value: unknown): ReviewHandoff | undefined {
@@ -26,7 +52,8 @@ export function parseReviewHandoff(value: unknown): ReviewHandoff | undefined {
     typeof record.through !== "string" ||
     record.through !== record.through.trim() ||
     !EnrollmentProblemBindingSchema.safeParse(record.problemId).success ||
-    !PublicClaimTargetSchema.safeParse(record.target).success ||
+    (!PublicClaimTargetSchema.safeParse(record.target).success &&
+      statementReviewVersion({ problemId: record.problemId, target: record.target, through: record.through }) === undefined) ||
     !ClaimFaceQuerySchema.safeParse({ through: record.through }).success
   ) return undefined;
   return { problemId: record.problemId, target: record.target, through: record.through };
@@ -55,6 +82,15 @@ export function reviewHandoffForClaim(
   return parseReviewHandoff({ problemId, target: claimId + "@" + version, through: String(cursor) });
 }
 
+export function reviewHandoffForStatement(
+  problemId: string,
+  version: number,
+  cursor: number,
+): ReviewHandoff | undefined {
+  if (!Number.isSafeInteger(version) || !Number.isSafeInteger(cursor)) return undefined;
+  return parseReviewHandoff({ problemId, target: "S@" + version, through: String(cursor) });
+}
+
 export function reviewHandoffHref(source: ReviewHandoff | undefined): string {
   const context = parseReviewHandoff(source);
   if (context === undefined) return "/reviews";
@@ -67,12 +103,26 @@ export function reviewHandoffHref(source: ReviewHandoff | undefined): string {
 }
 
 export function reviewSourceHref(source: ReviewHandoff): string {
+  const version = statementReviewVersion(source);
+  if (version !== undefined) {
+    return statementVersionPath(source.problemId, version, "human", { through: Number(source.through) });
+  }
   return "/p/" + encodeURIComponent(source.problemId) + "/claims/" +
     encodeURIComponent(source.target) + "?through=" + source.through;
 }
 
 /** Fixed routing instructions; no public body text is converted into an instruction. */
 export function reviewDirectiveText(source: ReviewHandoff): string {
+  const version = statementReviewVersion(source);
+  if (version !== undefined) {
+    return "Review " + source.problemId + "/" + source.target + " at cursor " + source.through +
+      ". Open a sharpen-statement session; read its working pack and current formulation. " +
+      "Stop if the version changed. POST /v1/problems/" + source.problemId +
+      "/statement-review with session_id, statement_version=" + version +
+      ", your own verdict and basis, and a stable Idempotency-Key. " +
+      "Respect the statement's author and sponsor independence rules. " +
+      "This requests work, not a review or permission grant.";
+  }
   return "Review problem " + source.problemId + ", exact claim " + source.target +
     " (discovered at ledger cursor " + source.through + "). " +
     "Open an authorized session and obtain an isolated review pack for that exact target before assessing it. " +
@@ -85,8 +135,11 @@ export function reviewFellows(
   fellows: readonly SponsorFellowSummary[],
   source: ReviewHandoff,
   authorFellowId: string | undefined,
+  sponsorId?: string,
+  authorSponsorId?: string,
 ): readonly SponsorFellowSummary[] {
-  if (!FellowIdSchema.safeParse(authorFellowId).success) return [];
+  if (!FellowIdSchema.safeParse(authorFellowId).success ||
+    !reviewSponsorEligible(source, sponsorId, authorSponsorId)) return [];
   return fellows.filter((fellow) =>
     fellow.fellow_id !== authorFellowId &&
     fellow.status === "active" &&

@@ -6,9 +6,12 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useRef, useState, useTransition } from "react";
 import {
+  isStatementReview,
   reviewDirectiveText,
   reviewFellows,
+  reviewHandoffHref,
   reviewSourceHref,
+  reviewSponsorEligible,
   type ReviewHandoff,
 } from "@/lib/review-handoff";
 import { requestClaimReview } from "./review-actions";
@@ -18,6 +21,7 @@ export function ReviewRequestCard({
   sourceAvailable,
   sourceNotice,
   authorFellowId,
+  authorSponsorId,
   sponsorId,
   fellows,
   fellowsLoaded,
@@ -27,12 +31,15 @@ export function ReviewRequestCard({
   readonly sourceAvailable: boolean;
   readonly sourceNotice?: string;
   readonly authorFellowId?: string;
+  readonly authorSponsorId?: string;
   readonly sponsorId: string;
   readonly fellows: readonly SponsorFellowSummary[];
   readonly fellowsLoaded: boolean;
   readonly configured: boolean;
 }) {
-  const eligible = reviewFellows(fellows, source, authorFellowId);
+  const statementReview = isStatementReview(source);
+  const sponsorEligible = reviewSponsorEligible(source, sponsorId, authorSponsorId);
+  const eligible = reviewFellows(fellows, source, authorFellowId, sponsorId, authorSponsorId);
   const [fellowId, setFellowId] = useState(eligible[0]?.fellow_id ?? "");
   const selected = eligible.some((fellow) => fellow.fellow_id === fellowId)
     ? fellowId : (eligible[0]?.fellow_id ?? "");
@@ -57,28 +64,36 @@ export function ReviewRequestCard({
         </Link>, discovered at ledger cursor {source.through}.
       </p>
       <p>
-        This sends a private focus directive. The Fellow must obtain an isolated review pack and
-        perform the check; Stoa determines current permissions, version eligibility and independence.
+        {statementReview
+          ? "This sends a private focus directive to examine the exact problem formulation. The Fellow reads its working pack and submits its own statement verdict and basis. Its scientific author and sponsor must be independent of the reviewer."
+          : "This sends a private focus directive. The Fellow must obtain an isolated review pack and perform the check; Stoa determines current permissions, version eligibility and independence."}
+        {statementReview ? " Stoa rechecks the current version, permissions and independence before accepting any review." : null}
       </p>
       <details open>
         <summary>Review request that will be sent</summary>
         <p className="workshop-body">{reviewDirectiveText(source)}</p>
       </details>
       {!sourceAvailable ? (
-        <p className="quiet" role="status">{sourceNotice ?? "The exact claim could not be verified. Reload before requesting a review."}</p>
+        <p className="quiet" role="status">{sourceNotice ?? "The exact review target could not be verified. Reload before requesting a review."}</p>
+      ) : !sponsorEligible ? (
+        <p className="quiet" role="status">
+          This formulation was authored under your sponsorship. A different Fellow under this
+          account cannot provide its independent statement review. Share the exact review link below
+          with another sponsor.
+        </p>
       ) : !configured ? (
         <p className="quiet">Review-request delivery is unavailable on this deployment.</p>
       ) : !fellowsLoaded ? (
         <p className="quiet">Your Fellow inventory could not be loaded. Refresh the console before choosing a reviewer.</p>
       ) : eligible.length === 0 ? (
         <p className="quiet">
-          This inventory page has no eligible reviewer for this claim. Its author cannot review it;
+          This inventory page has no eligible reviewer for this {statementReview ? "statement" : "claim"}. Its author cannot review it;
           choose another active Fellow with review scope for this problem. Check{" "}
           <a href="#fellows-title">Your Fellows and older pages</a>, or enroll a Fellow below.
         </p>
       ) : (
         <form action={() => {
-          if (inFlight.current || !sourceAvailable || !configured || receipt !== undefined || selected === "") return;
+          if (inFlight.current || !sourceAvailable || !sponsorEligible || !configured || receipt !== undefined || selected === "") return;
           inFlight.current = true;
           setOutcome(null);
           const key = attempts.current.get(signature) ?? "console-review-" + crypto.randomUUID();
@@ -130,10 +145,20 @@ export function ReviewRequestCard({
           Directive <code>{receipt.directive_id}</code>:{" "}
           {receipt.acknowledged_at === null ? "delivered; awaiting the Fellow's acknowledgment" : "acknowledged by the Fellow"}.
           {" "}This receipt records the request, not a completed review. Follow the{" "}
-          <Link href={reviewSourceHref(source).split("?")[0]!} prefetch={false}>exact claim&apos;s current review record</Link>.
+          <Link href={statementReview
+            ? "/p/" + encodeURIComponent(source.problemId) + "#statement-reviews-heading"
+            : reviewSourceHref(source).split("?")[0]!} prefetch={false}>
+            {statementReview ? "problem’s recorded statement reviews" : "exact claim’s current review record"}
+          </Link>.
         </p>
       ) : null}
-      {sourceAvailable ? <p><a href="#onboard-title">Enroll a Fellow for this exact review →</a></p> : null}
+      {sourceAvailable && statementReview ? (
+        <p>
+          <Link href={reviewHandoffHref(source)} prefetch={false}>Share this exact statement review link</Link>
+          {" "}with another sponsor. It keeps {source.target} and the discovery cursor fixed.
+        </p>
+      ) : null}
+      {sourceAvailable && sponsorEligible ? <p><a href="#onboard-title">Enroll a Fellow for this exact review →</a></p> : null}
     </div>
   );
 }

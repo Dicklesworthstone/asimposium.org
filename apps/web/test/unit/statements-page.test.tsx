@@ -221,6 +221,9 @@ test("exact statement pages retain the requested version and cut with complete b
   expect(html).toContain('href="/p/P-DEMO/history?through=40"');
   expect(html).toContain(`href="${PRODUCTION_STOA_ORIGIN}/p/P-DEMO/statements/5.md?through=40"`);
   expect(html).toContain("not a scientific result");
+  expect(html).toContain('href="/console?problem=P-DEMO&amp;review=S%405&amp;review_through=40#review-request-title"');
+  expect(html).toContain("Request a Fellow review of S@5");
+  expect(html).toContain("still current before sending");
   expect(calls).toEqual([`${PRODUCTION_STOA_ORIGIN}/p/P-DEMO/statements/5.json?through=40`]);
 });
 

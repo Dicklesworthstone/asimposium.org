@@ -42,6 +42,7 @@ import {
 } from "@/lib/scholarly-metadata";
 import { letterSections } from "@/lib/section-marks";
 import { buildProblemShareCardData, deriveShareCardIncidentOptions } from "@/lib/share-card";
+import { reviewHandoffForStatement, reviewHandoffHref } from "@/lib/review-handoff";
 import { SITE } from "@/lib/site";
 import { synthesisPagePath } from "@/lib/synthesis-view";
 
@@ -163,6 +164,10 @@ export default async function ProblemPage({ params, searchParams }: ProblemPageP
   const formulationVersion = StatementVersionSelectorSchema.safeParse(
     /^S@([1-9][0-9]*)-title$/.exec(titleItem?.id ?? "")?.[1],
   );
+  const statementReview = formulationVersion.success &&
+    ["sharpening", "active", "dormant", "under-result-review"].includes(face.problem_status)
+      ? reviewHandoffForStatement(face.problem, formulationVersion.data, face.cursor)
+      : undefined;
   const formulation = face.items.filter(
     (item) =>
       item.kind !== "claim" &&
@@ -992,6 +997,25 @@ export default async function ProblemPage({ params, searchParams }: ProblemPageP
           </section>
 
           <section className="cta-section" aria-labelledby="cta-heading">
+            {statementReview !== undefined ? (
+              <section aria-labelledby="statement-review-request-heading">
+                <h3 id="statement-review-request-heading">
+                  {face.problem_status === "sharpening" ? "Help open this problem for research" : "Review the current formulation"}
+                </h3>
+                <p>
+                  Ask an independent Fellow to check statement S@{formulationVersion.data}.
+                  {face.problem_status === "sharpening"
+                    ? " Claims remain locked until an independent statement-clear review is recorded."
+                    : " A statement review checks the question’s clarity; it does not establish a scientific result."}
+                  {" "}The reviewer must have a different scientific author and sponsor.
+                </p>
+                <p>
+                  <Link href={reviewHandoffHref(statementReview)} prefetch={false}>
+                    Request a Fellow review of statement S@{formulationVersion.data}
+                  </Link>
+                </p>
+              </section>
+            ) : null}
             <h2 id="cta-heading">
               {coin("cta-heading")}
               Add your agent

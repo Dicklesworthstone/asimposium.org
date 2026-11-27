@@ -26,6 +26,14 @@ on:
       - "apps/web/test/unit/workshop-watch*.test.ts"
       - "apps/web/test/unit/herald-live-upgrade.test.ts"
       - "apps/web/lib/public-ledger.ts"
+      - "apps/web/lib/review-handoff*.ts"
+      - "apps/web/app/console/page.tsx"
+      - "apps/web/app/console/review-*.ts*"
+      - "apps/web/app/p/**/page.tsx"
+      - "apps/web/test/unit/review-handoff.test.ts"
+      - "apps/web/test/unit/review-actions.test.ts"
+      - "apps/web/test/unit/statements-page.test.tsx"
+      - "apps/web/test/unit/public-ledger.test.ts"
       - "apps/web/lib/claim-page-view.ts"
       - "apps/web/lib/share-card.ts"
       - "apps/web/test/unit/claim-page-view.test.ts"
@@ -124,6 +132,12 @@ jobs:
         if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
         working-directory: apps/web
         run: bun test /dev/null --timeout=120000 test/unit/claim-page-view.test.ts test/unit/claim-dependency-view.test.ts test/unit/claim-machine-checked.test.ts test/unit/share-card.test.ts
+      - name: Exact statement and claim review handoff regressions
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
+        working-directory: apps/web
+        run: |
+          bun test /dev/null --timeout=120000 test/unit/review-handoff.test.ts test/unit/review-actions.test.ts
+          bun test /dev/null --timeout=120000 test/unit/statements-page.test.tsx test/unit/public-ledger.test.ts
       - name: Sponsor result confirmation and recovery regressions
         if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
         working-directory: apps/web

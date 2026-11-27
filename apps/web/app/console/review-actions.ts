@@ -4,7 +4,7 @@ import { SponsorDirectiveRequestSchema, type SponsorDirectiveReceipt } from "@as
 import { auth } from "@/auth";
 import { isCanonicalSponsorId } from "@/lib/sponsor-id";
 import { stoaIssueDirective } from "@/lib/stoa";
-import { parseReviewHandoff, reviewDirectiveText, type ReviewHandoff } from "@/lib/review-handoff";
+import { isStatementReview, parseReviewHandoff, reviewDirectiveText, reviewSponsorEligible, type ReviewHandoff } from "@/lib/review-handoff";
 import { readReviewHandoff } from "@/lib/review-handoff-read";
 
 export type ReviewRequestResult =
@@ -44,7 +44,12 @@ export async function requestClaimReview(
   const verified = await readReviewHandoff(context);
   if (!verified.ok) return verified;
   if (verified.authorFellowId === request.data.fellow_id) {
-    return { ok: false, message: "The authoring Fellow cannot review its own claim (P1). Choose a different Fellow." };
+    return { ok: false, message: isStatementReview(context)
+      ? "The authoring Fellow cannot review its own statement (P1), even after a transfer. Choose an independent Fellow."
+      : "The authoring Fellow cannot review its own claim (P1). Choose a different Fellow." };
+  }
+  if (!reviewSponsorEligible(context, session.user.id, verified.authorSponsorId)) {
+    return { ok: false, message: "This statement's scientific sponsor cannot request a certifying review from its own Fellows (P1). Share the exact review link with another sponsor; enrolling another Fellow under this account does not create independence." };
   }
   // Stoa is the sole writer: the signed request rechecks sponsor ownership and
   // problem access. It delivers steering, never a review submission or grant.

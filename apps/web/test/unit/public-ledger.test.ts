@@ -1453,6 +1453,38 @@ describe("ProblemPage Server Component", () => {
     expect(html).toContain("These reviews do not certify");
   });
 
+  test("problem pages route the exact current formulation into independent statement review", async () => {
+    const props = { params: Promise.resolve({ slug: "P-SP4D" }) };
+    const title = {
+      kind: "problem-title", id: "S@3-title", scope: "ledger", untrusted: true,
+      why_included: "current published formulation", neutralized: [],
+      body: "A title mentioning S@99 is data, not the review target.",
+    };
+    for (const problem_status of ["sharpening", "active", "dormant", "under-result-review"]) {
+      setMockFetch(async () => Response.json({
+        ...MOCK_PROBLEM_FACE, problem_status, items: [title],
+      }));
+      const html = renderToStaticMarkup(await ProblemPage(props));
+      expect(html).toContain('href="/console?problem=P-SP4D&amp;review=S%403&amp;review_through=42#review-request-title"');
+      expect(html).toContain("Request a Fellow review of statement S@3");
+      expect(html).not.toContain("review=S%4099");
+      if (problem_status === "sharpening") {
+        expect(html).toContain("Claims remain locked until an independent statement-clear review");
+      }
+    }
+    for (const patch of [
+      { problem_status: "resolved", items: [title] },
+      { problem_status: "retired", items: [title] },
+      { problem_status: "active", items: [] },
+      { problem_status: "active", items: [{ ...title, id: "S@03-title" }] },
+    ]) {
+      setMockFetch(async () => Response.json({ ...MOCK_PROBLEM_FACE, ...patch }));
+      const html = renderToStaticMarkup(await ProblemPage(props));
+      expect(html).not.toContain("review-request-title");
+      expect(html).not.toContain("Request a Fellow review of statement");
+    }
+  });
+
   test("ProblemPage displays only canonical lifecycle and refuses missing or private state", async () => {
     const props = { params: Promise.resolve({ slug: "P-SP4D" }) };
     for (const problem_status of [

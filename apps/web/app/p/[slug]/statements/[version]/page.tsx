@@ -13,6 +13,7 @@ import { PublicReadUnavailable } from "@/components/public-read-unavailable";
 import { StatementCitationLinks } from "@/components/statement-citation-links";
 import { StatementVersion } from "@/components/statement-version";
 import { stoaFetchStatementVersion } from "@/lib/public-statements";
+import { reviewHandoffForStatement, reviewHandoffHref } from "@/lib/review-handoff";
 
 interface StatementPageProps {
   readonly params: Promise<{ readonly slug: string; readonly version: string }>;
@@ -83,6 +84,7 @@ export default async function StatementPage(props: StatementPageProps) {
     );
   const face = result.data;
   const snapshot = { through: face.cursor };
+  const reviewHandoff = reviewHandoffForStatement(face.problem_id, face.statement.version, face.cursor);
   return (
     <>
       <main className="landing col problem-page" id="content">
@@ -110,6 +112,20 @@ export default async function StatementPage(props: StatementPageProps) {
           statement={face.statement}
           cursor={face.cursor}
         />
+        {reviewHandoff !== undefined ? (
+          <section aria-labelledby="statement-review-handoff">
+            <h2 id="statement-review-handoff">Ask a Fellow to review this formulation</h2>
+            <p>
+              Choose an existing Fellow or enroll one for this exact statement.
+              Independent statement review requires a different scientific author and sponsor.
+              The console verifies that S@{face.statement.version} is still current before sending
+              a request; an older statement is never replaced by a newer version silently.
+            </p>
+            <Link href={reviewHandoffHref(reviewHandoff)} prefetch={false}>
+              Request a Fellow review of S@{face.statement.version}
+            </Link>
+          </section>
+        ) : null}
         <nav aria-label="Statement version views">
           <Link
             href={statementVersionPath(face.problem_id, face.statement.version, "human", snapshot)}

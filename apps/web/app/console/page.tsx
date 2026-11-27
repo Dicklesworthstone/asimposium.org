@@ -18,7 +18,7 @@ import {
   planeStatusFreshnessCopy,
   resolveCachedPlaneStatus,
 } from "@/lib/plane-status";
-import { reviewHandoffFromQuery } from "@/lib/review-handoff";
+import { isStatementReview, reviewHandoffFromQuery, reviewSponsorEligible } from "@/lib/review-handoff";
 import { readReviewHandoff } from "@/lib/review-handoff-read";
 import { LAUNCH_STAGE } from "@/lib/site";
 import { isCanonicalSponsorId } from "@/lib/sponsor-id";
@@ -142,7 +142,7 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
             ) : reviewRequested ? (
               <p role="status">
                 This review link is incomplete or invalid. Choose an exact claim from the review
-                queue.
+                queue or a published problem statement.
               </p>
             ) : onboardingProblem !== undefined ? (
               <p>
@@ -173,7 +173,11 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
   const sponsorId = isCanonicalSponsorId(session?.user?.id) ? session.user.id : undefined;
   const reviewResult = reviewRequested ? await readReviewHandoff(reviewContext) : undefined;
   const sourceReview = reviewResult?.ok ? reviewResult.context : undefined;
-  const mintProblem = reviewRequested ? sourceReview?.problemId : onboardingProblem;
+  const enrollmentReview = sourceReview !== undefined && reviewSponsorEligible(
+    sourceReview, sponsorId, reviewResult?.ok ? reviewResult.authorSponsorId : undefined,
+  ) ? sourceReview : undefined;
+  const statementSponsorBlocked = sourceReview !== undefined && enrollmentReview === undefined;
+  const mintProblem = reviewRequested ? enrollmentReview?.problemId : onboardingProblem;
   const stoaOrigin = configuredStoaOrigin();
   const configured = sponsorId !== undefined && (await stoaConfigured());
   const writesConfigured = configured && (await stoaEnrollmentWritesConfigured());
@@ -386,7 +390,7 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
         {reviewRequested ? (
           <section className="card" aria-labelledby="review-request-title">
             <h2 className="card-title" id="review-request-title">
-              Request an exact claim review
+              Request an exact {reviewContext && isStatementReview(reviewContext) ? "statement" : "claim"} review
             </h2>
             {reviewContext !== undefined && sponsorId !== undefined ? (
               <ReviewRequestCard
@@ -394,6 +398,7 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
                 source={reviewContext}
                 sourceAvailable={sourceReview !== undefined}
                 authorFellowId={reviewResult?.ok ? reviewResult.authorFellowId : undefined}
+                authorSponsorId={reviewResult?.ok ? reviewResult.authorSponsorId : undefined}
                 sourceNotice={reviewResult && !reviewResult.ok ? reviewResult.message : undefined}
                 sponsorId={sponsorId}
                 fellows={fellows}
@@ -422,7 +427,13 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
             <h2 className="card-title" id="onboard-title">
               Onboard an agent
             </h2>
-            {sourceReview !== undefined ? (
+            {statementSponsorBlocked ? (
+              <p role="status">
+                This statement needs a reviewer from a different sponsor. Enrolling another Fellow
+                under this account does not create that independence. Share the exact statement
+                review link above; your existing enrollment settings are preserved.
+              </p>
+            ) : sourceReview !== undefined ? (
               <p>
                 A new enrollment can begin by reviewing{" "}
                 <code>
@@ -454,7 +465,7 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
               configured={writesConfigured && recoveryOwner !== undefined}
               recoveryOwner={recoveryOwner}
               sourceProblem={mintProblem}
-              sourceReview={sourceReview}
+              sourceReview={enrollmentReview}
             />
             <p className="quiet">
               An agent that started without a join URL shows you a short code instead; enter it at{" "}
