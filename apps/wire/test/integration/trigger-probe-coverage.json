@@ -227,7 +227,16 @@
     "sponsor_fellow_cap_audit_events_immutable_delete": "no real-bindings lane run through runLocalWorkerJourney leaves a row of sponsor_fellow_cap_audit_events that this trigger guards",
     "sponsor_fellow_cap_audit_events_immutable_update": "no real-bindings lane run through runLocalWorkerJourney leaves a row of sponsor_fellow_cap_audit_events that this trigger guards",
     "sponsor_problem_hide_receipts_append_only_update": "no real-bindings lane run through runLocalWorkerJourney leaves a row of sponsor_problem_hide_receipts that this trigger guards",
-    "sponsor_problem_hide_receipts_append_only_delete": "no real-bindings lane run through runLocalWorkerJourney leaves a row of sponsor_problem_hide_receipts that this trigger guards"
+    "sponsor_problem_hide_receipts_append_only_delete": "no real-bindings lane run through runLocalWorkerJourney leaves a row of sponsor_problem_hide_receipts that this trigger guards",
+    "integrity_case_action_no_delete": "no real-bindings lane run through runLocalWorkerJourney leaves a row of integrity_case_actions that this trigger guards",
+    "integrity_case_action_no_update": "no real-bindings lane run through runLocalWorkerJourney leaves a row of integrity_case_actions that this trigger guards",
+    "integrity_case_no_delete": "no real-bindings lane run through runLocalWorkerJourney leaves a row of integrity_cases that this trigger guards",
+    "integrity_receipt_no_delete": "no real-bindings lane run through runLocalWorkerJourney leaves a row of integrity_command_receipts that this trigger guards",
+    "integrity_receipt_no_update": "no real-bindings lane run through runLocalWorkerJourney leaves a row of integrity_command_receipts that this trigger guards",
+    "sponsor_commentary_reservations_no_delete": "no real-bindings lane run through runLocalWorkerJourney leaves a row of sponsor_commentary_attempt_reservations that this trigger guards",
+    "sponsor_commentary_reservations_update_guard": "no real-bindings lane run through runLocalWorkerJourney leaves a row of sponsor_commentary_attempt_reservations that this trigger guards",
+    "sponsor_screening_appeal_no_delete": "no real-bindings lane run through runLocalWorkerJourney leaves a row of sponsor_screening_case_appeals that this trigger guards",
+    "sponsor_screening_cases_no_delete": "no real-bindings lane run through runLocalWorkerJourney leaves a row of sponsor_screening_cases that this trigger guards"
   },
   "definitions": {
     "area_renames_append_only_delete": "7956ae24e7fd1a3be66b2f3777c066606b4f49bac561b37f603c314591aa9aab",
@@ -437,6 +446,21 @@
     "workshop_revision_immutable": "ca9caa5f963721bb5ecbcd8e26fb427309c11ae9f1dd6c0819af9701f8ffeed8",
     "workshop_revisions_immutable": "1ad90d04e2b9c256a457cbebfe0ab393e41cf77731c22ee10800a2652fefd728",
     "sponsor_problem_hide_receipts_append_only_update": "82f2a353128e8a2c09ebbaeed4adc26569d9b7da998070225bfd721ebbbfecac",
-    "sponsor_problem_hide_receipts_append_only_delete": "55394d20ef6a1caf4916352d5023c0d7ac861ba74074f47532c8d06a7ce4a9ad"
+    "sponsor_problem_hide_receipts_append_only_delete": "55394d20ef6a1caf4916352d5023c0d7ac861ba74074f47532c8d06a7ce4a9ad",
+    "integrity_case_action_no_delete": "206e097a6c5f305a2f247d5b29afd63873e0e460476cad270a1a2234ea3bb49b",
+    "integrity_case_action_no_update": "5e7e848298d9311d60610a7e8a0f3741307fb2d4b8ee1f26faef96d5a809fbd1",
+    "integrity_case_correction_pins": "826d71654b68e4d8e3f18e0266f8c70dd913641962f5e2676385844415b01817",
+    "integrity_case_header_immutable": "582ee930faee31c71ce0c20e6065ad5d8b81cb6ef899bc3716ecd88c4d9c40b9",
+    "integrity_case_no_delete": "94beb2b651092c30429321f7135bbc9091f0b69856e2c6cbb2d285b945b98ae1",
+    "integrity_case_transition_guard": "600dfc4f4d748e3f64ce0c568b3fe6df344c9a52d8a60b26a714535ea2baaaa0",
+    "integrity_receipt_no_delete": "0dc751cedca9ccedc0276f9c80e42db84b2265a2a205e3992d28c071d2d6854f",
+    "integrity_receipt_no_update": "10e5a21b8fd7038ddd8981c16c0126bbea43ce39bf71a2913ae8cbe12f87fb79",
+    "sponsor_commentary_reservations_no_delete": "92cc4c3419267e0152fd1982f6b3cd33e469f54a1728e940e10ee129d0476296",
+    "sponsor_commentary_reservations_update_guard": "2336174464b06821596b4d522206375e115174f16f6eae481f46c5bd1b7b7d7d",
+    "sponsor_screening_appeal_decision_authorized": "8ace8f3a99642f5e4acb0b2b836137894a0ab5d12bf8a1b2c13993ddae92eb31",
+    "sponsor_screening_appeal_immutable": "65a3baef403520beb120068db3dab372152e1cb18c119afd859037ec07cea3a2",
+    "sponsor_screening_appeal_no_delete": "c98f0fd0a82cb59e5fc8ec1db5eff83cfb6fba3b3a20f047ca57d65a0c09a369",
+    "sponsor_screening_cases_binding_immutable": "5d3c8fe5a3ea3a17793f0a1737d031e5da9429355ba6d6f0e20adea39b55c151",
+    "sponsor_screening_cases_no_delete": "458f9a39be4b5b2b6b618967f43ab86d2caf84f1b396265c521ab354a01ac090"
   }
 }
