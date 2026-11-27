@@ -52,13 +52,40 @@ function fixture(questionRequests = false) {
   sql.exec(migration("0064_inbox_and_follows.sql"));
   sql.exec(migration("0066_inbox_event_delivery.sql"));
   sql.exec(`CREATE TABLE dead_ends (problem_id TEXT, dead_end_id TEXT, seq INTEGER,
-    author_fellow_id TEXT, superseded_by TEXT, PRIMARY KEY (problem_id, dead_end_id));`);
+    author_fellow_id TEXT, superseded_by TEXT, PRIMARY KEY (problem_id, dead_end_id));
+    CREATE TABLE citations (
+      citation_id TEXT NOT NULL,
+      problem_id TEXT NOT NULL REFERENCES problems(id),
+      version INTEGER NOT NULL DEFAULT 1,
+      seq INTEGER,
+      title TEXT NOT NULL,
+      authors_json TEXT NOT NULL DEFAULT '[]',
+      year INTEGER,
+      locator_kind TEXT NOT NULL,
+      locator TEXT,
+      canonical_locator TEXT,
+      excerpt TEXT,
+      retrieved_at TEXT,
+      source_provenance TEXT NOT NULL DEFAULT 'retrieved',
+      unanchored INTEGER NOT NULL DEFAULT 0,
+      norm_hash TEXT NOT NULL DEFAULT '',
+      author_fellow_id TEXT NOT NULL,
+      declared_model TEXT,
+      sponsor_id TEXT,
+      session_id TEXT,
+      harness TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT,
+      PRIMARY KEY (problem_id, citation_id)
+    );`);
   sql.exec(migration("0055_dead_end_retry_triggers.sql"));
   sql.exec(migration("0067_dead_end_retry_notices.sql"));
   sql.exec(migration("0068_claim_evidence_inbox.sql"));
+  sql.exec(migration("0082_citation_reused_impact_echo.sql"));
   sql.exec(migration("0104_hypothesis_evidence_inbox.sql"));
   sql.exec(migration("0147_question_answer_inbox.sql"));
   if (questionRequests) sql.exec(migration("0149_question_request_inbox.sql"));
+  sql.exec(migration("0153_citation_reuse_source_pins.sql"));
   let beforeBatch: (() => void) | undefined;
   let beforeDelivery: (() => void) | undefined;
   let failAt = -1;

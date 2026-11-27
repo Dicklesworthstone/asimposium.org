@@ -175,13 +175,25 @@ test("available move guidance agrees with mounted POSTs, published schemas and a
       throw new Error(`Missing canonical move contract: ${template.move}`);
     const contract = definition[1];
     const document = JSON.parse(schema.body);
+    // POST /v1/sessions/:id/review accepts either a direct review_request or a
+    // saved workshop review publication (review_submission union); the move
+    // template teaches the direct arm and must still validate against both.
+    const expectedOpenApiProperty =
+      family === "sessions" && property === "review_request" ? "review_submission" : property;
     expect(operation?.requestBody.content["application/json"].schema.$ref, template.move).toBe(
-      `${origin}/schemas/${family}.v1.json#/properties/${property}`,
+      `${origin}/schemas/${family}.v1.json#/properties/${expectedOpenApiProperty}`,
     );
     const body = { ...bodies[template.move], ...template.prefilled_hints };
     expect(contract.safeParse(body).success, template.move).toBe(true);
     const validate = ajv.compile(document.properties[property]);
     expect(validate(body), `${template.move}: ${JSON.stringify(validate.errors)}`).toBe(true);
+    if (expectedOpenApiProperty !== property) {
+      const validateOperation = ajv.compile(document.properties[expectedOpenApiProperty]);
+      expect(
+        validateOperation(body),
+        `${template.move} (${expectedOpenApiProperty}): ${JSON.stringify(validateOperation.errors)}`,
+      ).toBe(true);
+    }
     for (const field of template.required_fields)
       expect(Object.hasOwn(body, field), `${template.move}.${field}`).toBe(true);
     for (const field of Object.keys(body)) {

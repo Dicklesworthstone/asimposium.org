@@ -48,7 +48,7 @@ export function withdrawalFixture({
       UNIQUE(problem_id,seq));
     CREATE TABLE event_content(event_id TEXT PRIMARY KEY,payload_sha256 TEXT,payload_json TEXT,redacted_at TEXT);
     CREATE TABLE claims(problem_id TEXT,id TEXT,source_seq INTEGER);
-    CREATE TABLE claim_versions(problem_id TEXT,claim_id TEXT,version INTEGER,content_digest TEXT,statement TEXT,kind TEXT);
+    CREATE TABLE claim_versions(problem_id TEXT,claim_id TEXT,version INTEGER,content_digest TEXT,statement TEXT,kind TEXT,editor_fellow_id TEXT);
     CREATE TABLE claim_deps(problem_id TEXT,claim_id TEXT,depends_on_claim_id TEXT);
     CREATE TABLE hypotheses(hypothesis_id TEXT,problem_id TEXT,source_event_id TEXT,source_seq INTEGER,author_fellow_id TEXT,
       status TEXT DEFAULT 'open',kill_event_id TEXT,kill_source_seq INTEGER,killed_at TEXT,killed_by_evidence_id TEXT,kill_reason TEXT);
@@ -237,7 +237,7 @@ export function withdrawalFixture({
   );
   sql.exec("INSERT INTO claims VALUES('P-DEMO','C-1',1)");
   sql
-    .query("INSERT INTO claim_versions VALUES('P-DEMO','C-1',1,?,?, 'conjecture')")
+    .query("INSERT INTO claim_versions VALUES('P-DEMO','C-1',1,?,?, 'conjecture', 'fellow-a')")
     .run(claimDigest(), "Every n has the stated bound.");
   const source = (
     kind: WithdrawalKind,

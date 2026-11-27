@@ -197,10 +197,17 @@ describe("W10.7 Load tests, performance budgets, degradation-table fault injecti
         INSERT INTO public_cursor (singleton, cursor) VALUES (1, 42);
         CREATE TABLE problems (id TEXT PRIMARY KEY, public_seq INTEGER, status TEXT, unlisted INTEGER);
         CREATE TABLE event_content (event_id TEXT PRIMARY KEY, redacted_at INTEGER);
+        CREATE TABLE content_controls (problem_id TEXT, target_ref TEXT, visibility TEXT, version INTEGER);
       `);
       sqlite.exec(
         readFileSync(
           new URL("../../db/migrations/0078_herald_room_outbox.sql", import.meta.url),
+          "utf8",
+        ),
+      );
+      sqlite.exec(
+        readFileSync(
+          new URL("../../db/migrations/0157_herald_content_control_wake.sql", import.meta.url),
           "utf8",
         ),
       );

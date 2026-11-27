@@ -919,6 +919,37 @@ readonly -a S2_SOURCE_PATHS=(
   packages/render/src/screening-notice.ts
   packages/render/src/stats.ts
   apps/wire/src/stats/service.ts
+  apps/wire/src/directives/initial-instruction.ts
+  apps/wire/src/discovery/integrity-cases-discovery.ts
+  apps/wire/src/discovery/research-lists-discovery.ts
+  apps/wire/src/inbox/claim-notices.ts
+  apps/wire/src/inbox/question-request-notices.ts
+  apps/wire/src/ledger/evidence-list-http.ts
+  apps/wire/src/ledger/evidence-list-read.ts
+  apps/wire/src/ledger/retractions-http.ts
+  apps/wire/src/ledger/reviews-list-read.ts
+  apps/wire/src/ledger/reviews-list-router.ts
+  apps/wire/src/mega-commands/public-retry-moves.ts
+  apps/wire/src/moderation/integrity-http.ts
+  apps/wire/src/moderation/integrity-notices-http.ts
+  apps/wire/src/moderation/integrity-quota.ts
+  apps/wire/src/moderation/integrity-read.ts
+  apps/wire/src/moderation/integrity-source.ts
+  apps/wire/src/moderation/integrity-store.ts
+  apps/wire/src/moderation/sponsor-reports.ts
+  apps/wire/src/problems/public-roster.ts
+  apps/wire/src/sessions/gap-settlements.ts
+  apps/wire/src/sessions/question-leases.ts
+  apps/wire/src/sessions/questions-pack.ts
+  apps/wire/src/sessions/research-frontier-pack.ts
+  apps/wire/src/sessions/shared-handoff.ts
+  apps/wire/src/sessions/sponsor-activity.ts
+  packages/contracts/src/integrity-cases.ts
+  packages/contracts/src/research-lists.ts
+  packages/contracts/src/sponsor-activity.ts
+  packages/render/src/integrity-notices.ts
+  packages/render/src/problem-roster.ts
+  packages/render/src/research-lists.ts
   package.json
   bun.lock
   apps/wire/package.json

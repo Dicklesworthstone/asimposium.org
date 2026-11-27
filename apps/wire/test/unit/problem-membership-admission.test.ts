@@ -9,7 +9,7 @@ import {
   enrollmentReplayProtectorFromBase64Url,
 } from "../../src/enrollment/service.ts";
 import type { Env } from "../../src/env.ts";
-import { writeLedgerBatch, writeLedgerEvent } from "../../src/krater/krater.ts";
+import { sha256Hex, writeLedgerBatch, writeLedgerEvent } from "../../src/krater/krater.ts";
 import {
   isProblemMembershipAdmissionError,
   problemMembershipAdmissionProblem,
@@ -263,12 +263,64 @@ test("conflict resolution screened before membership removal gets a coarse rollb
   membership(f, api.fellowId);
   session(f, api.fellowId);
   f.sql.query("UPDATE problems SET admission_mode='invite-only' WHERE id=?").run(PROBLEM);
-  f.sql
-    .query(`INSERT INTO conflicts(conflict_id,problem_id,claim_a_id,claim_a_version,claim_b_id,claim_b_version,
-      aligned_definitions,aligned_scope,aligned_quantifiers,smallest_disagreement,author_fellow_id,created_at)
-      VALUES('CF-TEST',?,'C-A',1,'C-B',1,'Same definitions','Same finite family','For every member',
-        'Whether the residual is zero',?,?)`)
-    .run(PROBLEM, api.fellowId, new Date().toISOString());
+  const conflictAt = new Date().toISOString();
+  const conflictPayload = JSON.stringify({
+    conflict_id: "CF-TEST",
+    problem_id: PROBLEM,
+    claims: [
+      { claim_id: "C-A", version: 1 },
+      { claim_id: "C-B", version: 1 },
+    ],
+    aligned_definitions: "Both claims use the same finite-set definitions.",
+    aligned_scope: "Both claims apply to the same finite family of instances.",
+    aligned_quantifiers: "Both claims quantify over every member of that family.",
+    smallest_disagreement: "Whether the residual vanishes on the boundary instance.",
+    agreed_facts: ["Both claims evaluate on the same finite boundary instance."],
+    discriminating_tests: ["Compute the residual directly on the boundary instance."],
+    status: "open",
+    author_fellow_id: api.fellowId,
+  });
+  const conflictDigest = await sha256Hex(conflictPayload);
+  await writeLedgerEvent(
+    f.db,
+    {
+      problemId: PROBLEM,
+      eventId: "E-CF-TEST",
+      idempotencyKey: "seed-conflict-CF-TEST",
+      requestDigest: conflictDigest,
+      eventType: "conflict.normalized",
+      objectKind: "conflict",
+      objectId: "CF-TEST",
+      objectVersion: 1,
+      payloadJson: conflictPayload,
+      createdAt: conflictAt,
+      attribution: {
+        fellowId: api.fellowId,
+        sponsorId: SPONSOR,
+        sessionId: SESSION,
+        modelSelfDeclared: "test/model",
+        harness: "test",
+      },
+    },
+    {
+      statementsAfterEvent: ({ sequence }) => [
+        f.db
+          .prepare(
+            `INSERT INTO conflicts(conflict_id,problem_id,seq,claim_a_id,claim_a_version,claim_b_id,claim_b_version,
+              aligned_definitions,aligned_scope,aligned_quantifiers,smallest_disagreement,agreed_facts_json,
+              discriminating_tests_json,status,author_fellow_id,created_at)
+              VALUES('CF-TEST',?,?,'C-A',1,'C-B',1,'Both claims use the same finite-set definitions.',
+                'Both claims apply to the same finite family of instances.',
+                'Both claims quantify over every member of that family.',
+                'Whether the residual vanishes on the boundary instance.',
+                '["Both claims evaluate on the same finite boundary instance."]',
+                '["Compute the residual directly on the boundary instance."]',
+                'open',?,?)`,
+          )
+          .bind(PROBLEM, sequence, api.fellowId, conflictAt),
+      ],
+    },
+  );
   const before = state(f);
   const response = await api.post(
     `/v1/sessions/${SESSION}/conflicts/CF-TEST/resolve`,

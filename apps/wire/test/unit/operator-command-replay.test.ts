@@ -29,7 +29,8 @@ function fixture() {
     CREATE TABLE enrollment_fellows(fellow_id TEXT PRIMARY KEY, sponsor_id TEXT NOT NULL);
     CREATE TABLE problems(id TEXT PRIMARY KEY, status TEXT, unlisted INTEGER, public_seq INTEGER);
     CREATE TABLE events(id TEXT PRIMARY KEY, problem_id TEXT, seq INTEGER, type TEXT,
-      object_kind TEXT, object_id TEXT, object_version INTEGER, payload_sha256 TEXT, created_at TEXT);
+      object_kind TEXT, object_id TEXT, object_version INTEGER, payload_sha256 TEXT,
+      actor_fellow_id TEXT, actor_sponsor_id TEXT, created_at TEXT);
     CREATE TABLE event_content(event_id TEXT PRIMARY KEY, payload_sha256 TEXT, payload_json TEXT, redacted_at TEXT);
     INSERT INTO enrollment_fellows VALUES('author', 'sponsor');
     INSERT INTO problems VALUES('P-REPLAY', 'active', 0, 2);`);
@@ -40,6 +41,7 @@ function fixture() {
     "0133_operator_command_receipts.sql",
     "0135_report_source_pins.sql",
     "0145_sponsor_problem_hides.sql",
+    "0155_integrity_cases.sql",
   ])
     sql.exec(readFileSync(new URL(`../../../../db/migrations/${name}`, import.meta.url), "utf8"));
   const payload = JSON.stringify({
@@ -51,7 +53,9 @@ function fixture() {
   for (const index of [1, 2]) {
     const eventId = `EV-replay-${index}`;
     sql
-      .query("INSERT INTO events VALUES (?, 'P-REPLAY', ?, 'claim.created', 'claim', ?, 1, ?, ?)")
+      .query(
+        "INSERT INTO events VALUES (?, 'P-REPLAY', ?, 'claim.created', 'claim', ?, 1, ?, 'author', 'sponsor', ?)",
+      )
       .run(eventId, index, `C-${index}`, digest, "2026-11-01T00:00:00.000Z");
     sql.query("INSERT INTO event_content VALUES (?, ?, ?, NULL)").run(eventId, digest, payload);
   }
@@ -183,7 +187,9 @@ function publishReviewCollision(f: ReturnType<typeof fixture>) {
   const publish = (kind: "review" | "retraction", type: string, seq: number) => {
     const eventId = "EV-collision-" + kind;
     f.sql
-      .query("INSERT INTO events VALUES (?, 'P-REPLAY', ?, ?, ?, 'R-1', 1, ?, ?)")
+      .query(
+        "INSERT INTO events(id,problem_id,seq,type,object_kind,object_id,object_version,payload_sha256,actor_fellow_id,actor_sponsor_id,created_at) VALUES (?, 'P-REPLAY', ?, ?, ?, 'R-1', 1, ?, 'author', 'sponsor', ?)",
+      )
       .run(eventId, seq, type, kind, digest, "2026-11-01T00:00:00.000Z");
     f.sql.query("INSERT INTO event_content VALUES (?, ?, ?, NULL)").run(eventId, digest, payload);
     f.sql.query("UPDATE problems SET public_seq=? WHERE id='P-REPLAY'").run(seq);

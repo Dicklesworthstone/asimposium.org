@@ -209,7 +209,8 @@ describe("atomic sequence-derived claims", () => {
         event_chain_v2: 1,
         event_content: 1,
         idempotency: 1,
-        outbox: 1,
+        // Attributed typed claims atomically enqueue search.index + embedding.compute.
+        outbox: 2,
         integrity_checkpoints: 1,
         checkpoint_chain_v2: 1,
       });
@@ -514,7 +515,8 @@ describe("atomic sequence-derived claims", () => {
         event_chain_v2: 16,
         event_content: 16,
         idempotency: 16,
-        outbox: 16,
+        // Each attributed typed claim enqueues search.index + embedding.compute.
+        outbox: 32,
         integrity_checkpoints: 16,
         checkpoint_chain_v2: 16,
       });
@@ -692,8 +694,13 @@ describe("shared atomic claim revisions", () => {
       expect(await inspectProblem(fixture.db, PROBLEM)).toEqual(before);
       expect(await readClaimProjections(fixture.db, PROBLEM)).toEqual(projections);
       expect(
-        fixture.sql.query("SELECT event_id FROM outbox WHERE event_id=?").all(first.eventId),
-      ).toEqual([{ event_id: first.eventId }]);
+        fixture.sql
+          .query("SELECT event_id, kind FROM outbox WHERE event_id=? ORDER BY kind")
+          .all(first.eventId),
+      ).toEqual([
+        { event_id: first.eventId, kind: "embedding.compute" },
+        { event_id: first.eventId, kind: "search.index" },
+      ]);
       expect(await eventChainMatches(await readAllEvents(fixture.db, PROBLEM))).toBe(true);
       expect(fixture.sql.query("PRAGMA foreign_key_check").all()).toEqual([]);
     }));

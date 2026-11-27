@@ -687,6 +687,8 @@ describe("P7 public-write census (kqz5)", () => {
     const KNOWN: Record<string, string> = {
       "src/herald/room-controller.ts":
         "the /v1/workshop-room upgrade is read-only. POST is confined to internal Durable Object nudges.",
+      "src/herald/runtime.ts":
+        "the /v1/workshop-room ticket POST opens a private read-only SSE stream; writes no scientific state.",
       "src/krater/artifact-http.ts":
         "private declare/complete/renew/resumable/resume POSTs and digest-pinned part PUT",
       "src/krater/artifact-publication-http.ts": "POST /v1/artifacts/:id/publish",
