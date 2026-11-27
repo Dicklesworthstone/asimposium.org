@@ -50,7 +50,6 @@ function fixture() {
       actor_fellow_id TEXT, actor_sponsor_id TEXT, actor_session_id TEXT,
       model_string_self_declared TEXT, harness TEXT);
     CREATE TABLE event_content (event_id TEXT PRIMARY KEY, payload_sha256 TEXT, payload_json TEXT, redacted_at TEXT);
-    CREATE TABLE screening_publications (event_id TEXT PRIMARY KEY, provenance_json TEXT NOT NULL);
     CREATE TABLE content_controls (problem_id TEXT, target_ref TEXT, visibility TEXT, version INTEGER);
     CREATE TABLE claim_relations (status TEXT, kind TEXT, source_claim_id TEXT);
     INSERT INTO claim_relations VALUES ('disputed', 'contradicts', 'C-FAKE');
@@ -170,8 +169,10 @@ function fixture() {
     readClaimRelations(db, "P-TEST", cursor, { relationSeq });
   const warn = (id: string, notice = screeningReceipt.public_action) =>
     sqlite
-      .prepare("INSERT INTO screening_publications VALUES (?, ?)")
-      .run(id, JSON.stringify({ ...screeningReceipt, public_action: notice }));
+      .prepare(
+        "INSERT INTO screening_publications(event_id, request_digest, provenance_json) VALUES (?, ?, ?)",
+      )
+      .run(id, "a".repeat(64), JSON.stringify({ ...screeningReceipt, public_action: notice }));
   return {
     sqlite,
     db,
@@ -275,9 +276,17 @@ for (const subject of ["assertion", "dispute"] as const) {
               ...screeningReceipt,
               private_detail: corruption === "oversized" ? "é".repeat(4096) : "PRIVATE-RECEIPT",
             });
-      f.sqlite
-        .prepare("UPDATE screening_publications SET provenance_json=? WHERE event_id=?")
-        .run(raw, publication.id);
+      // Deliberately plant storage corruption below the immutable write guard
+      // and schema check to verify read-side fail-closed handling.
+      f.sqlite.exec("DROP TRIGGER screening_publications_no_update");
+      f.sqlite.exec("PRAGMA ignore_check_constraints = ON");
+      try {
+        f.sqlite
+          .prepare("UPDATE screening_publications SET provenance_json=? WHERE event_id=?")
+          .run(raw, publication.id);
+      } finally {
+        f.sqlite.exec("PRAGMA ignore_check_constraints = OFF");
+      }
       await assert.rejects(f.read(), /PUBLIC_SCREENING_RECEIPT_UNAVAILABLE/);
       if (corruption === "oversized")
         assert.equal(

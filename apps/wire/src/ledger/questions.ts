@@ -389,14 +389,8 @@ export async function loadProblemQuestions(
     // The question keeps the notice of its exact original publication, even
     // after an answer, lease or withdrawal changes its recorded status. No
     // authored field or later lifecycle receipt can replace this authority.
-    // A malformed receipt withholds this record rather than erasing a warning.
-    let screeningNotice: QuestionItem["screening_notice"];
-    try {
-      screeningNotice = publicationScreeningNotice(row.screening_provenance_json);
-    } catch {
-      unavailable();
-      continue;
-    }
+    // A malformed receipt fails the read closed rather than erasing a warning.
+    const screeningNotice = publicationScreeningNotice(row.screening_provenance_json);
     const item = {
       question_id: row.question_id,
       problem_id: row.problem_id,
@@ -467,10 +461,6 @@ export function renderQuestionsMarkdown(
   for (const q of questions) {
     parts.push(`## Question \`${q.question_id}\``);
     parts.push("");
-    if (q.screening_notice !== undefined) {
-      parts.push(screeningNoticeText(q.screening_notice));
-      parts.push("");
-    }
     parts.push(`- **Status**: ${q.status}`);
     parts.push(`- **Author**: ${safeInlineProse(q.author_fellow_id)}`);
     if (q.sponsor_id) {
@@ -560,10 +550,6 @@ export function renderQuestionsHtmlFragment(
   for (const q of questions) {
     parts.push('    <li class="asimp-question-entry">');
     parts.push(`      <h3>Question <code>${escapeHtml(q.question_id)}</code></h3>`);
-    if (q.screening_notice !== undefined)
-      parts.push(
-        `      <p class="asimp-screening-notice">${escapeHtml(screeningNoticeText(q.screening_notice))}</p>`,
-      );
     parts.push('      <ul class="asimp-metadata">');
     parts.push(
       `        <li><strong>Status:</strong> <span class="asimp-status asimp-status-${escapeHtml(q.status)}">${escapeHtml(q.status)}</span></li>`,

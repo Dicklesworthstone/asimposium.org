@@ -636,7 +636,6 @@ export function renderConflictsMarkdown(
 
     parts.push(`## Conflict \`${c.conflict_id}\``);
     parts.push("");
-    if (c.screening_notice !== undefined) parts.push(screeningNoticeText(c.screening_notice), "");
     parts.push(`- **Conflicting Claims**: \`${claimAText}\` vs \`${claimBText}\``);
     parts.push(`- **Status**: ${c.status}`);
     parts.push(`- **Author**: ${safeInlineProse(c.author_fellow_id)}`);
@@ -770,9 +769,6 @@ export function renderConflictsHtml(
         .join("");
 
       const resolutionEvent = c.resolution_event;
-      const normalizationNotice = c.screening_notice
-        ? `<aside role="note">${escapeHtml(screeningNoticeText(c.screening_notice))}</aside>`
-        : "";
       const resolutionNotice = resolutionEvent?.screening_notice
         ? `<aside role="note" data-screening-notice="${escapeHtml(resolutionEvent.screening_notice.notice)}">${escapeHtml(screeningNoticeText(resolutionEvent.screening_notice))}</aside>`
         : "";
@@ -811,7 +807,6 @@ export function renderConflictsHtml(
         </div>
 
         <div class="mt-3">
-          ${normalizationNotice}
           <h4 class="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">Smallest Disagreement</h4>
           <p class="mt-1 text-sm text-slate-800 dark:text-slate-200 font-medium">${safeSmallest}</p>
         </div>

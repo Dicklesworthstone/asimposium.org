@@ -269,13 +269,9 @@ function edgePayload(value: Record<string, unknown> | null, objectId: string) {
   };
 }
 
-/** Legacy absence is undefined. A corrupt receipt makes its content unavailable. */
-function relationNotice(raw: string | null): ScreeningPublicationNotice | undefined | null {
-  try {
-    return publicationScreeningNotice(raw);
-  } catch {
-    return null;
-  }
+/** Legacy absence is undefined. A corrupt receipt fails the read closed rather than erasing a warning. */
+function relationNotice(raw: string | null): ScreeningPublicationNotice | undefined {
+  return publicationScreeningNotice(raw);
 }
 
 /** One database snapshot, no projection fallback and no per-edge reads. */
@@ -346,14 +342,14 @@ export async function readClaimRelations(
         ? await checkedBody(row.payload_json, row.payload_sha256)
         : null;
     const edge = edgePayload(body, row.object_id);
-    const notice = relationNotice(row.screening_provenance_json);
-    if (!edge || notice === null) {
+    if (!edge) {
       output.omitted.push({
         reason: "content_unavailable",
         detail: `typed-relations:${row.event_id}`,
       });
       continue;
     }
+    const notice = relationNotice(row.screening_provenance_json);
     // Receipts qualify only readable, hash-verified publications. In particular,
     // a later dispute never supplies or replaces the assertion's notice.
     const pins =
@@ -385,10 +381,11 @@ export async function readClaimRelations(
         row.dispute_seq <= row.through
           ? await checkedBody(row.dispute_json, row.dispute_sha256)
           : null;
-      const disputeNotice = relationNotice(row.dispute_screening_provenance_json);
+      const disputeNotice = payload
+        ? relationNotice(row.dispute_screening_provenance_json)
+        : undefined;
       if (
         payload &&
-        disputeNotice !== null &&
         edgePayload(payload, row.object_id) &&
         typeof payload.disputed_by === "string" &&
         payload.disputed_by.length > 0 &&
