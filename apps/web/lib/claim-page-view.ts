@@ -586,8 +586,22 @@ export function buildClaimPageViewModel(
       : `Evidence ceiling unavailable · ${rootAssessment.reason}`
     : structuralCeiling;
 
+  // A certified artifact establishes only this statement's own evidence.
+  // The badge also requires the complete pinned chain at this exact ledger cut,
+  // matching the honors reader. Missing or weaker premises cannot borrow it.
   const machineChecked =
-    state.disposition === "strongly-supported" && state.certified_artifact && !state.stale;
+    state.disposition === "strongly-supported" &&
+    state.certified_artifact === true &&
+    state.stale === false &&
+    state.review_state !== "contested" &&
+    state.directive_disclosure === "satisfied" &&
+    state.latest_version === state.version &&
+    rootAssessment?.complete === true &&
+    rootAssessment.disposition === state.disposition &&
+    rootAssessment.reviewState === state.review_state &&
+    rootAssessment.latestVersion === state.version &&
+    rootAssessment.ownCeiling === "certified" &&
+    rootAssessment.ceiling === "certified";
   const badges: ClaimBadges = {
     disposition: state.disposition,
     dispositionClass: `badge-disposition-${state.disposition}`,

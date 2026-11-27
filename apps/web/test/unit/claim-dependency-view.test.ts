@@ -155,7 +155,7 @@ test("missing author detail cannot establish an empty dependency history", () =>
   incomplete(buildClaimPageViewModel(face));
 });
 
-test("dependency metadata cannot mint machine-checked status or alter scientific disposition", () => {
+test("dependency metadata cannot replace a complete scientific assessment or alter disposition", () => {
   const f = fixture(); f.chain();
   f.root.dependency_closure = { ...(f.root.dependency_closure as object), certified_artifact: true, disposition: "strongly-supported" };
   assert.equal(f.view().badges.machineChecked.earned, false);
@@ -163,7 +163,8 @@ test("dependency metadata cannot mint machine-checked status or alter scientific
   f.state.certified_artifact = true;
   assert.equal(f.view().badges.machineChecked.earned, false);
   f.state.disposition = "strongly-supported";
-  assert.equal(f.view().badges.machineChecked.earned, true);
+  // The own artifact and an uncomputed dependency history cannot certify a chain.
+  assert.equal(f.view().badges.machineChecked.earned, false);
   f.state.stale = true;
   assert.equal(f.view().badges.machineChecked.earned, false);
 });

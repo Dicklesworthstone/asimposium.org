@@ -636,13 +636,49 @@ describe("Claim Share Card View Model", () => {
         version: 1,
         latest_version: 1,
         disposition: "strongly-supported",
-        review_state: "unreviewed",
+        review_state: "independently-checked",
         directive_disclosure: "satisfied",
         unchallenged: false,
         stale: false,
         recorded_refutation_attempts: 4,
         certified_artifact: true,
         legacy_reviews: 0,
+      },
+    });
+
+    const detail = face.items[0]!;
+    detail.body = JSON.stringify({
+      problem: "P-100",
+      claim_id: "C-1",
+      version: 1,
+      statement: detail.body,
+      dependency_pins: [],
+      dependency_closure: {
+        scope: "publication-pins",
+        through: 42,
+        scan_complete: true,
+        verified_dependencies: 0,
+        unavailable_dependencies: 0,
+      },
+      dependency_assessment: {
+        scope: "publication-pins",
+        problem: "P-100",
+        target: "C-1@1",
+        through: 42,
+        standing: {
+          complete: true,
+          disposition: "strongly-supported",
+          review_state: "independently-checked",
+          stale: false,
+          latest_version: 1,
+          own_ceiling: "certified",
+        },
+        chain: {
+          complete: true,
+          ceiling: "certified",
+          reason: "weakest-evidence",
+          weakest_path: ["C-1@1"],
+        },
       },
     });
 

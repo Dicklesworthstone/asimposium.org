@@ -26,6 +26,13 @@ on:
       - "apps/web/test/unit/workshop-watch*.test.ts"
       - "apps/web/test/unit/herald-live-upgrade.test.ts"
       - "apps/web/lib/public-ledger.ts"
+      - "apps/web/lib/claim-page-view.ts"
+      - "apps/web/lib/share-card.ts"
+      - "apps/web/test/unit/claim-page-view.test.ts"
+      - "apps/web/test/unit/claim-dependency-view.test.ts"
+      - "apps/web/test/unit/claim-machine-checked.test.ts"
+      - "apps/web/test/unit/share-card.test.ts"
+      - "scripts/suite/claim-page-e2e.ts"
       - "apps/web/lib/public-record.ts"
       - "apps/web/app/p/**/retractions/**"
       - "apps/web/app/r/**"
@@ -113,6 +120,10 @@ jobs:
       - name: Typecheck sponsor result controls
         if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
         run: bun run --filter @asimposium/web typecheck
+      - name: Claim dependency badges and share-card regressions
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
+        working-directory: apps/web
+        run: bun test /dev/null --timeout=120000 test/unit/claim-page-view.test.ts test/unit/claim-dependency-view.test.ts test/unit/claim-machine-checked.test.ts test/unit/share-card.test.ts
       - name: Sponsor result confirmation and recovery regressions
         if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
         working-directory: apps/web

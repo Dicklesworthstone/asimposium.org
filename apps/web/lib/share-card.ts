@@ -32,7 +32,7 @@ import {
   HONORS_RECORD_TITLE,
   screeningNoticeText,
 } from "@asimposium/render";
-import { parseJsonBody } from "./claim-page-view";
+import { buildClaimPageViewModel, parseJsonBody } from "./claim-page-view";
 import { SITE } from "./site";
 
 export type ShareCardStatusKind =
@@ -532,12 +532,7 @@ export function buildClaimShareCardData(
     { label: "Reviews in digest", value: reviews.length },
     {
       label: "Machine-checked",
-      value:
-        face.claim_state.disposition === "strongly-supported" &&
-        face.claim_state.certified_artifact &&
-        !face.claim_state.stale
-          ? "Yes"
-          : "No",
+      value: buildClaimPageViewModel(face).badges.machineChecked.earned ? "Yes" : "No",
     },
   ];
 

@@ -635,6 +635,39 @@ export async function runClaimPageE2e(): Promise<void> {
       ],
       cursor: 106,
     });
+    stronglySupportedClaim.claim_state.review_state = "independently-checked";
+    const certifiedDetail = stronglySupportedClaim.items[0]!;
+    certifiedDetail.body = JSON.stringify({
+      ...JSON.parse(certifiedDetail.body),
+      dependency_pins: [],
+      dependency_closure: {
+        scope: "publication-pins",
+        through: 106,
+        scan_complete: true,
+        verified_dependencies: 0,
+        unavailable_dependencies: 0,
+      },
+      dependency_assessment: {
+        scope: "publication-pins",
+        problem: "P-SP4D",
+        target: "C-2@1",
+        through: 106,
+        standing: {
+          complete: true,
+          disposition: "strongly-supported",
+          review_state: "independently-checked",
+          stale: false,
+          latest_version: 1,
+          own_ceiling: "certified",
+        },
+        chain: {
+          complete: true,
+          ceiling: "certified",
+          reason: "weakest-evidence",
+          weakest_path: ["C-2@1"],
+        },
+      },
+    });
     activeMockResponse = { status: 200, body: stronglySupportedClaim };
 
     const stronglySupportedHtml = renderToStaticMarkup(

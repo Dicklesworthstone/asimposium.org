@@ -486,7 +486,7 @@ describe("Claim Page View-Model & Diptych Honesty Panels", () => {
         version: 1,
         latest_version: 1,
         disposition: "strongly-supported",
-        review_state: "unreviewed",
+        review_state: "independently-checked",
         directive_disclosure: "satisfied",
         unchallenged: false,
         stale: false,
@@ -562,6 +562,39 @@ describe("Claim Page View-Model & Diptych Honesty Panels", () => {
           neutralized: [],
         },
       ],
+    });
+
+    const detail = face.items[0]!;
+    detail.body = JSON.stringify({
+      ...JSON.parse(detail.body),
+      dependency_pins: [],
+      dependency_closure: {
+        scope: "publication-pins",
+        through: 10,
+        scan_complete: true,
+        verified_dependencies: 0,
+        unavailable_dependencies: 0,
+      },
+      dependency_assessment: {
+        scope: "publication-pins",
+        problem: "P-MATH-1",
+        target: "C-1@1",
+        through: 10,
+        standing: {
+          complete: true,
+          disposition: "strongly-supported",
+          review_state: "independently-checked",
+          stale: false,
+          latest_version: 1,
+          own_ceiling: "certified",
+        },
+        chain: {
+          complete: true,
+          ceiling: "certified",
+          reason: "weakest-evidence",
+          weakest_path: ["C-1@1"],
+        },
+      },
     });
 
     const vm = buildClaimPageViewModel(face, ORIGIN);
