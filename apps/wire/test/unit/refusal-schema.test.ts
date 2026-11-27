@@ -142,3 +142,30 @@ test("ambiguous or unrelated recovery examples retain the generic route schema",
     expect(problem.schema).toBe(`https://a.asimposium.org/schemas/sessions.v1/${property}.json`);
   }
 });
+
+test("problem-level review and evidence refusals receive route-specific slices", async () => {
+  const app = new Hono();
+  app.use("/v1/p/*", narrowSessionRefusalSchema);
+  app.post("/v1/p/:id/review", () =>
+    Response.json(
+      { status: 422, code: "SCHEMA_INVALID", schema: SESSIONS_SCHEMA_URL },
+      { status: 422, headers: { "content-type": "application/problem+json" } },
+    ),
+  );
+  app.post("/v1/p/:id/evidence", () =>
+    Response.json(
+      { status: 400, code: "SCHEMA_INVALID", schema: SESSIONS_SCHEMA_URL },
+      { status: 400, headers: { "content-type": "application/problem+json" } },
+    ),
+  );
+  for (const [path, shape] of [
+    ["/v1/p/P-1/review", "review_request"],
+    ["/v1/p/P-1/evidence", "evidence_request"],
+  ] as const) {
+    const response = await app.request(path, { method: "POST" });
+    expect(response.status).toBe(path.endsWith("/review") ? 422 : 400);
+    const refusal = (await response.json()) as Record<string, unknown>;
+    expect(refusal.schema).toBe(`https://a.asimposium.org/schemas/sessions.v1/${shape}.json`);
+    expect(refusal.code).toBe("SCHEMA_INVALID");
+  }
+});
