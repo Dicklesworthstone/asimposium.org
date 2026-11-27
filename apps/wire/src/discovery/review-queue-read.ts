@@ -11,6 +11,7 @@ import {
 } from "@asimposium/contracts/review-queue";
 import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types";
 import { claimContentDigest } from "../krater/claim-version";
+import { ScientificInputError } from "../ledger/scientific-checks";
 import type {
   ScientificDisposition,
   ScientificReadBudget,
@@ -272,10 +273,17 @@ export async function readReviewQueue(
       omit("content_unavailable");
       continue;
     }
-    const fold = await science.fold(
-      timeline.filter((row) => row.target_version <= admission.version),
-      { db, problem: admission.problem_id, through: admission.cursor, claim: admission.claim_id },
-    );
+    let fold: ScientificDisposition;
+    try {
+      fold = await science.fold(
+        timeline.filter((row) => row.target_version <= admission.version),
+        { db, problem: admission.problem_id, through: admission.cursor, claim: admission.claim_id },
+      );
+    } catch (error) {
+      if (!(error instanceof ScientificInputError)) throw error;
+      omit("content_unavailable");
+      continue;
+    }
     const need = reviewNeed(fold, row.author_fellow_id);
     if (
       !need ||

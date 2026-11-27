@@ -1977,14 +1977,89 @@ describe("off-scope discovery boundaries on migrated SQLite (not D1 integration 
     }
   });
 
-  test("current off-scope claims leave global queues and material feeds without losing exact reads or historical notices", async () => {
+  function scopedClaimsFixture() {
     const { db, raw } = createMigratedDb();
+    seedScopeProblem(raw, "P-SCOPE");
+    const first = seedScopeClaim(raw, "P-SCOPE", "C-1", 2);
+    seedScopeClaim(raw, "P-SCOPE", "C-2", 3);
+    const warned = seedScopeClaim(raw, "P-SCOPE", "C-1", 4, 2);
+    seedPublicationNotice(raw, warned.eventId, false, offScopeNotice);
+    const app = createApp();
+    const read = async (path: string) => {
+      const response = await app.fetch(new Request(`https://a.asimposium.org${path}`), mockEnv(db));
+      const text = await response.text();
+      expect(response.status, `${path}: ${text}`).toBe(200);
+      return JSON.parse(text) as unknown;
+    };
+    return { raw, first, warned, read };
+  }
+
+  test("review queues respect the current scope and exact reads retain earlier notices", async () => {
+    const { raw, first, warned, read } = scopedClaimsFixture();
     try {
-      seedScopeProblem(raw, "P-SCOPE");
-      const first = seedScopeClaim(raw, "P-SCOPE", "C-1", 2);
-      seedScopeClaim(raw, "P-SCOPE", "C-2", 3);
-      const warned = seedScopeClaim(raw, "P-SCOPE", "C-1", 4, 2);
-      seedPublicationNotice(raw, warned.eventId, false, offScopeNotice);
+      const global = ReviewQueueResponseSchema.parse(await read("/reviews.json"));
+      expect(global.candidates.map((item) => item.claim_id)).toEqual(["C-2"]);
+      // A claim-level scope notice does not erase its clean parent problem.
+      expect(AreasIndexResponseSchema.parse(await read("/areas.json")).total_problems).toBe(1);
+      expect(ProblemsIndexResponseSchema.parse(await read("/problems.json")).problems[0]?.id).toBe(
+        "P-SCOPE",
+      );
+      const scoped = ReviewQueueResponseSchema.parse(await read("/reviews.json?problem=P-SCOPE"));
+      expect(scoped.candidates.find((item) => item.claim_id === "C-1")).toMatchObject({
+        version: 2,
+        statement: warned.statement,
+        screening_notice: offScopeNotice,
+      });
+      const exact = ClaimFaceResponseSchema.parse(await read("/p/P-SCOPE/claims/C-1@2.json"));
+      expect(exact.items.find((item) => item.kind === "claim-detail")?.screening_notice).toEqual(
+        offScopeNotice,
+      );
+      const found = SearchResponseSchema.parse(await read("/search.json?q=P-SCOPE%23C-1%402"));
+      expect(found.items.find((item) => item.kind === "claim" && item.id === "C-1")).toMatchObject({
+        version: 2,
+        statement: warned.statement,
+        screening_notice: offScopeNotice,
+      });
+      const old = ClaimFaceResponseSchema.parse(await read("/p/P-SCOPE/claims/C-1@1.json"));
+      expect(
+        old.items.find((item) => item.kind === "claim-detail")?.screening_notice,
+      ).toBeUndefined();
+      expect(old.items.find((item) => item.kind === "claim-detail")?.body).toContain(
+        first.statement,
+      );
+
+      const successor = seedScopeClaim(raw, "P-SCOPE", "C-1", 5, 3);
+      const restored = ReviewQueueResponseSchema.parse(await read("/reviews.json"));
+      expect(restored.candidates.find((item) => item.claim_id === "C-1")).toMatchObject({
+        version: 3,
+        statement: successor.statement,
+      });
+      expect(
+        restored.candidates.find((item) => item.claim_id === "C-1")?.screening_notice,
+      ).toBeUndefined();
+      const current = ClaimFaceResponseSchema.parse(await read("/p/P-SCOPE/claims/C-1.json"));
+      expect(
+        current.items.find((item) => item.kind === "claim-detail")?.screening_notice,
+      ).toBeUndefined();
+      expect(current.items.find((item) => item.kind === "claim-detail")?.body).toContain(
+        successor.statement,
+      );
+      const history = ClaimFaceResponseSchema.parse(await read("/p/P-SCOPE/claims/C-1@2.json"));
+      expect(history.items.find((item) => item.kind === "claim-detail")?.screening_notice).toEqual(
+        offScopeNotice,
+      );
+      expect(history.items.find((item) => item.kind === "claim-detail")?.body).toContain(
+        warned.statement,
+      );
+    } finally {
+      raw.close();
+    }
+  });
+
+  test("material feeds check the scope of the exact statement each publication targets", async () => {
+    // Feed events alone do not supply the scientific projections required by the review queue.
+    const { raw, first, read } = scopedClaimsFixture();
+    try {
       // Material-feed source fixtures: exact target versions remain relevant
       // after a clean claim head succeeds the warned version. These rows do
       // not pretend to establish independent review or evidence acceptance.
@@ -2024,81 +2099,18 @@ describe("off-scope discovery boundaries on migrated SQLite (not D1 integration 
         ]);
       }
       raw.run("UPDATE problems SET public_seq=7,chain_digest='sha256:chain' WHERE id='P-SCOPE'");
-      const app = createApp();
-      const read = async (path: string) => {
-        const response = await app.fetch(
-          new Request(`https://a.asimposium.org${path}`),
-          mockEnv(db),
-        );
-        const text = await response.text();
-        expect(response.status, `${path}: ${text}`).toBe(200);
-        return JSON.parse(text) as unknown;
-      };
-      const global = ReviewQueueResponseSchema.parse(await read("/reviews.json"));
-      expect(global.candidates.map((item) => item.claim_id)).toEqual(["C-2"]);
       const now = NowStripResponseSchema.parse(await read("/now.json"));
       expect(now.events.some((event) => event.object_id === "C-2")).toBe(true);
       expect(now.events.some((event) => event.object_id === "C-1")).toBe(false);
       expect(now.events.some((event) => event.object_id === "R-SCOPE-CONTROL")).toBe(true);
       for (const target of ["R-SCOPE-OLD", "E-SCOPE-OLD"])
         expect(now.events.some((event) => event.object_id === target)).toBe(false);
-      // A claim-level scope notice does not erase its clean parent problem.
-      expect(AreasIndexResponseSchema.parse(await read("/areas.json")).total_problems).toBe(1);
-      expect(ProblemsIndexResponseSchema.parse(await read("/problems.json")).problems[0]?.id).toBe(
-        "P-SCOPE",
-      );
-      const scoped = ReviewQueueResponseSchema.parse(await read("/reviews.json?problem=P-SCOPE"));
-      expect(scoped.candidates.find((item) => item.claim_id === "C-1")).toMatchObject({
-        version: 2,
-        statement: warned.statement,
-        screening_notice: offScopeNotice,
-      });
-      const exact = ClaimFaceResponseSchema.parse(await read("/p/P-SCOPE/claims/C-1@2.json"));
-      expect(exact.items.find((item) => item.kind === "claim-detail")?.screening_notice).toEqual(
-        offScopeNotice,
-      );
-      const found = SearchResponseSchema.parse(await read("/search.json?q=P-SCOPE%23C-1%402"));
-      expect(found.items.find((item) => item.kind === "claim" && item.id === "C-1")).toMatchObject({
-        version: 2,
-        statement: warned.statement,
-        screening_notice: offScopeNotice,
-      });
-      const old = ClaimFaceResponseSchema.parse(await read("/p/P-SCOPE/claims/C-1@1.json"));
-      expect(
-        old.items.find((item) => item.kind === "claim-detail")?.screening_notice,
-      ).toBeUndefined();
-      expect(old.items.find((item) => item.kind === "claim-detail")?.body).toContain(
-        first.statement,
-      );
-
-      const successor = seedScopeClaim(raw, "P-SCOPE", "C-1", 8, 3);
-      const restored = ReviewQueueResponseSchema.parse(await read("/reviews.json"));
-      expect(restored.candidates.find((item) => item.claim_id === "C-1")).toMatchObject({
-        version: 3,
-        statement: successor.statement,
-      });
-      expect(
-        restored.candidates.find((item) => item.claim_id === "C-1")?.screening_notice,
-      ).toBeUndefined();
+      seedScopeClaim(raw, "P-SCOPE", "C-1", 8, 3);
       const restoredNow = NowStripResponseSchema.parse(await read("/now.json"));
       expect(restoredNow.events.some((event) => event.event_id === first.eventId)).toBe(true);
       expect(restoredNow.events.some((event) => event.object_id === "R-SCOPE-CONTROL")).toBe(true);
       for (const target of ["R-SCOPE-OLD", "E-SCOPE-OLD"])
         expect(restoredNow.events.some((event) => event.object_id === target)).toBe(false);
-      const current = ClaimFaceResponseSchema.parse(await read("/p/P-SCOPE/claims/C-1.json"));
-      expect(
-        current.items.find((item) => item.kind === "claim-detail")?.screening_notice,
-      ).toBeUndefined();
-      expect(current.items.find((item) => item.kind === "claim-detail")?.body).toContain(
-        successor.statement,
-      );
-      const history = ClaimFaceResponseSchema.parse(await read("/p/P-SCOPE/claims/C-1@2.json"));
-      expect(history.items.find((item) => item.kind === "claim-detail")?.screening_notice).toEqual(
-        offScopeNotice,
-      );
-      expect(history.items.find((item) => item.kind === "claim-detail")?.body).toContain(
-        warned.statement,
-      );
     } finally {
       raw.close();
     }

@@ -18,6 +18,8 @@ import {
   REVIEW_QUEUE_METADATA_SQL,
 } from "../../src/discovery/review-queue-sql";
 
+import { ScientificInputError } from "../../src/ledger/scientific-checks";
+
 const sha = (s: string) => createHash("sha256").update(s).digest("hex");
 const instant = (n: number) => new Date(Date.UTC(2026, 8, 1) + n * 1000).toISOString();
 function fixture() {
@@ -153,6 +155,48 @@ function fixture() {
       | undefined;
   return { sql, db, problem, claim, science, discover, metadata };
 }
+
+test("an inconsistent scientific history withholds only its review candidate", async () => {
+  const f = fixture();
+  try {
+    f.problem();
+    f.claim("C-1", 1);
+    f.claim("C-2", 2);
+    const page = await readReviewQueue(
+      f.db,
+      {},
+      {
+        ...f.science,
+        async fold(rows, at) {
+          if (at.claim === "C-1") throw new ScientificInputError("invalid history");
+          return f.science.fold(rows, at);
+        },
+      },
+    );
+    assert.deepEqual(
+      page.candidates.map((item) => item.claim_id),
+      ["C-2"],
+    );
+    assert.ok(
+      page.omitted.some((item) => item.reason === "content_unavailable" && item.count === 1),
+    );
+    await assert.rejects(
+      readReviewQueue(
+        f.db,
+        {},
+        {
+          ...f.science,
+          async fold() {
+            throw new Error("storage unavailable");
+          },
+        },
+      ),
+      /storage unavailable/,
+    );
+  } finally {
+    f.sql.close();
+  }
+});
 
 test("archiving admissions removes public review work and reopening restores it", async () => {
   const f = fixture();
