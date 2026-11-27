@@ -3,6 +3,11 @@ import assert from "node:assert/strict";
 import { HERALD_ROOM_LIMITS } from "@asimposium/contracts/herald-room-model";
 import { PUBLIC_WATCH_REQUEST_TIMEOUT_MS } from "@asimposium/contracts/public-watch";
 import {
+  HeraldRoomFanout,
+  publicRoomAttachment,
+  type RoomSocket,
+} from "../../../wire/src/herald/room-core.ts";
+import {
   PublicLedgerWatch,
   type PublicWatchEventSource,
   type PublicWatchRuntime,
@@ -376,6 +381,123 @@ describe("Agora Herald progressive WS -> SSE -> Poll upgrade (kfag)", () => {
 
   const notice = { data: JSON.stringify({ control: "resync", through: 2 }) };
 
+  test("bursts of same-cursor refreshes respect the actual room ACK budget without disconnecting", async () => {
+    let heads = 0;
+    const f = publicRoom(async (url, init) => {
+      assert.equal(String(url), "https://a.asimposium.org/p/P-DEMO.json");
+      assert.equal(init?.method, "HEAD");
+      heads++;
+      return new Response(null, { status: 304, headers: { etag: '"p1"' } });
+    });
+    const client = f.sockets[0];
+    assert.ok(client);
+    const closed: number[] = [];
+    const acknowledgements: { at: number; data: string }[] = [];
+    let attachment: unknown;
+    const server: RoomSocket = {
+      get readyState() {
+        return closed.length === 0 ? 1 : 3;
+      },
+      send: (data) => client.emit("message", { data }),
+      close: (code) => {
+        closed.push(code);
+        client.emit("close");
+      },
+      serializeAttachment: (value) => {
+        attachment = structuredClone(value);
+      },
+      deserializeAttachment: () => structuredClone(attachment),
+    };
+    const peers: RoomSocket[] = [];
+    const room = new HeraldRoomFanout({
+      sockets: () => peers,
+      accept: (socket) => peers.push(socket),
+    });
+    const now = () => 1_000_000 + f.clock.now;
+    client.send = (data) => {
+      client.sent.push(data);
+      acknowledgements.push({ at: f.clock.now, data });
+      const ack = room.beginAck(server, data, now());
+      if (ack !== undefined) room.completeAck(server, ack, undefined, { seq: 2 }, now());
+    };
+    client.emit("open");
+    assert.equal(
+      room.connectPublic(
+        server,
+        { problemId: "P-DEMO", since: 0, ipHash: "a".repeat(64) },
+        { seq: 2 },
+        now(),
+      ),
+      "accepted",
+    );
+    await settle();
+    assert.equal(heads, 1, "validator reads start immediately, without waiting for the ACK");
+    for (let i = 0; i < 200; i++) room.refresh(server, undefined, { seq: 2 }, now());
+    assert.deepEqual(closed, [], "a valid same-cursor refresh must not trigger a 1013 refusal");
+    const interval = HERALD_ROOM_LIMITS.acknowledgementIntervalMs;
+    await f.clock.advance(interval);
+    for (let i = 0; i < 200; i++) room.refresh(server, undefined, { seq: 2 }, now());
+    await f.clock.advance(interval * 2);
+    assert.deepEqual(acknowledgements, [
+      { at: interval, data: '{"ack":2}' },
+      { at: interval * 2, data: '{"ack":2}' },
+      { at: interval * 3, data: '{"ack":2}' },
+    ]);
+    assert.deepEqual(closed, []);
+    assert.equal(publicRoomAttachment(server)?.pending, false);
+    assert.equal(heads, 3, "each coalesced same-cursor notice revalidates rendered bytes");
+    assert.equal(f.watch.transport, "ws");
+    assert.equal(f.sources.length, 0);
+    f.watch.stop();
+    assert.equal(f.clock.timers.size, 0);
+  });
+
+  for (const transition of ["stop", "pause", "fallback"]) {
+    test(`${transition} cancels a queued ACK and ignores late room notices`, async () => {
+      const f = publicRoom(
+        async () => new Response(null, { status: 304, headers: { etag: '"p1"' } }),
+      );
+      const client = f.sockets[0];
+      assert.ok(client);
+      client.emit("message", notice);
+      await settle();
+      if (transition === "stop") f.watch.stop();
+      else if (transition === "pause") f.watch.setActive(false);
+      else client.emit("error");
+      client.emit("message", notice);
+      await f.clock.advance(HERALD_ROOM_LIMITS.acknowledgementIntervalMs);
+      assert.deepEqual(client.sent, [], "a closed transport must never send its queued ACK");
+      assert.equal(client.closed, true);
+      if (transition === "fallback") assert.equal(f.watch.transport, "sse");
+      f.watch.stop();
+      assert.equal(f.clock.timers.size, 0);
+    });
+  }
+
+  test("duplicate notices share one bounded ACK deadline and a failed send falls back to SSE", async () => {
+    const f = publicRoom(
+      async () => new Response(null, { status: 304, headers: { etag: '"p1"' } }),
+    );
+    const client = f.sockets[0];
+    assert.ok(client);
+    let sends = 0;
+    client.send = () => {
+      sends++;
+      throw new Error("The socket closed before its ACK");
+    };
+    client.emit("message", notice);
+    const interval = HERALD_ROOM_LIMITS.acknowledgementIntervalMs;
+    await f.clock.advance(interval - 1);
+    for (let i = 0; i < 200; i++) client.emit("message", notice);
+    assert.equal(sends, 0);
+    await f.clock.advance(1);
+    assert.equal(sends, 1, "duplicate notices cannot defer or multiply the queued ACK");
+    assert.equal(f.watch.transport, "sse");
+    assert.equal(f.sources.length, 1);
+    f.watch.stop();
+    assert.equal(f.clock.timers.size, 0);
+  });
+
   for (const transport of ["ws", "sse"]) {
     test(`a quiet healthy ${transport} reconciles a hidden object when its wake is lost`, async () => {
       let heads = 0;
@@ -614,11 +736,13 @@ describe("Agora Herald progressive WS -> SSE -> Poll upgrade (kfag)", () => {
       data: JSON.stringify({ control: "resync", through: 2 }),
     });
     await settle();
-    assert.deepEqual(sockets[0]!.sent, ['{"ack":2}']);
+    assert.deepEqual(sockets[0]!.sent, []);
     assert.equal(calls.filter((c) => c.url.endsWith("/cursor")).length, 0);
     assert.equal(calls.filter((c) => c.method === "HEAD").length, 1);
     assert.equal(calls[0]!.credentials, "omit");
     assert.equal(refreshes, 1);
+    await clock.advance(HERALD_ROOM_LIMITS.acknowledgementIntervalMs);
+    assert.deepEqual(sockets[0]!.sent, ['{"ack":2}']);
 
     // Heartbeat ping runs every 20s while WS stays open.
     await clock.advance(20_000);

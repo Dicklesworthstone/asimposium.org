@@ -280,6 +280,8 @@ export class PublicLedgerWatch {
   private state: PublicWatchState | undefined;
   private socket: PublicWatchSocket | undefined;
   private eventSource: PublicWatchEventSource | undefined;
+  private acknowledgementTimer: Timer | undefined;
+  private pendingAcknowledgement: number | undefined;
   private heartbeatTimer: Timer | undefined;
   private liveDeadline: Timer | undefined;
   private reconnectTimer: Timer | undefined;
@@ -397,6 +399,11 @@ export class PublicLedgerWatch {
 
   private closeLiveTransports(): void {
     this.clearLiveDeadline();
+    if (this.acknowledgementTimer !== undefined) {
+      this.runtime.clearTimer(this.acknowledgementTimer);
+      this.acknowledgementTimer = undefined;
+    }
+    this.pendingAcknowledgement = undefined;
     if (this.reconcileTimer !== undefined) {
       this.runtime.clearTimer(this.reconcileTimer);
       this.reconcileTimer = undefined;
@@ -508,6 +515,38 @@ export class PublicLedgerWatch {
     }, HERALD_WS_HEARTBEAT_MS);
   }
 
+  /** Accepting an ACK can immediately release a coalesced room notice. Wait
+   * the shared interval from receipt so the next ACK respects the server's
+   * read budget, while validator checks still start immediately. One pending
+   * ACK also bounds duplicate notices without extending their deadline. */
+  private queueAcknowledgement(
+    sock: PublicWatchSocket,
+    generation: number,
+    through: number,
+    onFailure: () => void,
+  ): void {
+    this.pendingAcknowledgement = through;
+    if (this.acknowledgementTimer !== undefined) return;
+    this.acknowledgementTimer = this.runtime.setTimer(() => {
+      this.acknowledgementTimer = undefined;
+      const ack = this.pendingAcknowledgement;
+      this.pendingAcknowledgement = undefined;
+      if (
+        ack === undefined ||
+        !this.running ||
+        !this.active ||
+        this.generation !== generation ||
+        this.socket !== sock
+      )
+        return;
+      try {
+        sock.send(JSON.stringify({ ack }));
+      } catch {
+        onFailure();
+      }
+    }, HERALD_ROOM_LIMITS.acknowledgementIntervalMs);
+  }
+
   private tryOpenWebSocket(problem: string): boolean {
     const openWs = this.runtime.openWebSocket;
     if (!openWs) return false;
@@ -552,12 +591,7 @@ export class PublicLedgerWatch {
       receivedNotice = true;
       this.clearLiveDeadline();
       this.armLiveReconciliation(generation);
-      try {
-        sock.send(JSON.stringify({ ack: through }));
-      } catch {
-        failToNext();
-        return;
-      }
+      this.queueAcknowledgement(sock, generation, through, failToNext);
       this.roomCursor = through;
       this.forceProbe = true;
       if (!this.polling) void this.probeTargetsOnly(generation);
@@ -716,7 +750,10 @@ export class PublicLedgerWatch {
     this.options.onState(state);
   }
 
-  private recordReadFailure(reason: NonNullable<PublicWatchState["reason"]>, retryAfter = 0): number {
+  private recordReadFailure(
+    reason: NonNullable<PublicWatchState["reason"]>,
+    retryAfter = 0,
+  ): number {
     this.failures++;
     this.forceProbe = true;
     this.emit({ status: "unavailable", reason });
