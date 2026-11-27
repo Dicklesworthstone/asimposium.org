@@ -110,14 +110,34 @@ export const ProblemsIndexResponseSchema = z
   .object({
     problems: z.array(ProblemIndexEntrySchema).max(200),
     next_after: PublicLedgerProblemIdSchema.optional().describe(
-      "When present, request the next page with ?after=<this id>; absent at the current end. Pages reflect live visibility, not a frozen snapshot.",
+      "When present, request ?after=<this id>&snapshot=<snapshot>. Absent at the current end. A changed snapshot refuses continuation with CURSOR_INVALID; restart from the first page.",
     ),
+    snapshot: z
+      .number()
+      .int()
+      .min(0)
+      .max(999_999_999_999_999)
+      .optional()
+      .describe(
+        "Public change token captured with this page. Reuse with next_after to prevent silent skips or repeats when scientific needs change the order. This checks current state, not historical visibility.",
+      ),
     omitted: z.array(z.string().min(1).max(160)),
   })
   .strict();
 
 export const ProblemsIndexQuerySchema = z
-  .object({ after: PublicLedgerProblemIdSchema.optional() })
+  .object({
+    after: PublicLedgerProblemIdSchema.optional().describe(
+      "Use next_after from the previous page with its snapshot. Without snapshot this selects a live position and may skip or repeat problems after rank changes. Unavailable positions are refused.",
+    ),
+    snapshot: z
+      .string()
+      .regex(/^(?:0|[1-9][0-9]{0,14})$(?![\s\S])/)
+      .optional()
+      .describe(
+        "Canonical decimal public change token, 0–999999999999999. Must equal the current token; on CURSOR_INVALID restart without after or snapshot. Current visibility always applies.",
+      ),
+  })
   .strict();
 
 export type ProblemIndexEntry = z.infer<typeof ProblemIndexEntrySchema>;

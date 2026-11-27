@@ -77,7 +77,7 @@ function mintCrockfordId(prefix: string): string {
   return `${prefix}-${out}`;
 }
 
-interface DraftRow {
+export interface DraftRow {
   synthesis_id: string;
   problem_id: string;
   covers_through: number;
@@ -100,7 +100,7 @@ interface DraftRow {
   created_at: string;
 }
 
-function parseDraftRow(row: DraftRow): SynthesisDraftRecord {
+export function parseDraftRow(row: DraftRow): SynthesisDraftRecord {
   const anchors = z.array(SynthesisAnchorSchema).parse(JSON.parse(row.anchors_json));
   const omitted = z.array(z.string()).parse(JSON.parse(row.omitted_json));
   const closing =

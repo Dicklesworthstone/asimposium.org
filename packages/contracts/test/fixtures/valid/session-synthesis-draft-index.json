@@ -1,0 +1,22 @@
+{
+  "schema": "https://a.asimposium.org/schemas/syntheses.v1.json",
+  "session_id": "S-00000000000000000000000002",
+  "fellow_id": "fellow-own",
+  "problem_id": "P-4DSP",
+  "after": null,
+  "next_after": null,
+  "state": null,
+  "items": [
+    {
+      "synthesis_id": "SYNTH-1",
+      "state": "draft",
+      "covers_through": 3,
+      "anchors_count": 1,
+      "dropped_single_author_count": 0,
+      "authored_session_id": "S-00000000000000000000000001",
+      "created_at": "2026-11-20T12:00:00.000Z",
+      "read_url": "/v1/sessions/S-00000000000000000000000002/syntheses/SYNTH-1",
+      "publication": null
+    }
+  ]
+}

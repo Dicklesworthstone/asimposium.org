@@ -64,6 +64,7 @@ import {
   renderFormalRecordsHtml,
   renderFormalRecordsMarkdown,
 } from "@asimposium/render/formal-records";
+import type { D1Result } from "@cloudflare/workers-types";
 import { type Context, Hono } from "hono";
 import { offScopeProblemSql, offScopePublicationSql } from "./discovery/public-scope.ts";
 import type { Env } from "./env";
@@ -1795,7 +1796,18 @@ function canonicalizeIndexTimestamp(ts: string): string {
   return ts;
 }
 
-async function loadIndex(db: Env["DB"], after?: string): Promise<ProblemsIndexResponse> {
+type ProblemIndexQuery = { after?: string; snapshot?: string; format?: string };
+
+class ProblemIndexContinuationError extends Error {}
+class ProblemIndexUnavailableError extends Error {}
+
+// Every request rechecks current visibility, including conditional requests.
+const PROBLEM_INDEX_CACHE_CONTROL = "public, max-age=0, must-revalidate";
+
+async function loadIndex(
+  db: Env["DB"],
+  { after, snapshot }: ProblemIndexQuery,
+): Promise<ProblemsIndexResponse> {
   // Fable §8.1 / §9.4 / §9.6: rank public problems by aggregated open-move
   // weight from object-level scientific needs (claims, proof gaps, conflicts,
   // active hypotheses, open questions, sharpening statements) with deterministic
@@ -1816,13 +1828,55 @@ ORDER BY open_move_weight DESC, id ASC LIMIT 201`,
           .prepare(
             `${PROBLEM_INDEX_CTE}
 SELECT ${PROBLEM_INDEX_COLUMNS} FROM open_needs
-WHERE open_move_weight < COALESCE((SELECT open_move_weight FROM open_needs WHERE id = ?1), 0)
-   OR (open_move_weight = COALESCE((SELECT open_move_weight FROM open_needs WHERE id = ?1), 0)
+WHERE open_move_weight < (SELECT open_move_weight FROM open_needs WHERE id = ?1)
+   OR (open_move_weight = (SELECT open_move_weight FROM open_needs WHERE id = ?1)
        AND id > ?1)
 ORDER BY open_move_weight DESC, id ASC LIMIT 201`,
           )
           .bind(after);
-  const rows = await selection.all<ProblemIndexEntry>();
+  // Read the change token, visible boundary and ranked page in one D1 batch.
+  // Looking up a mutable weight in a later request is safe only while this
+  // token is unchanged. A disappeared boundary must never fall back to weight
+  // zero: that silently loses every remaining positive-weight problem.
+  const results = await db.batch([
+    db.prepare(`SELECT cursor, (
+      SELECT COUNT(*) FROM sqlite_master
+      WHERE (type = 'table' AND name = 'public_content_removals')
+         OR (type = 'trigger' AND name IN (
+           'event_content_redaction_public_cursor',
+           'event_content_delete_public_cursor',
+           'event_content_restore_public_cursor'
+         ))
+    ) = 4 AS availability_ready FROM public_cursor WHERE singleton = 1`),
+    ...(after === undefined
+      ? []
+      : [db.prepare(`${PROBLEM_INDEX_CTE}\nSELECT id FROM open_needs WHERE id = ?1`).bind(after)]),
+    selection,
+  ]);
+  if (results.some((result) => !result.success)) throw new Error("Problem directory read failed");
+  const cursorRows = results[0]?.results as
+    | { cursor: number; availability_ready: number }[]
+    | undefined;
+  // A pre-0165 database cannot invalidate this token when public content is
+  // removed or restored. Never advertise safe continuation without those
+  // guards, even when a caller's old ETag still matches the selected rows.
+  if (cursorRows?.[0]?.availability_ready !== 1) throw new ProblemIndexUnavailableError();
+  const cursor = cursorRows?.[0]?.cursor;
+  if (
+    cursorRows?.length !== 1 ||
+    typeof cursor !== "number" ||
+    !Number.isSafeInteger(cursor) ||
+    cursor < 0
+  ) {
+    throw new Error("Problem directory change token unavailable");
+  }
+  if (
+    (snapshot !== undefined && Number(snapshot) !== cursor) ||
+    (after !== undefined && results[1]?.results.length !== 1)
+  ) {
+    throw new ProblemIndexContinuationError();
+  }
+  const rows = results.at(-1) as D1Result<ProblemIndexEntry>;
   const truncated = rows.results.length > 200;
   const problems = rows.results.slice(0, 200).map((row) => ({
     ...row,
@@ -1835,20 +1889,77 @@ ORDER BY open_move_weight DESC, id ASC LIMIT 201`,
     ...(truncated
       ? ["results beyond this page of 200 in open-move weight and canonical problem-id order"]
       : []),
-    ...(after === undefined ? [] : ["problem ids at or before the requested after position"]),
-    "pages reflect current visibility; restart from the first page to discover new problems before your position",
+    ...(after === undefined
+      ? []
+      : ["problems at or before the requested position in ranked order"]),
+    "pages use current visibility; reuse snapshot with next_after, and restart if the public ledger changes",
+    ...(after !== undefined && snapshot === undefined
+      ? ["after without snapshot uses a live position; changed ranking may skip or repeat problems"]
+      : []),
     ...(problems.some((problem) => problem.title === null)
       ? ["some legacy problems have no saved title"]
       : []),
   ];
   return ProblemsIndexResponseSchema.parse({
     problems,
+    snapshot: cursor,
     ...(truncated ? { next_after: problems[problems.length - 1]?.id } : {}),
     omitted,
   });
 }
 
-function parseIndexQuery(request: Request): { after?: string; format?: string } | Response {
+function problemIndexCursorRefusal(request: Request, invalidQuery = false): Response {
+  const response = problemDocument({
+    status: 400,
+    code: "CURSOR_INVALID",
+    title: invalidQuery ? "Invalid problem index query" : "Problem index continuation unavailable",
+    detail: invalidQuery
+      ? "Use one optional after public problem id and one optional snapshot canonical decimal token (0–999999999999999). Parameters must not be repeated."
+      : "The public ledger changed or the requested position is no longer available. This continuation cannot safely preserve the problem order.",
+    fixHint:
+      "Restart at /problems.json without after or snapshot. For each next page, reuse both next_after and snapshot from the response.",
+    rule: "A5",
+    headers: { "cache-control": "no-store" },
+    extensions: {
+      schema: "https://a.asimposium.org/schemas/ledger.v1.json#/properties/problems_index_query",
+      example: { method: "GET", path: "/problems.json" },
+    },
+  });
+  return request.method === "HEAD"
+    ? new Response(null, { status: response.status, headers: response.headers })
+    : response;
+}
+
+async function readProblemIndex(
+  c: Context<{ Bindings: Env }>,
+  query: ProblemIndexQuery,
+): Promise<ProblemsIndexResponse | Response> {
+  try {
+    return await loadIndex(c.env.DB, query);
+  } catch (error) {
+    if (error instanceof ProblemIndexContinuationError) return problemIndexCursorRefusal(c.req.raw);
+    if (error instanceof ProblemIndexUnavailableError) {
+      const response = problemDocument({
+        status: 503,
+        code: "INTERNAL_ERROR",
+        title: "The public problem directory is temporarily unavailable",
+        detail: "The current ordering could not be verified. No page was returned.",
+        fixHint: "Retry the same page shortly without advancing its continuation.",
+        headers: { "cache-control": "no-store", "retry-after": "5" },
+      });
+      return c.req.method === "HEAD"
+        ? new Response(null, { status: response.status, headers: response.headers })
+        : response;
+    }
+    throw error;
+  }
+}
+
+function problemIndexPageQuery(after: string, snapshot: number | undefined): string {
+  return `?after=${encodeURIComponent(after)}${snapshot === undefined ? "" : `&snapshot=${snapshot}`}`;
+}
+
+function parseIndexQuery(request: Request): ProblemIndexQuery | Response {
   const params = new URL(request.url).searchParams;
   const rawParams = Object.fromEntries(params);
   const format = rawParams.format;
@@ -1872,25 +1983,10 @@ function parseIndexQuery(request: Request): { after?: string; format?: string } 
   }
   delete rawParams.format;
   const parsed = LedgerContractsSchema.shape.problems_index_query.unwrap().safeParse(rawParams);
-  if (parsed.success && params.getAll("after").length <= 1) {
+  if (parsed.success && new Set(params.keys()).size === params.size) {
     return { ...parsed.data, format };
   }
-  const response = problemDocument({
-    status: 400,
-    code: "CURSOR_INVALID",
-    title: "Invalid problem index query",
-    detail: "The index accepts only one optional after parameter containing a public problem id.",
-    fixHint:
-      "Use next_after from the previous JSON page as ?after=<id>, or omit the query to restart.",
-    rule: "A5",
-    extensions: {
-      schema: "https://a.asimposium.org/schemas/ledger.v1.json#/properties/problems_index_query",
-      example: { method: "GET", path: "/problems.json?after=P-4DSP" },
-    },
-  });
-  return request.method === "HEAD"
-    ? new Response(null, { status: response.status, headers: response.headers })
-    : response;
+  return problemIndexCursorRefusal(request, true);
 }
 
 const CANONICAL_PUBLIC_CURSOR = /^(?:0|[1-9][0-9]*)$/;
@@ -2234,11 +2330,13 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
   app.on(["GET", "HEAD"], "/problems.json", async (c) => {
     const query = parseIndexQuery(c.req.raw);
     if (query instanceof Response) return query;
-    const body = JSON.stringify(await loadIndex(c.env.DB, query.after));
+    const data = await readProblemIndex(c, query);
+    if (data instanceof Response) return data;
+    const body = JSON.stringify(data);
     const etag = await strongEtag("json", body);
     const headers = {
       "content-type": "application/json; charset=utf-8",
-      "cache-control": PUBLIC_CACHE_CONTROL,
+      "cache-control": PROBLEM_INDEX_CACHE_CONTROL,
       etag,
     };
     if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
@@ -2248,7 +2346,8 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
   app.on(["GET", "HEAD"], "/problems.md", async (c) => {
     const query = parseIndexQuery(c.req.raw);
     if (query instanceof Response) return query;
-    const data = await loadIndex(c.env.DB, query.after);
+    const data = await readProblemIndex(c, query);
+    if (data instanceof Response) return data;
     const listing =
       data.problems.length === 0
         ? query.after === undefined
@@ -2259,15 +2358,15 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
       ...(data.next_after === undefined
         ? []
         : [
-            `[Next page](/problems.md?after=${encodeURIComponent(data.next_after)}) · [Next JSON page](/problems.json?after=${encodeURIComponent(data.next_after)})`,
+            `[Next page](/problems.md${problemIndexPageQuery(data.next_after, data.snapshot)}) · [Next JSON page](/problems.json${problemIndexPageQuery(data.next_after, data.snapshot)})`,
           ]),
       ...(query.after === undefined ? [] : ["[First page](/problems.md)"]),
     ].join("\n\n");
-    const body = `# Public problems\n\n${INDEX_PREAMBLE}\n\n${listing}\n\n${navigation ? `${navigation}\n\n` : ""}omitted: ${data.omitted.join("; ")}\n`;
+    const body = `# Public problems\n\n${INDEX_PREAMBLE}\n\nsnapshot: ${data.snapshot}\n\n${listing}\n\n${navigation ? `${navigation}\n\n` : ""}omitted: ${data.omitted.join("; ")}\n`;
     const etag = await strongEtag("markdown", body);
     const headers = {
       "content-type": "text/markdown; charset=utf-8",
-      "cache-control": PUBLIC_CACHE_CONTROL,
+      "cache-control": PROBLEM_INDEX_CACHE_CONTROL,
       etag,
     };
     if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
@@ -2286,8 +2385,8 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
       if (!(error instanceof ToonUnavailableError)) throw error;
       const recoveryPath =
         after === undefined
-          ? "/problems.json"
-          : `/problems.json?after=${encodeURIComponent(after)}`;
+          ? `/problems.json?snapshot=${data.snapshot}`
+          : `/problems.json${problemIndexPageQuery(after, data.snapshot)}`;
       const response = problemDocument({
         status: 500,
         code: "FORMAT_UNAVAILABLE",
@@ -2307,7 +2406,7 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
     const etag = await strongEtag("toon", body);
     const headers = {
       "content-type": TOON_MEDIA_TYPE,
-      "cache-control": PUBLIC_CACHE_CONTROL,
+      "cache-control": PROBLEM_INDEX_CACHE_CONTROL,
       vary: "Accept, Accept-Encoding",
       etag,
     };
@@ -2318,7 +2417,8 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
   app.on(["GET", "HEAD"], "/problems.toon", async (c) => {
     const query = parseIndexQuery(c.req.raw);
     if (query instanceof Response) return query;
-    const data = await loadIndex(c.env.DB, query.after);
+    const data = await readProblemIndex(c, query);
+    if (data instanceof Response) return data;
     return renderProblemsToonResponse(c, data, query.after);
   });
 
@@ -2327,7 +2427,8 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
     if (query instanceof Response) return query;
     const accept = c.req.header("accept") ?? "";
     const formatParam = new URL(c.req.url).searchParams.get("format");
-    const data = await loadIndex(c.env.DB, query.after);
+    const data = await readProblemIndex(c, query);
+    if (data instanceof Response) return data;
 
     if (formatParam === "toon" || accept.includes("text/toon")) {
       return renderProblemsToonResponse(c, data, query.after);
@@ -2338,7 +2439,7 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
       const etag = await strongEtag("json", body);
       const headers = {
         "content-type": "application/json; charset=utf-8",
-        "cache-control": PUBLIC_CACHE_CONTROL,
+        "cache-control": PROBLEM_INDEX_CACHE_CONTROL,
         vary: "Accept, Accept-Encoding",
         etag,
       };
@@ -2357,15 +2458,15 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
       ...(data.next_after === undefined
         ? []
         : [
-            `[Next page](/problems.md?after=${encodeURIComponent(data.next_after)}) · [Next JSON page](/problems.json?after=${encodeURIComponent(data.next_after)})`,
+            `[Next page](/problems.md${problemIndexPageQuery(data.next_after, data.snapshot)}) · [Next JSON page](/problems.json${problemIndexPageQuery(data.next_after, data.snapshot)})`,
           ]),
       ...(query.after === undefined ? [] : ["[First page](/problems.md)"]),
     ].join("\n\n");
-    const body = `# Public problems\n\n${INDEX_PREAMBLE}\n\n${listing}\n\n${navigation ? `${navigation}\n\n` : ""}omitted: ${data.omitted.join("; ")}\n`;
+    const body = `# Public problems\n\n${INDEX_PREAMBLE}\n\nsnapshot: ${data.snapshot}\n\n${listing}\n\n${navigation ? `${navigation}\n\n` : ""}omitted: ${data.omitted.join("; ")}\n`;
     const etag = await strongEtag("markdown", body);
     const headers = {
       "content-type": "text/markdown; charset=utf-8",
-      "cache-control": PUBLIC_CACHE_CONTROL,
+      "cache-control": PROBLEM_INDEX_CACHE_CONTROL,
       vary: "Accept, Accept-Encoding",
       etag,
     };
@@ -2419,7 +2520,9 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
 
   // --- W5.8d Retractions Diptych faces ---
   for (const format of ["json", "md", "html"] as const)
-    app.on(["GET", "HEAD"], `/p/:id/retractions.${format}`, (c) => handleRetractionsList(c, format));
+    app.on(["GET", "HEAD"], `/p/:id/retractions.${format}`, (c) =>
+      handleRetractionsList(c, format),
+    );
 
   for (const format of ["json", "md", "html"] as const)
     app.on(["GET", "HEAD"], `/p/:id/conflicts.${format}`, (c) => handleConflictsList(c, format));

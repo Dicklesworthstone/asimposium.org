@@ -1,7 +1,14 @@
 # D1 migration boundary
 
 This directory is the sole home for numbered D1 SQL migrations. The sequence now carries the enrollment, Krater, session/ledger, outbox, and chain-integrity
-schema through `0164_herald_object_visibility_wake.sql`.
+schema through `0165_public_content_availability_cursor.sql`.
+
+Migration `0165_public_content_availability_cursor.sql` advances the global
+public change token when retained public content becomes unavailable or returns.
+A sparse removal witness distinguishes restored bodies from ordinary publication,
+preserving the existing cursor increment for new writes. Directory continuations
+require these availability triggers so redaction cannot silently change their
+ranked order. Scientific event sequences and immutable envelopes stay unchanged.
 
 Migration `0164_herald_object_visibility_wake.sql` queues public Herald room
 updates when an individual published object's visibility changes. Subscribers

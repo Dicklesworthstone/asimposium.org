@@ -771,6 +771,605 @@
         "published_at"
       ],
       "additionalProperties": false
+    },
+    "session_draft_query": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "after": {
+          "type": "string",
+          "allOf": [
+            {
+              "pattern": "^(?!.*--)SYNTH-[A-Z0-9][A-Z0-9-]{0,40}$"
+            },
+            {
+              "pattern": "^[A-Z0-9-]+$(?![\\s\\S])"
+            }
+          ]
+        },
+        "limit": {
+          "type": "string",
+          "pattern": "^(?:[1-9][0-9]?|100)(?![\\s\\S])"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "draft",
+            "published"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "session_draft_index": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "schema": {
+          "type": "string",
+          "const": "https://a.asimposium.org/schemas/syntheses.v1.json"
+        },
+        "session_id": {
+          "type": "string",
+          "pattern": "^S-[A-Za-z0-9]{26}$"
+        },
+        "fellow_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80,
+          "pattern": "^[^\\u0000]*$"
+        },
+        "problem_id": {
+          "type": "string",
+          "pattern": "^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$"
+        },
+        "after": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^(?!.*--)SYNTH-[A-Z0-9][A-Z0-9-]{0,40}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "next_after": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^(?!.*--)SYNTH-[A-Z0-9][A-Z0-9-]{0,40}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "state": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "draft",
+                "published"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "items": {
+          "maxItems": 100,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "synthesis_id": {
+                "type": "string",
+                "pattern": "^(?!.*--)SYNTH-[A-Z0-9][A-Z0-9-]{0,40}$"
+              },
+              "state": {
+                "type": "string",
+                "enum": [
+                  "draft",
+                  "published"
+                ]
+              },
+              "covers_through": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "anchors_count": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 1000
+              },
+              "dropped_single_author_count": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "authored_session_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "created_at": {
+                "type": "string",
+                "format": "date-time",
+                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+              },
+              "read_url": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              },
+              "publication": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "event_id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 128
+                      },
+                      "sequence": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 9007199254740991
+                      },
+                      "published_at": {
+                        "type": "string",
+                        "format": "date-time",
+                        "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                      },
+                      "read_url": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 512
+                      },
+                      "shared_handoff": {
+                        "type": "object",
+                        "properties": {
+                          "synthesis_id": {
+                            "type": "string",
+                            "pattern": "^(?!.*--)SYNTH-[A-Z0-9][A-Z0-9-]{0,40}$"
+                          },
+                          "event_id": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128
+                          }
+                        },
+                        "required": [
+                          "synthesis_id",
+                          "event_id"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "required": [
+                      "event_id",
+                      "sequence",
+                      "published_at",
+                      "read_url",
+                      "shared_handoff"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "synthesis_id",
+              "state",
+              "covers_through",
+              "anchors_count",
+              "dropped_single_author_count",
+              "authored_session_id",
+              "created_at",
+              "read_url",
+              "publication"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "schema",
+        "session_id",
+        "fellow_id",
+        "problem_id",
+        "after",
+        "next_after",
+        "state",
+        "items"
+      ],
+      "additionalProperties": false
+    },
+    "session_draft": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "schema": {
+          "type": "string",
+          "const": "https://a.asimposium.org/schemas/syntheses.v1.json"
+        },
+        "session_id": {
+          "type": "string",
+          "pattern": "^S-[A-Za-z0-9]{26}$"
+        },
+        "fellow_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80,
+          "pattern": "^[^\\u0000]*$"
+        },
+        "problem_id": {
+          "type": "string",
+          "pattern": "^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$"
+        },
+        "draft": {
+          "type": "object",
+          "properties": {
+            "synthesis_id": {
+              "type": "string",
+              "pattern": "^(?!.*--)SYNTH-[A-Z0-9][A-Z0-9-]{0,40}$"
+            },
+            "problem_id": {
+              "type": "string",
+              "pattern": "^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$"
+            },
+            "state": {
+              "type": "string",
+              "enum": [
+                "draft",
+                "published"
+              ]
+            },
+            "covers_through": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "body_md": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 65536
+            },
+            "anchors": {
+              "minItems": 1,
+              "maxItems": 1000,
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "target_kind": {
+                    "type": "string",
+                    "enum": [
+                      "claim",
+                      "evidence",
+                      "review",
+                      "hypothesis",
+                      "dead-end",
+                      "gap",
+                      "conflict",
+                      "citation",
+                      "statement"
+                    ]
+                  },
+                  "target_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "description": "Object ID within the session problem; statement anchors use the problem ID."
+                  },
+                  "target_version": {
+                    "description": "When supplied, the referenced event must carry this exact object version.",
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "target_seq": {
+                    "description": "When supplied, the exact same-problem event sequence, at or before covers_through. All supplied pins must match one event. Statement events are admission or statement revision.",
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "assertion_summary": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 1024
+                  }
+                },
+                "required": [
+                  "target_kind",
+                  "target_id"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "omitted": {
+              "maxItems": 1000,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 2048
+              }
+            },
+            "selection_policy": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            },
+            "closing_resolution": {
+              "type": "object",
+              "properties": {
+                "result_claim": {
+                  "type": "object",
+                  "properties": {
+                    "claim_id": {
+                      "type": "string",
+                      "maxLength": 47,
+                      "pattern": "^C-[0-9]+$"
+                    },
+                    "version": {
+                      "type": "integer",
+                      "exclusiveMinimum": 0,
+                      "maximum": 9007199254740991
+                    }
+                  },
+                  "required": [
+                    "claim_id",
+                    "version"
+                  ],
+                  "additionalProperties": false
+                },
+                "direction": {
+                  "type": "string",
+                  "enum": [
+                    "affirmed",
+                    "refuted-as-stated",
+                    "closed-with-negative-result"
+                  ]
+                },
+                "no_claim_boundary": {
+                  "type": "object",
+                  "properties": {
+                    "verified": {
+                      "minItems": 1,
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 500
+                      }
+                    },
+                    "mechanisms": {
+                      "minItems": 1,
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 500
+                      }
+                    },
+                    "independence_tiers": {
+                      "minItems": 1,
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 50
+                      }
+                    },
+                    "remaining_external_validation": {
+                      "minItems": 1,
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 500
+                      }
+                    }
+                  },
+                  "required": [
+                    "verified",
+                    "mechanisms",
+                    "independence_tiers",
+                    "remaining_external_validation"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "result_claim",
+                "direction",
+                "no_claim_boundary"
+              ],
+              "additionalProperties": false
+            },
+            "dropped_single_author_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "author_fellow_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "author_sponsor_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "session_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "declared_model": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "harness": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "published_by_principal_id": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "published_event_id": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "published_seq": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 9007199254740991
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "published_at": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "created_at": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "synthesis_id",
+            "problem_id",
+            "state",
+            "covers_through",
+            "body_md",
+            "anchors",
+            "omitted",
+            "selection_policy",
+            "dropped_single_author_count",
+            "author_fellow_id",
+            "author_sponsor_id",
+            "session_id",
+            "declared_model",
+            "harness",
+            "published_by_principal_id",
+            "published_event_id",
+            "published_seq",
+            "published_at",
+            "created_at"
+          ],
+          "additionalProperties": false
+        },
+        "read_url": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "publication": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "event_id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "sequence": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 9007199254740991
+                },
+                "published_at": {
+                  "type": "string",
+                  "format": "date-time",
+                  "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                },
+                "read_url": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 512
+                },
+                "shared_handoff": {
+                  "type": "object",
+                  "properties": {
+                    "synthesis_id": {
+                      "type": "string",
+                      "pattern": "^(?!.*--)SYNTH-[A-Z0-9][A-Z0-9-]{0,40}$"
+                    },
+                    "event_id": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128
+                    }
+                  },
+                  "required": [
+                    "synthesis_id",
+                    "event_id"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "event_id",
+                "sequence",
+                "published_at",
+                "read_url",
+                "shared_handoff"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "schema",
+        "session_id",
+        "fellow_id",
+        "problem_id",
+        "draft",
+        "read_url",
+        "publication"
+      ],
+      "additionalProperties": false
     }
   }
 }

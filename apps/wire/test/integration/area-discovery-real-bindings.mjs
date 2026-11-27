@@ -21,6 +21,7 @@ async function areaDiscoveryJourney({
   origin,
   userAgent,
   env,
+  fixtures,
 }) {
   const sponsor = "usr_area_discovery";
   const token = await enroll("area-discovery-author", sponsor);
@@ -35,6 +36,13 @@ async function areaDiscoveryJourney({
     return worker.fetch(`${origin}${path}`, {
       headers: { "User-Agent": userAgent, ...(etag ? { "if-none-match": etag } : {}) },
     });
+  }
+  async function publicCursor() {
+    const row = await env.DB.prepare(
+      "SELECT cursor FROM public_cursor WHERE singleton = 1",
+    ).first();
+    assert.ok(Number.isSafeInteger(row?.cursor));
+    return row.cursor;
   }
   const initial = await face("/areas.json");
   const initialEtag = initial.headers.get("etag");
@@ -613,6 +621,15 @@ async function areaDiscoveryJourney({
     const parameter = api.paths[path].get.parameters.find((item) => item.name === "after");
     assert.equal(parameter.in, "query");
     assert.ok(parameter.schema.$ref.endsWith("/properties/problems_index_query/properties/after"));
+    const snapshotParameter = api.paths[path].get.parameters.find(
+      (item) => item.name === "snapshot",
+    );
+    assert.equal(snapshotParameter.in, "query");
+    assert.ok(
+      snapshotParameter.schema.$ref.endsWith(
+        "/properties/problems_index_query/properties/snapshot",
+      ),
+    );
   }
   assert.equal(ledgerSchema.properties.problems_index_query.additionalProperties, false);
   assert.equal(ledgerSchema.properties.problems_index_query.properties.after.maxLength, 128);
@@ -626,11 +643,16 @@ async function areaDiscoveryJourney({
     expected[199],
     "Overflow must supply the last returned id for continuation",
   );
-  // A new id on either side of the current boundary cannot shift or repeat
-  // already returned entries. The earlier insertion is found on a fresh scan.
+  // Legacy after-only readers retain a live-position traversal. These equal-
+  // weight insertions do not shift or repeat existing entries; the earlier
+  // insertion is found on a fresh scan. New links also bind the snapshot below.
   const before = "P-IDX-000-before";
   const after = "P-IDX-300-after";
-  await env.DB.batch([insert(before), insert(after)]);
+  await env.DB.batch([
+    insert(before),
+    insert(after),
+    env.DB.prepare("UPDATE public_cursor SET cursor = cursor + 1 WHERE singleton = 1"),
+  ]);
   const seen = firstPage.problems.map((problem) => problem.id);
   let position = firstPage.next_after;
   let pages = 1;
@@ -665,20 +687,109 @@ async function areaDiscoveryJourney({
   assert.deepEqual(seen, [...expected, after].sort());
   assert.equal(new Set(seen).size, seen.length);
   assert.ok((await call("/problems.json")).problems.some((problem) => problem.id === before));
-  const exhausted = await call("/problems.json?after=zzzz");
+  // A fixed revision traverses every listed problem once. A rank change must
+  // refuse continuation rather than silently skipping a promoted remaining
+  // problem or returning already-read problems below a promoted boundary.
+  const restart = ProblemsIndexResponseSchema.parse(await call("/problems.json"));
+  const snapshotIds = restart.problems.map((problem) => problem.id);
+  let snapshotAfter = restart.next_after;
+  while (snapshotAfter !== undefined) {
+    const page = ProblemsIndexResponseSchema.parse(
+      await call(
+        `/problems.json?after=${encodeURIComponent(snapshotAfter)}&snapshot=${restart.snapshot}`,
+      ),
+    );
+    assert.equal(page.snapshot, restart.snapshot);
+    snapshotIds.push(...page.problems.map((problem) => problem.id));
+    snapshotAfter = page.next_after;
+  }
+  assert.deepEqual(snapshotIds, [...expected, before, after].sort());
+  assert.equal(new Set(snapshotIds).size, snapshotIds.length);
+  const boundary = restart.next_after;
+  assert.ok(boundary);
+  const continuation = `?after=${encodeURIComponent(boundary)}&snapshot=${restart.snapshot}`;
+  const validators = new Map();
+  for (const suffix of ["json", "md", "toon"]) {
+    const page = await face(`/problems.${suffix}${continuation}`);
+    assert.equal(page.status, 200);
+    assert.equal(page.headers.get("cache-control"), "public, max-age=0, must-revalidate");
+    validators.set(suffix, page.headers.get("etag"));
+    await page.text();
+  }
+  // Explicit D1 rank fixtures; production lifecycle writes allocate the token
+  // in the same transaction. No fixture update is claimed as a sponsor action.
+  await env.DB.batch([
+    env.DB.prepare("UPDATE problems SET status='sharpening' WHERE id IN (?, ?)").bind(
+      boundary,
+      "P-IDX-300",
+    ),
+    env.DB.prepare("UPDATE public_cursor SET cursor = cursor + 1 WHERE singleton = 1"),
+  ]);
+  for (const [suffix, etag] of validators) {
+    const invalid = await face(`/problems.${suffix}${continuation}`, etag);
+    assert.equal(invalid.status, 400, "Changed rank must refuse before conditional success");
+    assert.equal(invalid.headers.get("cache-control"), "no-store");
+    const refusal = await invalid.json();
+    assert.equal(refusal.code, "CURSOR_INVALID");
+    assert.ok(refusal.fix_hint.includes("without after or snapshot"));
+    assert.deepEqual(refusal.example, { method: "GET", path: "/problems.json" });
+    const head = await worker.fetch(`${origin}/problems.${suffix}${continuation}`, {
+      method: "HEAD",
+      headers: { "User-Agent": userAgent, "If-None-Match": etag },
+    });
+    assert.equal(head.status, 400);
+    assert.equal(await head.text(), "");
+  }
+  const reordered = ProblemsIndexResponseSchema.parse(await call("/problems.json"));
+  assert.deepEqual(
+    reordered.problems.slice(0, 2).map((problem) => problem.id),
+    [boundary, "P-IDX-300"].sort(),
+  );
+  await env.DB.batch([
+    env.DB.prepare("UPDATE problems SET unlisted=1 WHERE id=?").bind(boundary),
+    env.DB.prepare("UPDATE public_cursor SET cursor = cursor + 1 WHERE singleton = 1"),
+  ]);
+  const hiddenSnapshot = (await call("/problems.json")).snapshot;
+  const absentBoundary = await face(`/problems.json?after=zzzz&snapshot=${hiddenSnapshot}`);
+  const absentBody = await absentBoundary.text();
+  assert.equal(absentBoundary.status, 400);
+  for (const query of [`?after=${boundary}`, `?after=${boundary}&snapshot=${hiddenSnapshot}`]) {
+    const hiddenBoundary = await face(`/problems.json${query}`);
+    assert.equal(hiddenBoundary.status, 400);
+    assert.equal(
+      await hiddenBoundary.text(),
+      absentBody,
+      "Hidden and unknown boundaries must be indistinguishable",
+    );
+  }
+  await env.DB.batch([
+    env.DB.prepare("UPDATE problems SET status='active', unlisted=0 WHERE id IN (?, ?)").bind(
+      boundary,
+      "P-IDX-300",
+    ),
+    env.DB.prepare("UPDATE public_cursor SET cursor = cursor + 1 WHERE singleton = 1"),
+  ]);
+  const lastId = [...expected, before, after].sort().at(-1);
+  const exhausted = await call(`/problems.json?after=${encodeURIComponent(lastId)}`);
   assert.equal(exhausted.problems.length, 0);
   assert.equal(exhausted.next_after, undefined);
   assert.ok(
-    (await (await face("/problems.md?after=zzzz")).text()).includes(
+    (await (await face(`/problems.md?after=${encodeURIComponent(lastId)}`)).text()).includes(
       "No public problems after this position.",
     ),
   );
   for (const query of [
     "?after=",
+    "?after=zzzz",
     "?after=P-A&after=P-B",
     "?limit=100000",
     "?after=../PRIVATE_QUERY_CANARY",
     `?after=${"x".repeat(129)}`,
+    "?snapshot=01",
+    "?snapshot=1%0A",
+    `?snapshot=${(await call("/problems.json")).snapshot}%0A`,
+    "?snapshot=1000000000000000",
+    "?snapshot=1&snapshot=2",
   ]) {
     for (const suffix of ["json", "md"]) {
       const response = await face(`/problems.${suffix}${query}`);
@@ -703,6 +814,187 @@ async function areaDiscoveryJourney({
       returned: seen.length,
       distinct: new Set(seen).size,
       private_excluded: true,
+      snapshot_traversal: snapshotIds.length,
+      changed_rank_and_hidden_boundary_refused: true,
+    }),
+  );
+
+  // A real published claim outranks a seeded sharpening problem. Removing its
+  // content changes that order without another scientific append: a captured
+  // continuation must refuse instead of skipping the now-earlier problem.
+  const availabilitySponsor = "usr_index_content_availability";
+  const availabilityToken = await enroll("index-content-author", availabilitySponsor);
+  const availabilityDraft = await call(
+    "/v1/problems",
+    {
+      title: "Directory content availability",
+      statement: "A finite simple path has one more vertex than its number of edges.",
+      falsifier: "A finite simple path whose vertex count is not its edge count plus one.",
+      motivation: "Check exact finite path counts under public content availability changes.",
+      areas: ["combinatorics"],
+    },
+    availabilityToken,
+    201,
+  );
+  const availabilityId = availabilityDraft.problem.id;
+  await sponsorCall(
+    availabilitySponsor,
+    "POST",
+    `/v1/sponsors/problems/${availabilityId}/lifecycle`,
+    "problem-lifecycle",
+    { action: "publish" },
+  );
+  const availabilityReviewSession = await call(
+    "/v1/sessions",
+    {
+      problem_id: availabilityId,
+      intent: "review",
+    },
+    reviewer,
+    201,
+  );
+  await call(
+    `/v1/problems/${availabilityId}/statement-review`,
+    {
+      verdict: "statement-clear",
+      basis: "The finite path domain and exact vertex-count counterexample are specified.",
+      session_id: availabilityReviewSession.session_id,
+      statement_version: 1,
+    },
+    reviewer,
+  );
+  const availabilitySession = await call(
+    "/v1/sessions",
+    {
+      problem_id: availabilityId,
+      intent: "prove",
+    },
+    availabilityToken,
+    201,
+  );
+  const availabilitySessionPath = `/v1/sessions/${availabilitySession.session_id}`;
+  await env.DB.batch([
+    env.DB.prepare("UPDATE problems SET status='sharpening' WHERE id='P-IDX-300'"),
+    env.DB.prepare("UPDATE public_cursor SET cursor = cursor + 1 WHERE singleton = 1"),
+  ]);
+  async function publishRankedClaim(statement) {
+    const before = await publicCursor();
+    const draft = await call(
+      `${availabilitySessionPath}/workshop`,
+      { type: "claim-draft", title: "Directory availability witness", body_md: privateCanary },
+      availabilityToken,
+      201,
+    );
+    assert.equal(
+      await publicCursor(),
+      before,
+      "private workshop writes do not invalidate snapshots",
+    );
+    const published = await call(
+      `${availabilitySessionPath}/promote`,
+      {
+        workshop_id: draft.workshop_id,
+        kind: "conjecture",
+        statement,
+        falsifier: "A finite simple path violating the stated vertex or endpoint count.",
+      },
+      availabilityToken,
+      201,
+    );
+    assert.equal(await publicCursor(), before + 1, "ordinary publication allocates the token once");
+    const source = await env.DB.prepare(`SELECT e.id, c.payload_sha256, c.payload_json
+      FROM events e JOIN event_content c ON c.event_id=e.id
+      WHERE e.problem_id=? AND e.object_id=? AND e.type='claim.created'`)
+      .bind(availabilityId, published.claim_id)
+      .first();
+    assert.ok(source);
+    return source;
+  }
+  async function rankedPage() {
+    const page = ProblemsIndexResponseSchema.parse(await call("/problems.json"));
+    assert.deepEqual(
+      page.problems.slice(0, 2).map((problem) => problem.id),
+      [availabilityId, "P-IDX-300"],
+    );
+    return page;
+  }
+  async function refusedSnapshot(snapshot) {
+    const response = await face(
+      `/problems.json?after=${encodeURIComponent(availabilityId)}&snapshot=${snapshot}`,
+    );
+    assert.equal(response.status, 400, "content availability must invalidate the captured ranking");
+    assert.equal(response.headers.get("cache-control"), "no-store");
+    assert.equal((await response.json()).code, "CURSOR_INVALID");
+  }
+  const readScientificHead = () =>
+    env.DB.prepare("SELECT public_seq, chain_digest FROM problems WHERE id=?")
+      .bind(availabilityId)
+      .first();
+  const redactedSource = await publishRankedClaim(
+    "Every finite nonempty simple path has exactly two endpoint incidences.",
+  );
+  const beforeRedaction = await rankedPage();
+  const redactionHead = await readScientificHead();
+  await fixtures.redactPublicContent(redactedSource.id);
+  assert.equal(await publicCursor(), beforeRedaction.snapshot + 1);
+  assert.deepEqual(await readScientificHead(), redactionHead);
+  await refusedSnapshot(beforeRedaction.snapshot);
+  assert.equal((await call("/problems.json")).problems[0].id, "P-IDX-300");
+  const redactedCursor = await publicCursor();
+  await fixtures.redactPublicContent(redactedSource.id);
+  assert.equal(
+    await publicCursor(),
+    redactedCursor,
+    "repeated redaction does not change availability",
+  );
+
+  const restoredSource = await publishRankedClaim(
+    "Every finite simple path with four edges has exactly five vertices.",
+  );
+  const beforeRemoval = await rankedPage();
+  const removalHead = await readScientificHead();
+  await env.DB.prepare("DELETE FROM event_content WHERE event_id=?").bind(restoredSource.id).run();
+  assert.equal(await publicCursor(), beforeRemoval.snapshot + 1);
+  assert.deepEqual(await readScientificHead(), removalHead);
+  await refusedSnapshot(beforeRemoval.snapshot);
+  const missingPage = ProblemsIndexResponseSchema.parse(await call("/problems.json"));
+  assert.equal(missingPage.problems[0].id, "P-IDX-300");
+  assert.deepEqual(
+    await env.DB.prepare("SELECT event_id FROM public_content_removals WHERE event_id=?")
+      .bind(restoredSource.id)
+      .first(),
+    { event_id: restoredSource.id },
+  );
+  // Restore the exact unredacted payload removed above. No redacted content is
+  // restored, and its event envelope and scientific sequence remain unchanged.
+  await env.DB.prepare(
+    "INSERT INTO event_content(event_id,payload_sha256,payload_json) VALUES(?,?,?)",
+  )
+    .bind(restoredSource.id, restoredSource.payload_sha256, restoredSource.payload_json)
+    .run();
+  assert.equal(await publicCursor(), missingPage.snapshot + 1);
+  assert.deepEqual(await readScientificHead(), removalHead);
+  await refusedSnapshot(missingPage.snapshot);
+  await rankedPage();
+  assert.equal(
+    await env.DB.prepare("SELECT event_id FROM public_content_removals WHERE event_id=?")
+      .bind(restoredSource.id)
+      .first(),
+    null,
+  );
+  console.log(
+    JSON.stringify({
+      stage: "index-content-availability",
+      status: "pass",
+      checked: [
+        "redaction",
+        "repeated-redaction",
+        "delete",
+        "restore",
+        "private-workshop",
+        "single-append-token",
+      ],
+      scientific_head_unchanged: true,
     }),
   );
   console.log(

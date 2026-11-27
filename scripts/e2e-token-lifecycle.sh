@@ -207,6 +207,7 @@ readonly -a EXPECTED_MIGRATIONS=(
   "0162_external_expert_review_replays.sql"
   "0163_problem_proposal_distinction.sql"
   "0164_herald_object_visibility_wake.sql"
+  "0165_public_content_availability_cursor.sql"
 )
 
 if [[ -z "${TMPDIR:-}" || "${TMPDIR}" == "/tmp" ]]; then

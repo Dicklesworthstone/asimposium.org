@@ -126,10 +126,16 @@
           }
         },
         "next_after": {
-          "description": "When present, request the next page with ?after=<this id>; absent at the current end. Pages reflect live visibility, not a frozen snapshot.",
+          "description": "When present, request ?after=<this id>&snapshot=<snapshot>. Absent at the current end. A changed snapshot refuses continuation with CURSOR_INVALID; restart from the first page.",
           "type": "string",
           "maxLength": 128,
           "pattern": "^(?!.*--)[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "snapshot": {
+          "description": "Public change token captured with this page. Reuse with next_after to prevent silent skips or repeats when scientific needs change the order. This checks current state, not historical visibility.",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 999999999999999
         },
         "omitted": {
           "type": "array",
@@ -150,9 +156,15 @@
       "type": "object",
       "properties": {
         "after": {
+          "description": "Use next_after from the previous page with its snapshot. Without snapshot this selects a live position and may skip or repeat problems after rank changes. Unavailable positions are refused.",
           "type": "string",
           "maxLength": 128,
           "pattern": "^(?!.*--)[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "snapshot": {
+          "description": "Canonical decimal public change token, 0–999999999999999. Must equal the current token; on CURSOR_INVALID restart without after or snapshot. Current visibility always applies.",
+          "type": "string",
+          "pattern": "^(?:0|[1-9][0-9]{0,14})$(?![\\s\\S])"
         }
       },
       "additionalProperties": false
@@ -5409,6 +5421,7 @@
           }
         ],
         "next_after": "P-4DSP",
+        "snapshot": 42,
         "omitted": [
           "problem statements, scientific objects and review details are available through each problem digest"
         ]

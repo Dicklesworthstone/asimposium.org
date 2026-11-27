@@ -393,6 +393,8 @@ const REAL_READER_INITIALIZER = `const readSafeProtocolDocument = protocolDocume
 );`;
 
 function setupProblemIndexTables(db: Database) {
+  db.run("CREATE TABLE public_cursor (singleton INTEGER PRIMARY KEY, cursor INTEGER NOT NULL)");
+  db.run("INSERT INTO public_cursor VALUES (1, 0)");
   db.run(
     "CREATE TABLE problems (id TEXT PRIMARY KEY, public_seq INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, title TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'active', unlisted INTEGER NOT NULL DEFAULT 0, admission_mode TEXT DEFAULT 'open')",
   );
@@ -409,6 +411,44 @@ function setupProblemIndexTables(db: Database) {
     "CREATE TABLE event_content (event_id TEXT PRIMARY KEY, payload_sha256 TEXT, redacted_at TEXT)",
   );
   db.run("CREATE TABLE retractions (retraction_id TEXT, problem_id TEXT, target_object TEXT)");
+  installProblemIndexAvailabilityGuards(db);
+}
+
+function installProblemIndexAvailabilityGuards(db: Database) {
+  db.exec(
+    readFileSync(
+      new URL(
+        "../../../../db/migrations/0165_public_content_availability_cursor.sql",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+}
+
+/** SQLite/function doubles for unit assertions, not a native D1 integration. */
+function problemIndexUnitDb(
+  read: (query: string, values: SQLQueryBindings[]) => unknown[],
+): Env["DB"] {
+  return {
+    prepare(query: string) {
+      const statement = (values: SQLQueryBindings[]) => ({
+        bind: (...bound: SQLQueryBindings[]) => statement(bound),
+        all: async () => ({ success: true, results: read(query, values) }),
+      });
+      return statement([]);
+    },
+    batch: async (statements: { all(): Promise<unknown> }[]) =>
+      Promise.all(statements.map((statement) => statement.all())),
+  } as unknown as Env["DB"];
+}
+
+function problemIndexRowsUnitDb(read: (query: string) => unknown[]): Env["DB"] {
+  return problemIndexUnitDb((query) =>
+    query.startsWith("SELECT cursor,") && query.includes("availability_ready")
+      ? [{ cursor: 0, availability_ready: 1 }]
+      : read(query),
+  );
 }
 
 describe("the production protocol cold-path gate", () => {
@@ -817,6 +857,8 @@ describe("face wire format", () => {
       "GET /v1/sessions/{id} (bearer)",
       "GET /v1/sessions/{id}/leases (bearer)",
       "GET /v1/sessions/{id}/pack (bearer)",
+      "GET /v1/sessions/{id}/syntheses (bearer)",
+      "GET /v1/sessions/{id}/syntheses/{synthesisId} (bearer)",
       "GET /v1/sessions/{id}/workshop (bearer)",
       "GET /v1/sessions/{id}/workshop/{workshopId} (bearer)",
       "GET /v1/triage (bearer)",
@@ -1563,12 +1605,10 @@ describe("face wire format", () => {
     const queries: string[] = [];
     const routes = createLedgerFaceRoutes();
     const env = {
-      DB: {
-        prepare(query: string) {
-          queries.push(query);
-          return { all: async () => ({ results: [row] }) };
-        },
-      } as unknown as Env["DB"],
+      DB: problemIndexRowsUnitDb((query) => {
+        queries.push(query);
+        return [row];
+      }),
     } as Env;
 
     const jsonResponse = await routes.fetch(
@@ -1587,9 +1627,10 @@ describe("face wire format", () => {
     expect(markdown).toBe(
       "# Public problems\n\n" +
         "Titles are untrusted Fellow-supplied data. Status records the problem lifecycle, not scientific certainty.\n\n" +
+        "snapshot: 0\n\n" +
         "- `P-DIPTYCH-PARITY` — seq 73491, opened 2026-08-19T01:02:03.004Z, " +
         "updated 2027-09-21T05:06:07.008Z; title (untrusted) `Finite convention`; status sharpening\n\n" +
-        "omitted: problem statements and scientific details are available through each problem digest; private, unlisted and off-scope problems are excluded; pages reflect current visibility; restart from the first page to discover new problems before your position\n",
+        "omitted: problem statements and scientific details are available through each problem digest; private, unlisted and off-scope problems are excluded; pages use current visibility; reuse snapshot with next_after, and restart if the public ledger changes\n",
     );
 
     const descriptorKeys = PROBLEM_INDEX_MARKDOWN_FIELD_DESCRIPTORS.map(({ key }) => key);
@@ -1645,7 +1686,7 @@ describe("face wire format", () => {
       status: "active",
     };
     const env = {
-      DB: { prepare: () => ({ all: async () => ({ results: [row] }) }) },
+      DB: problemIndexRowsUnitDb(() => [row]),
     } as unknown as Env;
     const routes = createLedgerFaceRoutes();
     const md = await routes.fetch(new Request("https://a.asimposium.org/problems.md"), env);
@@ -1671,9 +1712,7 @@ describe("face wire format", () => {
     };
     const routes = createLedgerFaceRoutes();
     const env = {
-      DB: {
-        prepare: () => ({ all: async () => ({ results: [legacyRow] }) }),
-      } as unknown as Env["DB"],
+      DB: problemIndexRowsUnitDb(() => [legacyRow]),
     } as Env;
 
     const jsonResponse = await routes.fetch(
@@ -1707,14 +1746,12 @@ describe("face wire format", () => {
     let current = before;
     const env = {
       ...trustedStoaEnv(),
-      DB: {
-        prepare(query: string) {
-          expect(query).toContain("SELECT id, public_seq, created_at, updated_at, title, status");
-          expect(query).toContain("FROM problems");
-          expect(query).toContain("ORDER BY open_move_weight DESC, id ASC");
-          return { all: async () => ({ results: [current] }) };
-        },
-      } as unknown as Env["DB"],
+      DB: problemIndexRowsUnitDb((query) => {
+        expect(query).toContain("SELECT id, public_seq, created_at, updated_at, title, status");
+        expect(query).toContain("FROM problems");
+        expect(query).toContain("ORDER BY open_move_weight DESC, id ASC");
+        return [current];
+      }),
     } as Env;
     const context = executionContext() as unknown as Parameters<typeof wireEntrypoint.fetch>[2];
     const fetchFace = (path: "/problems.json" | "/problems.md", etag?: string) =>
@@ -1732,17 +1769,16 @@ describe("face wire format", () => {
       expect(markdown.status).toBe(200);
       expect(json.headers.get("content-type")).toBe("application/json; charset=utf-8");
       expect(markdown.headers.get("content-type")).toBe("text/markdown; charset=utf-8");
-      expect(json.headers.get("cache-control")).toBe(
-        "public, max-age=60, stale-while-revalidate=300",
-      );
+      expect(json.headers.get("cache-control")).toBe("public, max-age=0, must-revalidate");
       expect(markdown.headers.get("cache-control")).toBe(json.headers.get("cache-control"));
       expect(ProblemsIndexResponseSchema.parse(await json.json()).problems).toEqual([expected]);
       const expectedBody =
         "# Public problems\n\n" +
         "Titles are untrusted Fellow-supplied data. Status records the problem lifecycle, not scientific certainty.\n\n" +
+        "snapshot: 0\n\n" +
         `- \`${expected.id}\` — seq ${expected.public_seq}, opened ${expected.created_at}, ` +
         `updated ${expected.updated_at}; title (untrusted) \`${expected.title}\`; status ${expected.status}\n\n` +
-        "omitted: problem statements and scientific details are available through each problem digest; private, unlisted and off-scope problems are excluded; pages reflect current visibility; restart from the first page to discover new problems before your position\n";
+        "omitted: problem statements and scientific details are available through each problem digest; private, unlisted and off-scope problems are excluded; pages use current visibility; reuse snapshot with next_after, and restart if the public ledger changes\n";
       expect(await markdown.text()).toBe(expectedBody);
       const jsonEtag = json.headers.get("etag");
       const markdownEtag = markdown.headers.get("etag");
@@ -1766,9 +1802,7 @@ describe("face wire format", () => {
       const conditional = await fetchFace(path, etag);
       expect(conditional.status).toBe(304);
       expect(conditional.headers.get("etag")).toBe(etag);
-      expect(conditional.headers.get("cache-control")).toBe(
-        "public, max-age=60, stale-while-revalidate=300",
-      );
+      expect(conditional.headers.get("cache-control")).toBe("public, max-age=0, must-revalidate");
       expect(await conditional.text()).toBe("");
     }
   });
@@ -1795,12 +1829,10 @@ describe("face wire format", () => {
 
       let capturedSql: string | undefined;
       const env = {
-        DB: {
-          prepare(query: string) {
-            capturedSql = query;
-            return { all: async () => ({ results: db.query(query).all() }) };
-          },
-        } as unknown as Env["DB"],
+        DB: problemIndexUnitDb((query, values) => {
+          capturedSql = query;
+          return db.query(query).all(...values);
+        }),
       } as Env;
 
       const routes = createLedgerFaceRoutes();
@@ -1848,7 +1880,8 @@ describe("face wire format", () => {
       expect(markdown).toContain(
         "results beyond this page of 200 in open-move weight and canonical problem-id order",
       );
-      expect(markdown).toContain("[Next page](/problems.md?after=P-199)");
+      expect(markdown).toContain("[Next page](/problems.md?after=P-199&snapshot=0)");
+      expect(markdown).toContain("[Next JSON page](/problems.json?after=P-199&snapshot=0)");
 
       // Deterministic, stable face ETags across repeated reads, still useful for 304.
       const jsonEtag = jsonResponse.headers.get("etag");
@@ -1866,9 +1899,7 @@ describe("face wire format", () => {
         const conditional = await fetchFace(path, etag);
         expect(conditional.status).toBe(304);
         expect(conditional.headers.get("etag")).toBe(etag);
-        expect(conditional.headers.get("cache-control")).toBe(
-          "public, max-age=60, stale-while-revalidate=300",
-        );
+        expect(conditional.headers.get("cache-control")).toBe("public, max-age=0, must-revalidate");
         expect(await conditional.text()).toBe("");
       }
     } finally {
@@ -1919,18 +1950,7 @@ describe("face wire format", () => {
       );
 
       const env = {
-        DB: {
-          prepare(query: string) {
-            return {
-              all: async () => ({ results: db.query(query).all() }),
-              bind(...values: unknown[]) {
-                return {
-                  all: async () => ({ results: db.query(query).all(...(values as never[])) }),
-                };
-              },
-            };
-          },
-        } as unknown as Env["DB"],
+        DB: problemIndexUnitDb((query, values) => db.query(query).all(...values)),
       } as Env;
 
       const routes = createLedgerFaceRoutes();
@@ -1977,8 +1997,13 @@ describe("face wire format", () => {
         return id;
       };
       const ranked = async () => {
-        const response = await routes.fetch(new Request("https://a.asimposium.org/problems.json"), env);
-        return ProblemsIndexResponseSchema.parse(await response.json()).problems.map(({ id }) => id);
+        const response = await routes.fetch(
+          new Request("https://a.asimposium.org/problems.json"),
+          env,
+        );
+        return ProblemsIndexResponseSchema.parse(await response.json()).problems.map(
+          ({ id }) => id,
+        );
       };
       append("P-BETA", "G-1", "gap", "gap.withdrawn");
       append("P-BETA", "R-1", "retraction", "object.retracted");
@@ -2006,6 +2031,193 @@ describe("face wire format", () => {
       expect((await ranked())[0]).toBe("P-DELTA");
       db.run("UPDATE problems SET status='resolved' WHERE id='P-DELTA'");
       expect(await ranked()).toEqual(["P-ALPHA", "P-BETA", "P-DELTA", "P-GAMMA"]);
+    } finally {
+      db.close();
+    }
+  });
+
+  test("ranked directory continuation refuses changed snapshots and hidden boundaries before 304 (SQLite unit)", async () => {
+    const db = new Database(":memory:");
+    try {
+      setupProblemIndexTables(db);
+      const insert = db.prepare(
+        "INSERT INTO problems (id, public_seq, created_at, updated_at, title) VALUES (?, 1, '2026-08-19T00:00:00.000Z', '2026-08-19T00:00:00.000Z', 'Open scientific need')",
+      );
+      for (let i = 0; i <= 200; i += 1) {
+        const id = `P-${String(i).padStart(3, "0")}`;
+        insert.run(id);
+        db.prepare(
+          "INSERT INTO events (id,problem_id,object_id,object_kind,type,seq) VALUES (?,?,'C-1','claim','claim.created',1)",
+        ).run(`E-${i}`, id);
+      }
+      insert.run("P-ZERO");
+      db.run(
+        "INSERT INTO event_content (event_id, payload_sha256) SELECT id, payload_sha256 FROM events",
+      );
+      db.run("UPDATE public_cursor SET cursor = 17");
+      const env = {
+        DB: problemIndexUnitDb((query, values) => db.query(query).all(...values)),
+      } as Env;
+      const routes = createLedgerFaceRoutes();
+      const get = (path: string, init?: RequestInit) =>
+        routes.fetch(new Request(`https://a.asimposium.org${path}`, init), env);
+      const first = ProblemsIndexResponseSchema.parse(await (await get("/problems.json")).json());
+      expect(first.snapshot).toBe(17);
+      expect(first.next_after).toBe("P-199");
+      const suffix = `?after=${first.next_after}&snapshot=${first.snapshot}`;
+      const etags = new Map<string, string>();
+      for (const path of ["/problems.json", "/problems.md", "/problems.toon", "/problems"]) {
+        const response = await get(`${path}${suffix}`);
+        expect(response.status).toBe(200);
+        const etag = response.headers.get("etag");
+        if (etag === null) throw new Error("Missing directory validator");
+        etags.set(path, etag);
+        expect((await get(`${path}${suffix}`, { headers: { "if-none-match": etag } })).status).toBe(
+          304,
+        );
+      }
+      const second = ProblemsIndexResponseSchema.parse(
+        await (await get(`/problems.json${suffix}`)).json(),
+      );
+      expect(second.problems.map(({ id }) => id)).toEqual(["P-200", "P-ZERO"]);
+      expect(second.snapshot).toBe(first.snapshot);
+      expect(second.next_after).toBeUndefined();
+
+      // A remaining problem rises above the boundary. Continuing by mutable
+      // weight alone would silently skip it; a prior result can also drop below
+      // the boundary and be duplicated. Production writers advance this token
+      // atomically with such public mutations; this unit fixture does so directly.
+      db.run("UPDATE problems SET status='sharpening' WHERE id='P-200'");
+      db.run("UPDATE problems SET status='resolved' WHERE id='P-000'");
+      db.run("UPDATE public_cursor SET cursor = 18");
+      for (const [path, etag] of etags) {
+        const response = await get(`${path}${suffix}`, { headers: { "if-none-match": etag } });
+        expect(response.status).toBe(400);
+        expect(response.headers.get("cache-control")).toBe("no-store");
+        const refusal = ProblemDocumentSchema.parse(await response.json());
+        expect(refusal.code).toBe("CURSOR_INVALID");
+        expect(refusal.fix_hint).toContain("without after or snapshot");
+        if (!("example" in refusal))
+          throw new Error("Cursor refusal must teach a recovery request");
+        expect(refusal.example).toEqual({ method: "GET", path: "/problems.json" });
+        const head = await get(`${path}${suffix}`, {
+          method: "HEAD",
+          headers: { "if-none-match": etag },
+        });
+        expect(head.status).toBe(400);
+        expect(await head.text()).toBe("");
+      }
+      const restarted = ProblemsIndexResponseSchema.parse(
+        await (await get("/problems.json")).json(),
+      );
+      expect(restarted.snapshot).toBe(18);
+      expect(restarted.problems[0]?.id).toBe("P-200");
+
+      // Controls win even if a stale fixture/caller still supplies the current
+      // token. Hiding the weighted boundary must never turn its weight into zero
+      // and make the remaining positive-weight work disappear from a 200 page.
+      db.run("UPDATE problems SET unlisted = 1 WHERE id='P-199'");
+      const absent = await get("/problems.json?after=P-NO-SUCH-PROBLEM&snapshot=18");
+      const absentBody = await absent.text();
+      expect(absent.status).toBe(400);
+      for (const query of ["after=P-199", "after=P-199&snapshot=18"]) {
+        const hidden = await get(`/problems.json?${query}`, {
+          headers: { "if-none-match": etags.get("/problems.json") ?? "" },
+        });
+        expect(hidden.status).toBe(400);
+        expect(await hidden.text()).toBe(absentBody);
+      }
+      db.run("UPDATE problems SET unlisted = 0 WHERE id='P-199'");
+      db.run(
+        "INSERT INTO content_controls VALUES ('hide-boundary', 'P-199', 'problem', 'problem', 'hidden', 'operator', 'safety', 'unit', 'Unit control fixture', 1, '2026-08-19T00:00:00.000Z')",
+      );
+      const controlled = await get("/problems.json?after=P-199&snapshot=18", {
+        headers: { "if-none-match": etags.get("/problems.json") ?? "" },
+      });
+      expect(controlled.status).toBe(400);
+      expect(await controlled.text()).toBe(absentBody);
+      const visible = ProblemsIndexResponseSchema.parse(
+        await (await get("/problems.json?snapshot=18")).json(),
+      );
+      expect(visible.problems.some(({ id }) => id === "P-199")).toBe(false);
+      for (const query of [
+        "snapshot=01",
+        "snapshot=1%0A",
+        "snapshot=18%0A",
+        "snapshot=1000000000000000",
+        "snapshot=17&snapshot=18",
+        "after=P-199&after=P-200",
+        "format=json&format=md",
+      ]) {
+        const invalid = await get(`/problems.json?${query}`);
+        expect(invalid.status).toBe(400);
+        const refusal = ProblemDocumentSchema.parse(await invalid.json());
+        expect(refusal.code).toBe("CURSOR_INVALID");
+        expect(refusal.title).toBe("Invalid problem index query");
+      }
+    } finally {
+      db.close();
+    }
+  });
+
+  test("directory refuses snapshots and conditional reads until every availability guard is installed (SQLite unit)", async () => {
+    const db = new Database(":memory:");
+    try {
+      setupProblemIndexTables(db);
+      db.run(
+        "INSERT INTO problems (id, title, created_at, updated_at) VALUES ('P-READY', 'Readiness fixture', '2026-08-19T00:00:00.000Z', '2026-08-19T00:00:00.000Z')",
+      );
+      const env = {
+        DB: problemIndexUnitDb((query, values) => db.query(query).all(...values)),
+      } as Env;
+      const routes = createLedgerFaceRoutes();
+      const get = (path: string, init?: RequestInit) =>
+        routes.fetch(new Request(`https://a.asimposium.org${path}`, init), env);
+      const paths = [
+        "/problems.json",
+        "/problems.md",
+        "/problems.toon",
+        "/problems?format=json",
+        "/problems.json?after=P-READY&snapshot=0",
+      ];
+      const etags = new Map<string, string>();
+      for (const path of paths) {
+        const response = await get(path);
+        expect(response.status).toBe(200);
+        const etag = response.headers.get("etag");
+        if (etag === null) throw new Error("Missing directory validator");
+        etags.set(path, etag);
+      }
+      for (const [type, name] of [
+        ["table", "public_content_removals"],
+        ["trigger", "event_content_redaction_public_cursor"],
+        ["trigger", "event_content_delete_public_cursor"],
+        ["trigger", "event_content_restore_public_cursor"],
+      ] as const) {
+        const definition = db
+          .query<{ sql: string }, [string, string]>(
+            "SELECT sql FROM sqlite_master WHERE type = ? AND name = ?",
+          )
+          .get(type, name);
+        if (!definition) throw new Error(`Missing availability fixture: ${name}`);
+        db.exec(`DROP ${type.toUpperCase()} ${name}`);
+        for (const [path, etag] of etags) {
+          for (const method of ["GET", "HEAD"]) {
+            const response = await get(path, { method, headers: { "if-none-match": etag } });
+            expect(response.status).toBe(503);
+            expect(response.headers.get("cache-control")).toBe("no-store");
+            expect(response.headers.get("retry-after")).toBe("5");
+            expect(response.headers.get("etag")).toBeNull();
+            if (method === "HEAD") expect(await response.text()).toBe("");
+            else
+              expect(ProblemDocumentSchema.parse(await response.json()).code).toBe(
+                "INTERNAL_ERROR",
+              );
+          }
+        }
+        db.exec(definition.sql);
+        expect((await get("/problems.json")).status).toBe(200);
+      }
     } finally {
       db.close();
     }
@@ -2047,9 +2259,7 @@ describe("face wire format", () => {
     for (const row of hostileRows) {
       const routes = createLedgerFaceRoutes();
       const env = {
-        DB: {
-          prepare: () => ({ all: async () => ({ results: [row] }) }),
-        } as unknown as Env["DB"],
+        DB: problemIndexRowsUnitDb(() => [row]),
       } as Env;
       for (const path of ["/problems.json", "/problems.md"] as const) {
         const response = await routes.fetch(new Request(`https://a.asimposium.org${path}`), env);
@@ -2808,6 +3018,7 @@ describe("W6.1 public faces: TOON, full pack, orders/moves, and claims", () => {
     const schema = migratedSqlite();
     try {
       for (const table of [
+        "public_cursor",
         "reviews",
         "evidence",
         "retractions",
@@ -2831,6 +3042,8 @@ describe("W6.1 public faces: TOON, full pack, orders/moves, and claims", () => {
       schema.close();
     }
 
+    db.run("INSERT INTO public_cursor (singleton, cursor) VALUES (1, 10)");
+    installProblemIndexAvailabilityGuards(db);
     db.run(
       "INSERT INTO problems (id, public_seq, title, status, unlisted, current_statement_version) VALUES ('P-TEST', 10, 'Test Problem Title', 'active', 0, 1)",
     );
@@ -3074,17 +3287,22 @@ describe("W6.1 public faces: TOON, full pack, orders/moves, and claims", () => {
       const routes = createLedgerFaceRoutes();
       const validators = new Map<string, string>();
       for (const enabled of [false, true, false]) {
-        const guardrail = enabled ? JSON.stringify({
-          canonical_formulation: "Governance-only formulation",
-          variant_distinctions: "Separate research questions",
-          authoritative_references: ["https://example.org/reference"],
-          standing_banner: "Governance-only standing banner",
-        }) : null;
+        const guardrail = enabled
+          ? JSON.stringify({
+              canonical_formulation: "Governance-only formulation",
+              variant_distinctions: "Separate research questions",
+              authoritative_references: ["https://example.org/reference"],
+              standing_banner: "Governance-only standing banner",
+            })
+          : null;
         db.prepare("UPDATE problems SET famous_guardrail = ? WHERE id = 'P-TEST'").run(guardrail);
         for (const suffix of [".json", ".md"]) {
-          const response = await routes.fetch(new Request(`https://a.asimposium.org/p/P-TEST${suffix}`, {
-            headers: { "if-none-match": validators.get(suffix) ?? "" },
-          }), env);
+          const response = await routes.fetch(
+            new Request(`https://a.asimposium.org/p/P-TEST${suffix}`, {
+              headers: { "if-none-match": validators.get(suffix) ?? "" },
+            }),
+            env,
+          );
           expect(response.status).toBe(200);
           const body = await response.text();
           expect(body).not.toContain("Governance-only");

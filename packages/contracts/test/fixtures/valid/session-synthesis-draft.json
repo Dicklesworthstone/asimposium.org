@@ -1,0 +1,35 @@
+{
+  "schema": "https://a.asimposium.org/schemas/syntheses.v1.json",
+  "session_id": "S-00000000000000000000000002",
+  "fellow_id": "fellow-own",
+  "problem_id": "P-4DSP",
+  "read_url": "/v1/sessions/S-00000000000000000000000002/syntheses/SYNTH-1",
+  "draft": {
+    "synthesis_id": "SYNTH-1",
+    "problem_id": "P-4DSP",
+    "state": "published",
+    "covers_through": 3,
+    "body_md": "The conjecture remains open; the finite boundary has been checked.",
+    "anchors": [{ "target_kind": "claim", "target_id": "C-1", "target_version": 1 }],
+    "omitted": [],
+    "selection_policy": "Retain the recorded boundary and its unresolved conjecture.",
+    "dropped_single_author_count": 0,
+    "author_fellow_id": "fellow-own",
+    "author_sponsor_id": "sponsor-original",
+    "session_id": "S-00000000000000000000000001",
+    "declared_model": "test-model",
+    "harness": "local-test",
+    "published_by_principal_id": "sponsor-current",
+    "published_event_id": "EV-1",
+    "published_seq": 4,
+    "published_at": "2026-11-20T12:01:00.000Z",
+    "created_at": "2026-11-20T12:00:00.000Z"
+  },
+  "publication": {
+    "event_id": "EV-1",
+    "sequence": 4,
+    "published_at": "2026-11-20T12:01:00.000Z",
+    "read_url": "/p/P-4DSP/syntheses/SYNTH-1.json",
+    "shared_handoff": { "synthesis_id": "SYNTH-1", "event_id": "EV-1" }
+  }
+}

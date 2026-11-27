@@ -64,6 +64,11 @@ import {
   ReviewListResponseSchema,
 } from "@asimposium/contracts/research-lists";
 import {
+  SessionSynthesisDraftResponseSchema,
+  sessionSynthesisDraftPath,
+  sessionSynthesisDraftsPath,
+} from "@asimposium/contracts/syntheses";
+import {
   WorkshopDirectoryResponseSchema,
   workshopDirectoryPath,
 } from "@asimposium/contracts/workshop-directory";
@@ -125,6 +130,10 @@ import {
   readTargetClaimPack,
 } from "../../src/sessions/ledger-pack.ts";
 import { createSessionRouter, MAX_SESSION_REQUEST_BODY_BYTES } from "../../src/sessions/router.ts";
+import {
+  SYNTHESIS_DRAFT_DIRECTORY_SQL,
+  SYNTHESIS_DRAFT_READ_SQL,
+} from "../../src/sessions/synthesis-draft-recovery.ts";
 import { WORKSHOP_DIRECTORY_SQL } from "../../src/sessions/workshop-directory.ts";
 import { normHash, sha256Hex } from "../../src/split/policy.ts";
 import { migratedSqlite } from "../support/migrated-sqlite";
@@ -2551,11 +2560,13 @@ export async function fixture(options: LocalD1Options = {}) {
   const env = { DB: db } as unknown as Env;
   // Public synthesis approval crosses the mounted signed-sponsor route. The
   // SQLite adapter and synthetic classifier remain explicit fixture seams.
-  let publication: Promise<{
-    app: ReturnType<typeof createApp>;
-    keys: CryptoKeyPair;
-    env: Env;
-  }> | undefined;
+  let publication:
+    | Promise<{
+        app: ReturnType<typeof createApp>;
+        keys: CryptoKeyPair;
+        env: Env;
+      }>
+    | undefined;
   const publishSynthesisResponse = async (synthesisId: string) => {
     publication ??= (async () => {
       const keys = (await crypto.subtle.generateKey({ name: "Ed25519" }, true, [
@@ -2563,7 +2574,9 @@ export async function fixture(options: LocalD1Options = {}) {
         "verify",
       ])) as CryptoKey | CryptoKeyPair;
       if (!("privateKey" in keys)) throw new Error("Expected an Ed25519 key pair");
-      const publicKeyHex = Buffer.from(await crypto.subtle.exportKey("raw", keys.publicKey)).toString("hex");
+      const publicKeyHex = Buffer.from(
+        await crypto.subtle.exportKey("raw", keys.publicKey),
+      ).toString("hex");
       return {
         app: createApp({ screenPromotion }),
         keys,
@@ -2571,8 +2584,12 @@ export async function fixture(options: LocalD1Options = {}) {
           ...env,
           STOA_ORIGIN: "https://a-staging.asimposium.org",
           AGORA_ORIGIN: "https://staging.asimposium.org",
-          ENROLLMENT_REPLAY_KEY: Buffer.from(Uint8Array.from({ length: 32 }, (_value, index) => index)).toString("base64url"),
-          SERVICE_ENVELOPE_KEYS: JSON.stringify([{ kid: "session-synthesis-publisher", publicKeyHex, notBefore: 0 }]),
+          ENROLLMENT_REPLAY_KEY: Buffer.from(
+            Uint8Array.from({ length: 32 }, (_value, index) => index),
+          ).toString("base64url"),
+          SERVICE_ENVELOPE_KEYS: JSON.stringify([
+            { kid: "session-synthesis-publisher", publicKeyHex, notBefore: 0 },
+          ]),
         } as Env,
       };
     })();
@@ -2591,10 +2608,13 @@ export async function fixture(options: LocalD1Options = {}) {
       body: "",
       now: Math.floor(Date.now() / 1_000),
     });
-    return mounted.app.fetch(new Request(`https://a-staging.asimposium.org${route}`, {
-      method: "POST",
-      headers: serviceEnvelopeHeaders(envelope),
-    }), mounted.env);
+    return mounted.app.fetch(
+      new Request(`https://a-staging.asimposium.org${route}`, {
+        method: "POST",
+        headers: serviceEnvelopeHeaders(envelope),
+      }),
+      mounted.env,
+    );
   };
   const publishSynthesis = async (synthesisId: string, expectedStatus = 201) => {
     const response = await publishSynthesisResponse(synthesisId);
@@ -3961,7 +3981,9 @@ describe("session protocol routes", () => {
     );
     expect(empty.omitted.some(({ reason }) => reason === "no_published_claim")).toBe(true);
     expect(empty.items.some(({ scope }) => scope === "workshop")).toBe(false);
-    expect(empty.next_actions.some(({ url }) => url === `/p/P-4DSP/claims.json?through=${empty.cursor}`)).toBe(true);
+    expect(
+      empty.next_actions.some(({ url }) => url === `/p/P-4DSP/claims.json?through=${empty.cursor}`),
+    ).toBe(true);
     const draft = WorkshopPushResponseSchema.parse(
       await (
         await post(`${path}/workshop`, {
@@ -4156,13 +4178,17 @@ describe("session protocol routes", () => {
     expect(JSON.stringify(evidenceRedacted)).toContain("VERSION-ONE-REVIEW");
     // Withhold the current revision. Discovery cannot fall back to the older
     // version or to private resume material when the head is unavailable.
-    await f.db.prepare(
-      "UPDATE event_content SET payload_json = '{}', redaction_reason = 'synthetic head redaction', redacted_at = '2026-09-07T00:00:00Z' WHERE event_id IN (SELECT id FROM events WHERE problem_id = 'P-4DSP' AND type = 'claim.revised' AND object_id = 'C-1' AND object_version = 2)",
-    ).run();
+    await f.db
+      .prepare(
+        "UPDATE event_content SET payload_json = '{}', redaction_reason = 'synthetic head redaction', redacted_at = '2026-09-07T00:00:00Z' WHERE event_id IN (SELECT id FROM events WHERE problem_id = 'P-4DSP' AND type = 'claim.revised' AND object_id = 'C-1' AND object_version = 2)",
+      )
+      .run();
     const unavailable = await get("profile=claim&max_tokens=8000");
     expect(unavailable.response.headers.get("content-location")).toBeNull();
     expect(unavailable.pack.items.some(({ kind }) => kind === "claim-detail")).toBe(false);
-    expect(unavailable.pack.omitted.some(({ reason }) => reason === "content_unavailable")).toBe(true);
+    expect(unavailable.pack.omitted.some(({ reason }) => reason === "content_unavailable")).toBe(
+      true,
+    );
     expect(JSON.stringify(unavailable.pack)).not.toContain("PRIVATE-TARGET");
     await f.db
       .prepare(
@@ -4936,7 +4962,8 @@ describe("session protocol routes", () => {
     // Status carries the opened session's fields; its next_actions are recovery
     // reads, deliberately different from the routes handed back at open.
     const { next_actions: _openedActions, ...opened } = session;
-    expect(await status()).toMatchObject({
+    const openStatus = await status();
+    expect(openStatus).toMatchObject({
       ...opened,
       closed_at: null,
       close_reason: null,
@@ -4946,6 +4973,9 @@ describe("session protocol routes", () => {
       public_cursor: 0,
       workshop_cursor: 0,
     });
+    expect(openStatus.next_actions).toContainEqual(
+      expect.objectContaining({ method: "GET", url: `${path}/syntheses` }),
+    );
     await post(`${path}/workshop`, {
       type: "note",
       title: "Private draft",
@@ -4964,6 +4994,7 @@ describe("session protocol routes", () => {
     expect(closed.next_actions).toMatchObject([
       { method: "GET", url: "/v1/hello" },
       { method: "GET", url: `${path}/workshop` },
+      { method: "GET", url: `${path}/syntheses` },
     ]);
     expect(closed.lifecycle_state).toBe("closed");
     expect(closed.close_reason).toBe("explicit");
@@ -16974,6 +17005,82 @@ describe("committed promotion outbox nudge", () => {
     expect(await failed.text()).not.toContain("SQL_DIAGNOSTIC_CANARY");
   });
 
+  test("synthesis recovery rechecks reduced and revoked credentials before bodies or conditional receipts", async () => {
+    let afterRead: (() => void) | undefined;
+    let unavailable = false;
+    const f = await fixture({
+      afterRead: async (read) => {
+        if ([SYNTHESIS_DRAFT_DIRECTORY_SQL, SYNTHESIS_DRAFT_READ_SQL].includes(read.sql))
+          afterRead?.();
+      },
+      beforeRead: async (read) => {
+        if (
+          unavailable &&
+          [SYNTHESIS_DRAFT_DIRECTORY_SQL, SYNTHESIS_DRAFT_READ_SQL].includes(read.sql)
+        )
+          throw new Error("PRIVATE_SYNTHESIS_SQL_CANARY");
+      },
+    });
+    const opened = await f.call("/v1/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "synthesis-recovery-open" },
+      body: JSON.stringify({ problem_id: "P-4DSP", intent: "explore" }),
+    });
+    const session = SessionOpenResponseSchema.parse(await opened.json()).session_id;
+    const synthesis = "SYNTH-RECOVERY-RACE";
+    await f.db
+      .prepare(`INSERT INTO synthesis_drafts
+      (synthesis_id, problem_id, covers_through, body_md, anchors_json, omitted_json,
+      selection_policy, dropped_single_author_count, author_fellow_id, author_sponsor_id,
+      session_id, declared_model, harness, state, created_at)
+      VALUES (?, 'P-4DSP', 1, 'PRIVATE_SYNTHESIS_BODY',
+      '[{"target_kind":"claim","target_id":"C-1","target_version":1}]', '[]',
+      'Recorded boundary', 0, ?, ?, ?, 'test-model', 'test-harness', 'draft', ?)`)
+      .bind(synthesis, f.binding.fellowId, f.binding.sponsorId, session, new Date().toISOString())
+      .run();
+    const original = f.service.credentialBinding.bind(f.service);
+    for (const path of [
+      sessionSynthesisDraftsPath(session),
+      sessionSynthesisDraftPath(session, synthesis),
+    ]) {
+      const first = await f.call(path);
+      expect(first.status, await first.clone().text()).toBe(200);
+      if (path.endsWith(synthesis))
+        expect(
+          SessionSynthesisDraftResponseSchema.parse(await first.clone().json()).draft.body_md,
+        ).toBe("PRIVATE_SYNTHESIS_BODY");
+      afterRead = () => {
+        f.service.credentialBinding = async () => ({
+          ...f.binding,
+          grantedResources: { ...f.binding.grantedResources, problemBinding: "P-OTHER" },
+        });
+      };
+      const changed = await f.call(path, {
+        headers: { "if-none-match": first.headers.get("etag")! },
+      });
+      expect(changed.status).toBe(404);
+      expect(await changed.text()).not.toContain("PRIVATE_SYNTHESIS");
+      expect(changed.headers.get("cache-control")).toBe("private, no-store");
+      f.service.credentialBinding = original;
+      afterRead = () => {
+        f.service.credentialBinding = async () => undefined;
+      };
+      const revoked = await f.call(path, {
+        method: "HEAD",
+        headers: { "if-none-match": first.headers.get("etag")! },
+      });
+      expect(revoked.status).toBe(401);
+      expect(await revoked.text()).toBe("");
+      f.service.credentialBinding = original;
+      afterRead = undefined;
+      unavailable = true;
+      const failed = await f.call(path);
+      expect(failed.status).toBe(503);
+      expect(await failed.text()).not.toContain("PRIVATE_SYNTHESIS");
+      unavailable = false;
+    }
+  });
+
   test.each(["working", "graveyard"] as const)(
     "%s pack links recover the captured workshop revision after a later session edits it",
     async (profile) => {
@@ -17944,11 +18051,15 @@ describe("committed promotion outbox nudge", () => {
           events: (await f.db.prepare("SELECT id, seq FROM events ORDER BY problem_id, seq").all())
             .results,
           drafts: (
-            await f.db.prepare("SELECT synthesis_id FROM synthesis_drafts ORDER BY synthesis_id").all()
+            await f.db
+              .prepare("SELECT synthesis_id FROM synthesis_drafts ORDER BY synthesis_id")
+              .all()
           ).results,
           replays: (
             await f.db
-              .prepare("SELECT idempotency_key FROM session_write_replays WHERE scope = 'synthesize'")
+              .prepare(
+                "SELECT idempotency_key FROM session_write_replays WHERE scope = 'synthesize'",
+              )
               .all()
           ).results,
         });
@@ -18076,7 +18187,10 @@ describe("committed promotion outbox nudge", () => {
       const first = await send("synthesis-before-close");
       expect(first.status, await first.clone().text()).toBe(201);
       const receipt = SynthesizeResponseSchema.parse(await first.json());
-      await f.post(`${f.path}/close`, { handback: "The private synthesis draft is saved.", promote: [] });
+      await f.post(`${f.path}/close`, {
+        handback: "The private synthesis draft is saved.",
+        promote: [],
+      });
       const replay = await send("synthesis-before-close");
       expect(replay.status, await replay.clone().text()).toBe(200);
       expect(SynthesizeResponseSchema.parse(await replay.json())).toEqual(receipt);
@@ -18377,12 +18491,25 @@ describe("committed promotion outbox nudge", () => {
       expect(synthesisDraft.state).toBe("draft");
       expect("event_id" in synthesisDraft).toBe(false);
       expect("sequence" in synthesisDraft).toBe(false);
-      expect(await f.db.prepare("SELECT id FROM events WHERE object_id = ?")
-        .bind(synthesisDraft.synthesis_id).first()).toBeNull();
-      expect(await f.db.prepare("SELECT synthesis_id FROM syntheses WHERE synthesis_id = ?")
-        .bind(synthesisDraft.synthesis_id).first()).toBeNull();
-      expect((await f.db.prepare("SELECT public_seq FROM problems WHERE id = 'P-4DSP'")
-        .first<{ public_seq: number }>())?.public_seq).toBe(currentSeq);
+      expect(
+        await f.db
+          .prepare("SELECT id FROM events WHERE object_id = ?")
+          .bind(synthesisDraft.synthesis_id)
+          .first(),
+      ).toBeNull();
+      expect(
+        await f.db
+          .prepare("SELECT synthesis_id FROM syntheses WHERE synthesis_id = ?")
+          .bind(synthesisDraft.synthesis_id)
+          .first(),
+      ).toBeNull();
+      expect(
+        (
+          await f.db
+            .prepare("SELECT public_seq FROM problems WHERE id = 'P-4DSP'")
+            .first<{ public_seq: number }>()
+        )?.public_seq,
+      ).toBe(currentSeq);
 
       const validSynth = await f.publishSynthesis(synthesisDraft.synthesis_id);
       expect(validSynth.state).toBe("published");
@@ -18490,7 +18617,11 @@ describe("committed promotion outbox nudge", () => {
       const exactAnchors = [
         { target_kind: "claim", target_id: "C-1", target_version: 1, target_seq: source!.seq },
       ];
-      expect(JSON.parse(screens[0]!.statement)).toEqual({ ...body, draft: true, anchors: exactAnchors });
+      expect(JSON.parse(screens[0]!.statement)).toEqual({
+        ...body,
+        draft: true,
+        anchors: exactAnchors,
+      });
       const publication = await f.publishSynthesis(accepted.synthesis_id);
       expect(JSON.parse(screens[1]!.statement)).toEqual({ ...body, anchors: exactAnchors });
       const published = await f.db
@@ -18600,8 +18731,12 @@ describe("committed promotion outbox nudge", () => {
         expect(((await response.json()) as { code: string }).code).toBe("SYNTHESIS_UNANCHORED");
         expect(synthesisScreens).toBe(2);
         expect(await footprint()).toEqual(before);
-        expect(await f.db.prepare("SELECT state FROM synthesis_drafts WHERE synthesis_id = ?")
-          .bind(savedDraft.synthesis_id).first<{ state: string }>()).toEqual({ state: "draft" });
+        expect(
+          await f.db
+            .prepare("SELECT state FROM synthesis_drafts WHERE synthesis_id = ?")
+            .bind(savedDraft.synthesis_id)
+            .first<{ state: string }>(),
+        ).toEqual({ state: "draft" });
       });
     }
   });

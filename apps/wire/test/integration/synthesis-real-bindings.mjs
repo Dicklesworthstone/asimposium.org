@@ -6,6 +6,8 @@ import {
   PackResponseSchema,
   ScreeningPromotionDeniedResponseSchema,
   ScreeningPublicationProvenanceSchema,
+  SessionSynthesisDraftIndexSchema,
+  SessionSynthesisDraftResponseSchema,
   SingleSynthesisResponseSchema,
   SynthesesListResponseSchema,
   SynthesisDraftPublishResponseSchema,
@@ -103,7 +105,7 @@ await runLocalWorkerJourney(
       author,
       201,
     );
-    const sessionId = session.session_id;
+    let sessionId = session.session_id;
     const publishSynthesis = async (value, expected = 201) => {
       const draft = SynthesizeResponseSchema.parse(value);
       assert.equal(draft.state, "draft");
@@ -204,11 +206,13 @@ await runLocalWorkerJourney(
     ]);
     assert.deepEqual(repeatedReviews[0], repeatedReviews[1]);
     assert.equal(
-      (await createExpertReview(
-        "external-review-one",
-        { ...expertReviewBody, verdict: "supports-resolution" },
-        409,
-      )).code,
+      (
+        await createExpertReview(
+          "external-review-one",
+          { ...expertReviewBody, verdict: "supports-resolution" },
+          409,
+        )
+      ).code,
       "IDEMPOTENCY_CONFLICT",
     );
     await sponsorCall(
@@ -222,15 +226,23 @@ await runLocalWorkerJourney(
       "external-review-one",
     );
     assert.equal(
-      (await env.DB.prepare(
-        "SELECT COUNT(*) AS n FROM external_expert_reviews WHERE problem_id = ?",
-      ).bind(problemId).first()).n,
+      (
+        await env.DB.prepare(
+          "SELECT COUNT(*) AS n FROM external_expert_reviews WHERE problem_id = ?",
+        )
+          .bind(problemId)
+          .first()
+      ).n,
       2,
     );
     assert.equal(
-      (await env.DB.prepare(
-        "SELECT COUNT(*) AS n FROM operator_audit WHERE action = 'external-expert-review-recorded' AND target_id = ?",
-      ).bind(`${problemId}/${claim1Id}@1`).first()).n,
+      (
+        await env.DB.prepare(
+          "SELECT COUNT(*) AS n FROM operator_audit WHERE action = 'external-expert-review-recorded' AND target_id = ?",
+        )
+          .bind(`${problemId}/${claim1Id}@1`)
+          .first()
+      ).n,
       2,
     );
 
@@ -268,9 +280,11 @@ await runLocalWorkerJourney(
     assert.equal(unanchoredFuture.code, "SYNTHESIS_UNANCHORED");
     assert.equal(unanchoredFuture.rule, "P13");
 
-    // 6. A valid synthesis is private until its sponsor explicitly approves it.
+    // 6. A valid synthesis survives a closed authoring session and can be
+    // recovered before and after its sponsor explicitly approves publication.
+    const synthesisSession = session;
     const synth1Draft = await call(
-      `/v1/sessions/${sessionId}/synthesize`,
+      `/v1/sessions/${synthesisSession.session_id}/synthesize`,
       {
         covers_through: maxSeq1,
         body_md: "## State of the Problem\n\nPrime factor existence holds.",
@@ -284,10 +298,112 @@ await runLocalWorkerJourney(
       "synth-idempotent-key-1",
     );
     assert.equal(synth1Draft.state, "draft");
-    assert.equal((await env.DB.prepare("SELECT public_seq FROM problems WHERE id = ?")
-      .bind(problemId).first()).public_seq, maxSeq1);
-    assert.equal(await env.DB.prepare("SELECT id FROM events WHERE object_id = ?")
-      .bind(synth1Draft.synthesis_id).first(), null);
+    assert.equal(
+      (await env.DB.prepare("SELECT public_seq FROM problems WHERE id = ?").bind(problemId).first())
+        .public_seq,
+      maxSeq1,
+    );
+    assert.equal(
+      await env.DB.prepare("SELECT id FROM events WHERE object_id = ?")
+        .bind(synth1Draft.synthesis_id)
+        .first(),
+      null,
+    );
+    assert.equal(
+      synth1Draft.read_url,
+      `/v1/sessions/${synthesisSession.session_id}/syntheses/${synth1Draft.synthesis_id}`,
+    );
+    const readRecovery = async (path, token, expected = 200, method = "GET", etag) => {
+      const response = await worker.fetch(`${origin}${path}`, {
+        method,
+        headers: {
+          "User-Agent": userAgent,
+          ...(token ? { authorization: `Bearer ${token}` } : {}),
+          ...(etag ? { "if-none-match": etag } : {}),
+        },
+      });
+      assert.equal(response.status, expected, `private synthesis recovery ${method} status`);
+      assert.equal(response.headers.get("cache-control"), "private, no-store");
+      assert.equal(response.headers.get("x-robots-tag"), "noindex, nofollow");
+      const raw = await response.text();
+      if (method === "HEAD" || expected === 304) {
+        assert.equal(raw, "");
+        return { response, data: null };
+      }
+      return { response, data: JSON.parse(raw) };
+    };
+    await call(
+      `/v1/sessions/${synthesisSession.session_id}/close`,
+      {
+        handback:
+          "Resume the saved synthesis after sponsor review; the full draft remains private.",
+      },
+      author,
+      201,
+    );
+    const privateRecovery = await readRecovery(synth1Draft.read_url, author);
+    const recoveredDraft = SessionSynthesisDraftResponseSchema.parse(privateRecovery.data);
+    assert.equal(recoveredDraft.draft.state, "draft");
+    assert.equal(
+      recoveredDraft.draft.body_md,
+      "## State of the Problem\n\nPrime factor existence holds.",
+    );
+    assert.equal(recoveredDraft.publication, null);
+    await readRecovery(
+      synth1Draft.read_url,
+      author,
+      304,
+      "HEAD",
+      privateRecovery.response.headers.get("etag"),
+    );
+    await readRecovery(synth1Draft.read_url, undefined, 401);
+    const foreignRecovery = await readRecovery(synth1Draft.read_url, reviewer, 404);
+    const missingRecovery = await readRecovery(
+      `/v1/sessions/${synthesisSession.session_id}/syntheses/SYNTH-MISSING`,
+      reviewer,
+      404,
+    );
+    assert.deepEqual(foreignRecovery.data, missingRecovery.data);
+    await readRecovery(
+      `/v1/sessions/${reviewSession.session_id}/syntheses/${synth1Draft.synthesis_id}`,
+      reviewer,
+      404,
+    );
+    assert.deepEqual(
+      SessionSynthesisDraftIndexSchema.parse(
+        (await readRecovery(`/v1/sessions/${reviewSession.session_id}/syntheses`, reviewer)).data,
+      ).items,
+      [],
+    );
+    const resumedSynthesis = await call(
+      "/v1/sessions",
+      { problem_id: problemId, intent: "explore" },
+      author,
+      201,
+    );
+    const recoveryDirectory = `/v1/sessions/${resumedSynthesis.session_id}/syntheses`;
+    const recoveredIndex = SessionSynthesisDraftIndexSchema.parse(
+      (await readRecovery(recoveryDirectory, author)).data,
+    );
+    assert.equal(recoveredIndex.items.length, 1);
+    assert.equal(recoveredIndex.items[0].authored_session_id, synthesisSession.session_id);
+    assert.equal(JSON.stringify(recoveredIndex).includes(recoveredDraft.draft.body_md), false);
+    assert.equal(
+      SessionSynthesisDraftResponseSchema.parse(
+        (await readRecovery(recoveredIndex.items[0].read_url, author)).data,
+      ).draft.body_md,
+      recoveredDraft.draft.body_md,
+    );
+    assert.ok(
+      (
+        await call(`/v1/sessions/${synthesisSession.session_id}`, undefined, author)
+      ).next_actions.some(
+        (action) => action.url === `/v1/sessions/${synthesisSession.session_id}/syntheses`,
+      ),
+    );
+    for (const query of ["?limit=01", "?limit=1&limit=2", "?fellow_id=foreign", "?state=all"])
+      await readRecovery(recoveryDirectory + query, author, 400);
+    await readRecovery(synth1Draft.read_url + "?state=draft", author, 400);
     const synth1 = await publishSynthesis(synth1Draft);
     assert.ok(synth1.synthesis_id.startsWith("SYNTH-"));
     assert.equal(synth1.problem_id, problemId);
@@ -295,10 +411,53 @@ await runLocalWorkerJourney(
     assert.equal(synth1.anchors_count, 1);
     assert.equal(synth1.dropped_single_author_count, 0);
     assert.ok(synth1.sequence > maxSeq1);
+    const publishedRecovery = SessionSynthesisDraftResponseSchema.parse(
+      (
+        await readRecovery(
+          synth1Draft.read_url,
+          author,
+          200,
+          "GET",
+          privateRecovery.response.headers.get("etag"),
+        )
+      ).data,
+    );
+    assert.equal(publishedRecovery.draft.state, "published");
+    assert.deepEqual(publishedRecovery.publication.shared_handoff, {
+      synthesis_id: synth1.synthesis_id,
+      event_id: synth1.event_id,
+    });
+    assert.equal(
+      SingleSynthesisResponseSchema.parse(await call(publishedRecovery.publication.read_url))
+        .synthesis.synthesis_id,
+      synth1.synthesis_id,
+    );
+    const shared = await call(
+      `/v1/sessions/${resumedSynthesis.session_id}/close`,
+      {
+        handback:
+          "The sponsor published the recovered synthesis; explicitly share that public boundary.",
+        shared_handoff: publishedRecovery.publication.shared_handoff,
+      },
+      author,
+      201,
+    );
+    assert.equal(shared.shared_handoff.synthesis_id, synth1.synthesis_id);
+    assert.equal(
+      SessionSynthesisDraftIndexSchema.parse((await readRecovery(recoveryDirectory, author)).data)
+        .items[0].state,
+      "published",
+    );
+    console.log(
+      JSON.stringify({ stage: "synthesis-private-recovery-to-shared-handoff", status: "pass" }),
+    );
+    sessionId = (
+      await call("/v1/sessions", { problem_id: problemId, intent: "prove" }, author, 201)
+    ).session_id;
 
     // 7. The private draft and the public publication have separate replay receipts.
     const replay1 = await call(
-      `/v1/sessions/${sessionId}/synthesize`,
+      `/v1/sessions/${synthesisSession.session_id}/synthesize`,
       {
         covers_through: maxSeq1,
         body_md: "## State of the Problem\n\nPrime factor existence holds.",
@@ -376,6 +535,25 @@ await runLocalWorkerJourney(
     assert.equal(synthRows[0].dropped_single_author_count, 0);
     assert.equal(synthRows[1].synthesis_id, synth2.synthesis_id);
     assert.equal(synthRows[1].dropped_single_author_count, 1);
+    const firstRecoveryPage = SessionSynthesisDraftIndexSchema.parse(
+      (await readRecovery(`${recoveryDirectory}?limit=1&state=published`, author)).data,
+    );
+    assert.ok(firstRecoveryPage.next_after);
+    const secondRecoveryPage = SessionSynthesisDraftIndexSchema.parse(
+      (
+        await readRecovery(
+          `${recoveryDirectory}?after=${firstRecoveryPage.next_after}&limit=1&state=published`,
+          author,
+        )
+      ).data,
+    );
+    assert.equal(secondRecoveryPage.next_after, null);
+    assert.deepEqual(
+      new Set(
+        [...firstRecoveryPage.items, ...secondRecoveryPage.items].map((item) => item.synthesis_id),
+      ),
+      new Set([synth1.synthesis_id, synth2.synthesis_id]),
+    );
 
     const synth2ReadPath = `/p/${problemId}/syntheses/${synth2.synthesis_id}.md`;
     const assertSynthesisDrift = async (expected) => {
@@ -573,7 +751,11 @@ await runLocalWorkerJourney(
       };
       const key = `frozen-anchor-${index}`;
       const draft = await call(
-        `/v1/sessions/${historySession.session_id}/synthesize`, body, historyWriter, null, key,
+        `/v1/sessions/${historySession.session_id}/synthesize`,
+        body,
+        historyWriter,
+        null,
+        key,
       );
       if (allowed) {
         assert.equal(
@@ -634,7 +816,11 @@ await runLocalWorkerJourney(
           "The provider input also binds the surrounding public context",
         );
         const replay = await call(
-          `/v1/sessions/${historySession.session_id}/synthesize`, body, historyWriter, 200, key,
+          `/v1/sessions/${historySession.session_id}/synthesize`,
+          body,
+          historyWriter,
+          200,
+          key,
         );
         assert.deepEqual(replay, draft);
         assert.deepEqual(await publishSynthesis(draft, 200), response);
@@ -645,7 +831,10 @@ await runLocalWorkerJourney(
           draft.code === "SYNTHESIS_UNANCHORED" && draft.rule === "P13",
           `${label}: P13 refusal`,
         );
-        check(JSON.stringify(await footprint()) === JSON.stringify(before), `${label}: no public mutation`);
+        check(
+          JSON.stringify(await footprint()) === JSON.stringify(before),
+          `${label}: no public mutation`,
+        );
         check((await fixtures.screeningCalls()) === screeningBefore, `${label}: no paid screen`);
       }
     }
@@ -1409,7 +1598,11 @@ await runLocalWorkerJourney(
       while ((await fixtures.screeningCalls()) < heldCall && Date.now() < deadline) {
         await new Promise((resolve) => setTimeout(resolve, 25));
       }
-      assert.equal(await fixtures.screeningCalls(), heldCall, "draft reached the screening barrier");
+      assert.equal(
+        await fixtures.screeningCalls(),
+        heldCall,
+        "draft reached the screening barrier",
+      );
       await call(
         `${closingPath}/close`,
         { handback: "The saved private synthesis is ready; this session is closed.", promote: [] },
@@ -1430,23 +1623,33 @@ await runLocalWorkerJourney(
       "The refused draft creates no public event, projection, outbox or successful replay",
     );
     assert.equal(
-      (await env.DB.prepare("SELECT COUNT(*) AS n FROM synthesis_drafts WHERE session_id = ?")
-        .bind(closingSession.session_id)
-        .first()).n,
+      (
+        await env.DB.prepare("SELECT COUNT(*) AS n FROM synthesis_drafts WHERE session_id = ?")
+          .bind(closingSession.session_id)
+          .first()
+      ).n,
       1,
       "Only the previously accepted draft is retained",
     );
     assert.equal(
-      (await env.DB.prepare(
-        "SELECT COUNT(*) AS n FROM session_write_replays WHERE scope = 'synthesize' AND idempotency_key = ?",
-      ).bind("synthesis-close-during-screening").first()).n,
+      (
+        await env.DB.prepare(
+          "SELECT COUNT(*) AS n FROM session_write_replays WHERE scope = 'synthesize' AND idempotency_key = ?",
+        )
+          .bind("synthesis-close-during-screening")
+          .first()
+      ).n,
       0,
       "Refusal leaves the idempotency key unclaimed",
     );
     assert.equal(
-      (await env.DB.prepare(
-        "SELECT status FROM public_write_attempt_reservations WHERE route = 'synthesize' AND idempotency_key = ?",
-      ).bind("synthesis-close-during-screening").first()).status,
+      (
+        await env.DB.prepare(
+          "SELECT status FROM public_write_attempt_reservations WHERE route = 'synthesize' AND idempotency_key = ?",
+        )
+          .bind("synthesis-close-during-screening")
+          .first()
+      ).status,
       "settled_failed",
     );
     assert.deepEqual(
@@ -1461,16 +1664,22 @@ await runLocalWorkerJourney(
       "A completed draft receipt survives session closure",
     );
     assert.equal(
-      (await call(
-        `${closingPath}/synthesize`,
-        retainedBody,
-        closingWriter,
-        409,
-        "synthesis-new-after-close",
-      )).code,
+      (
+        await call(
+          `${closingPath}/synthesize`,
+          retainedBody,
+          closingWriter,
+          409,
+          "synthesis-new-after-close",
+        )
+      ).code,
       "SESSION_CLOSED",
     );
-    assert.equal(await fixtures.screeningCalls(), heldCall, "closed-session replay needs no screening");
+    assert.equal(
+      await fixtures.screeningCalls(),
+      heldCall,
+      "closed-session replay needs no screening",
+    );
     console.log(JSON.stringify({ stage: "synthesis-close-during-screening", status: "pass" }));
 
     // W2.6 (79n, z3or): claims (anchored across a statement revision), their
@@ -1585,6 +1794,170 @@ await runLocalWorkerJourney(
       await publishSynthesis(retainedDraft, 200),
       retained,
       "A completed publication receipt survives later source redaction",
+    );
+
+    // Recovery follows the Fellow's current authority after a bilateral
+    // transfer and approved rebind, while scientific attribution stays frozen.
+    const movedFellow = recoveredDraft.fellow_id;
+    const identity = await env.DB.prepare(
+      "SELECT name, model, harness FROM enrollment_fellows WHERE fellow_id = ?",
+    )
+      .bind(movedFellow)
+      .first();
+    const stepUp = () => Math.floor(Date.now() / 1000);
+    const transfer = await sponsorCall(
+      sponsorA,
+      "POST",
+      "/v1/sponsors/transfers",
+      "sponsor.transfer.initiate",
+      {
+        fellow_id: movedFellow,
+        target_sponsor_id: sponsorB,
+        confirm: "initiate-fellow-transfer",
+        step_up_authenticated_at: stepUp(),
+        directive_attestation: "no_directives",
+      },
+      201,
+    );
+    await sponsorCall(
+      sponsorB,
+      "POST",
+      `/v1/sponsors/transfers/${transfer.transfer_id}/accept`,
+      "sponsor.transfer.accept",
+      {
+        transfer_id: transfer.transfer_id,
+        confirm: "accept-fellow-transfer",
+        step_up_authenticated_at: stepUp(),
+      },
+    );
+    await readRecovery(
+      synth1Draft.read_url,
+      author,
+      401,
+      "GET",
+      privateRecovery.response.headers.get("etag"),
+    );
+    await readRecovery(recoveryDirectory, author, 401, "HEAD");
+    const rebind = await sponsorCall(
+      sponsorB,
+      "POST",
+      "/v1/sponsors/rebinds",
+      "sponsor.rebind.create",
+      {
+        fellow_id: movedFellow,
+        confirm: "rebind-transferred-fellow",
+        step_up_authenticated_at: stepUp(),
+      },
+      201,
+    );
+    const rebound = await call(
+      "/v1/fellows/rebind",
+      {
+        rebind_id: rebind.rebind_id,
+        secret: rebind.secret,
+        ...identity,
+      },
+      undefined,
+      202,
+    );
+    await sponsorCall(
+      sponsorB,
+      "POST",
+      `/v1/sponsors/rebinds/${rebind.rebind_id}/decision`,
+      "sponsor.rebind.decide",
+      {
+        rebind_id: rebind.rebind_id,
+        decision: "approve",
+        confirm: "decide-fellow-rebind",
+        step_up_authenticated_at: stepUp(),
+      },
+    );
+    const issued = await call("/v1/fellows/rebind/flow", { flow_handle: rebound.flow_handle });
+    assert.equal(issued.status, "approved");
+    await readRecovery(synth1Draft.read_url, issued.token, 401);
+    await sponsorCall(sponsorB, "POST", "/v1/fellows/lifecycle", "fellow.lifecycle.change", {
+      fellow_id: movedFellow,
+      status: "active",
+      confirm: "change-fellow-lifecycle",
+      step_up_authenticated_at: stepUp(),
+    });
+    const afterTransferRead = await readRecovery(synth1Draft.read_url, issued.token);
+    const afterTransfer = SessionSynthesisDraftResponseSchema.parse(afterTransferRead.data);
+    assert.deepEqual(afterTransfer.draft, publishedRecovery.draft);
+    assert.equal(afterTransfer.draft.author_sponsor_id, sponsorA);
+    assert.equal(
+      SessionSynthesisDraftIndexSchema.parse(
+        (await readRecovery(recoveryDirectory, issued.token)).data,
+      ).fellow_id,
+      movedFellow,
+    );
+    await readRecovery(synth1Draft.read_url, reviewer, 404);
+    // A valid new credential still cannot recover work after current problem
+    // admission is withdrawn. These are real D1 adverse-state fixtures.
+    const membership = await env.DB.prepare(
+      "SELECT role, joined_at FROM problem_memberships WHERE problem_id = ? AND fellow_id = ?",
+    )
+      .bind(problemId, movedFellow)
+      .first();
+    const access = await env.DB.prepare("SELECT admission_mode FROM problems WHERE id = ?")
+      .bind(problemId)
+      .first();
+    await env.DB.prepare("UPDATE problems SET admission_mode = 'invite-only' WHERE id = ?")
+      .bind(problemId)
+      .run();
+    await env.DB.prepare("DELETE FROM problem_memberships WHERE problem_id = ? AND fellow_id = ?")
+      .bind(problemId, movedFellow)
+      .run();
+    await readRecovery(
+      synth1Draft.read_url,
+      issued.token,
+      404,
+      "GET",
+      afterTransferRead.response.headers.get("etag"),
+    );
+    await readRecovery(recoveryDirectory, issued.token, 404);
+    await env.DB.prepare("UPDATE problems SET admission_mode = ? WHERE id = ?")
+      .bind(access.admission_mode, problemId)
+      .run();
+    await env.DB.prepare(
+      "INSERT INTO problem_memberships(problem_id, fellow_id, role, joined_at) VALUES (?, ?, ?, ?)",
+    )
+      .bind(problemId, movedFellow, membership.role, membership.joined_at)
+      .run();
+    assert.equal(
+      (await readRecovery(synth1Draft.read_url, issued.token)).data.draft.state,
+      "published",
+    );
+    const credential = await env.DB.prepare(
+      "SELECT credential_id FROM fellow_tokens WHERE fellow_id = ? AND revoked_at IS NULL ORDER BY issued_at DESC LIMIT 1",
+    )
+      .bind(movedFellow)
+      .first();
+    await sponsorCall(
+      sponsorB,
+      "POST",
+      "/v1/fellows/credentials/revoke",
+      "fellow.credential.revoke",
+      {
+        fellow_id: movedFellow,
+        credential_id: credential.credential_id,
+        confirm: "revoke-credential",
+        step_up_authenticated_at: stepUp(),
+      },
+    );
+    await readRecovery(
+      synth1Draft.read_url,
+      issued.token,
+      401,
+      "GET",
+      afterTransferRead.response.headers.get("etag"),
+    );
+    await readRecovery(recoveryDirectory, issued.token, 401, "HEAD");
+    console.log(
+      JSON.stringify({
+        stage: "synthesis-recovery-current-authority-transfer-revocation",
+        status: "pass",
+      }),
     );
 
     console.log(

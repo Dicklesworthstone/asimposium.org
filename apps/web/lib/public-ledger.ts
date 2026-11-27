@@ -40,10 +40,10 @@ import {
   type PublicProblemMoves,
   PublicProblemMovesSchema,
   RetractionsListQuerySchema,
-  retractionsListMatchesQuery,
-  retractionsListPath,
   type RetractionsListResponse,
   RetractionsListResponseSchema,
+  retractionsListMatchesQuery,
+  retractionsListPath,
   type SearchQueryRequest,
   SearchQueryRequestSchema,
   type SearchResponse,
@@ -222,7 +222,9 @@ export async function readPublic<T>(
         value !== null &&
         "code" in value &&
         (response.status === 404
-          ? (typeof missingCode === "string" ? value.code === missingCode : missingCode?.includes(String(value.code)))
+          ? typeof missingCode === "string"
+            ? value.code === missingCode
+            : missingCode?.includes(String(value.code))
           : value.code === missingCursorCode) &&
         "status" in value &&
         value.status === response.status
@@ -505,14 +507,22 @@ export async function stoaFetchProblemsIndex(
 ): Promise<PublicRead<ProblemsIndexResponse>> {
   const parsed = LedgerContractsSchema.shape.problems_index_query.unwrap().safeParse(query);
   if (!parsed.success) return { state: "unavailable", reason: "invalid_response" };
-  const after = parsed.data.after;
+  const { after, snapshot } = parsed.data;
+  const params = new URLSearchParams(parsed.data);
   const result = await readPublic(
-    `/problems.json${after === undefined ? "" : `?after=${encodeURIComponent(after)}`}`,
+    `/problems.json${params.size === 0 ? "" : `?${params}`}`,
     stoaOrigin,
     ProblemsIndexResponseSchema,
-    10,
+    // Ranking and visibility are live. Next's persistent fetch cache must not
+    // hide a CURSOR_INVALID refusal behind a previously successful page.
+    0,
+    undefined,
+    "CURSOR_INVALID",
   );
   if (result.state !== "ok") return result;
+  if (snapshot !== undefined && result.data.snapshot !== Number(snapshot)) {
+    return { state: "unavailable", reason: "invalid_response" };
+  }
   const { problems, next_after } = result.data;
   const seen = new Set<string>();
   let invalidPage = false;

@@ -333,7 +333,13 @@ describe("public-ledger client", () => {
 
   test("claim revision comparison reads only the adjacent exact version at the same cut", async () => {
     const face = JSON.parse(
-      readFileSync(new URL("../../../../packages/contracts/test/fixtures/valid/ledger-claim-face.json", import.meta.url), "utf8"),
+      readFileSync(
+        new URL(
+          "../../../../packages/contracts/test/fixtures/valid/ledger-claim-face.json",
+          import.meta.url,
+        ),
+        "utf8",
+      ),
     );
     const requests: string[] = [];
     let wrongPriorCut = false;
@@ -364,7 +370,9 @@ describe("public-ledger client", () => {
     expect(plain).toContain("compare=previous#revision-comparison");
     expect(plain).not.toContain("Prior exact formulation");
     requests.length = 0;
-    const compared = renderToStaticMarkup(await ClaimPage({ params, searchParams: Promise.resolve(query) }));
+    const compared = renderToStaticMarkup(
+      await ClaimPage({ params, searchParams: Promise.resolve(query) }),
+    );
     expect(requests).toEqual([
       "/p/P-CALIBRATION/claims/C-1%402.json?through=3",
       "/p/P-CALIBRATION/claims/C-1%401.json?through=3",
@@ -374,12 +382,16 @@ describe("public-ledger client", () => {
     expect(compared).toContain("Revised falsifier.");
     expect(compared).toContain("standing and reviews on this page belong to C-1@2");
     wrongPriorCut = true;
-    const partial = renderToStaticMarkup(await ClaimPage({ params, searchParams: Promise.resolve(query) }));
+    const partial = renderToStaticMarkup(
+      await ClaimPage({ params, searchParams: Promise.resolve(query) }),
+    );
     expect(partial).toContain("The exact public statement could not be read");
     expect(partial).not.toContain("Prior exact formulation");
     expect(partial).toContain("Revised exact formulation.");
     setMockFetch(async () => new Response(null, { status: 503 }));
-    const retry = renderToStaticMarkup(await ClaimPage({ params, searchParams: Promise.resolve(query) }));
+    const retry = renderToStaticMarkup(
+      await ClaimPage({ params, searchParams: Promise.resolve(query) }),
+    );
     expect(retry).toContain('name="compare" value="previous"');
     expect(retry).toContain('name="through" value="3"');
   });
@@ -622,6 +634,55 @@ describe("public-ledger client", () => {
     if (weightedResult.state === "ok") {
       expect(weightedResult.data.problems.map((p) => p.id)).toEqual(["P-Z999", "P-A001"]);
     }
+  });
+
+  test("directory continuation preserves the snapshot and bypasses persistent caching (unit fetch double)", async () => {
+    let requested = "";
+    let page: object = { ...MOCK_PROBLEMS_INDEX, snapshot: 42 };
+    setMockFetch(async (url, init) => {
+      requested = String(url);
+      expect((init as { next: { revalidate: number } }).next.revalidate).toBe(0);
+      return Response.json(page);
+    });
+    const query = { after: "P-S:A", snapshot: "42" };
+    expect((await stoaFetchProblemsIndex(PRODUCTION_STOA_ORIGIN, query)).state).toBe("ok");
+    expect(requested).toBe(`${PRODUCTION_STOA_ORIGIN}/problems.json?after=P-S%3AA&snapshot=42`);
+    for (const invalid of [MOCK_PROBLEMS_INDEX, { ...MOCK_PROBLEMS_INDEX, snapshot: 43 }]) {
+      page = invalid;
+      expect(await stoaFetchProblemsIndex(PRODUCTION_STOA_ORIGIN, query)).toEqual({
+        state: "unavailable",
+        reason: "invalid_response",
+      });
+    }
+    setMockFetch(async () =>
+      Response.json({ status: 400, code: "CURSOR_INVALID" }, { status: 400 }),
+    );
+    expect(await stoaFetchProblemsIndex(PRODUCTION_STOA_ORIGIN, query)).toEqual({
+      state: "not_found",
+      origin: PRODUCTION_STOA_ORIGIN,
+    });
+  });
+
+  test("directory human and canonical links carry snapshot; rejected continuation offers a first-page restart", async () => {
+    process.env.STOA_ORIGIN = STAGING_STOA_ORIGIN;
+    let changed = false;
+    setMockFetch(async (url) => {
+      expect(String(url)).toBe(`${STAGING_STOA_ORIGIN}/problems.json?after=P-S%3AA&snapshot=42`);
+      return changed
+        ? Response.json({ status: 400, code: "CURSOR_INVALID" }, { status: 400 })
+        : Response.json({ ...MOCK_PROBLEMS_INDEX, snapshot: 42, next_after: "P-SP4D" });
+    });
+    const props = { searchParams: Promise.resolve({ after: "P-S:A", snapshot: "42" }) };
+    const html = renderToStaticMarkup(await ProblemsPage(props));
+    expect(html).toContain('href="/problems?after=P-SP4D&amp;snapshot=42"');
+    expect(html).toContain(`${STAGING_STOA_ORIGIN}/problems.json?after=P-S%3AA&amp;snapshot=42`);
+    expect(html).toContain(`${STAGING_STOA_ORIGIN}/problems.md?after=P-S%3AA&amp;snapshot=42`);
+    changed = true;
+    const restart = renderToStaticMarkup(await ProblemsPage(props));
+    expect(restart).toContain("Restart the problem directory");
+    expect(restart).toContain('href="/problems"');
+    expect(restart).not.toContain('href="/problems?after=');
+    expect(restart).not.toContain("No public problems after this position");
   });
 });
 
@@ -1212,11 +1273,32 @@ describe("ProblemPage Server Component", () => {
   test("recent research leads readers to corrected sources, proof gaps and published research at this snapshot", async () => {
     const base = "/p/P-SP4D";
     const records = [
-      ["citation.corrected", "citation", "L-1", 2, "/citations/L-1@2.json?through=8", "/citations/L-1@2?through=8"],
-      ["gap.closed-by", "gap", "G-2", 2, "/gaps.json?target=G-2&through=8", "/gaps?target=G-2&through=8"],
+      [
+        "citation.corrected",
+        "citation",
+        "L-1",
+        2,
+        "/citations/L-1@2.json?through=8",
+        "/citations/L-1@2?through=8",
+      ],
+      [
+        "gap.closed-by",
+        "gap",
+        "G-2",
+        2,
+        "/gaps.json?target=G-2&through=8",
+        "/gaps?target=G-2&through=8",
+      ],
       ["question.answered", "question", "Q-3", 2, null, "/questions?through=8&target=Q-3"],
       ["conflict.normalized", "conflict", "CF-4", 1, null, "/conflicts?through=8&target=CF-4"],
-      ["synthesis.created", "synthesis", "SYNTH-5", 1, "/syntheses/SYNTH-5@1.json", "/syntheses/SYNTH-5@1"],
+      [
+        "synthesis.created",
+        "synthesis",
+        "SYNTH-5",
+        1,
+        "/syntheses/SYNTH-5@1.json",
+        "/syntheses/SYNTH-5@1",
+      ],
       ["review.created", "review", "R-6", 1, "/reviews/R-6.json", null],
       ["relation.disputed", "relation", "REL-7", 2, null, null],
       ["question.leased", "question", "Q-8", 2, null, null],
@@ -1224,7 +1306,10 @@ describe("ProblemPage Server Component", () => {
     const history = problemResearchHistory(records.length);
     for (const [index, [type, kind, id, version, source]] of records.entries()) {
       Object.assign(history.events[index]!.event!, {
-        type, object_kind: kind, object_id: id, object_version: version,
+        type,
+        object_kind: kind,
+        object_id: id,
+        object_version: version,
         object_url: source === null ? null : base + source,
       });
     }
@@ -1233,7 +1318,9 @@ describe("ProblemPage Server Component", () => {
         ? Response.json(history)
         : Response.json({ ...MOCK_PROBLEM_FACE, cursor: records.length }),
     );
-    const html = renderToStaticMarkup(await ProblemPage({ params: Promise.resolve({ slug: "P-SP4D" }) }));
+    const html = renderToStaticMarkup(
+      await ProblemPage({ params: Promise.resolve({ slug: "P-SP4D" }) }),
+    );
     expect(html.match(/data-research-seq=/g)?.length).toBe(7);
     for (const [index, [, , , , , human]] of records.entries()) {
       if (human === null) continue;
@@ -1249,9 +1336,7 @@ describe("ProblemPage Server Component", () => {
   test("recent research distinguishes an empty window from failed or mismatched public reads", async () => {
     let response: Response;
     setMockFetch(async (input) =>
-      String(input).includes("/events.json")
-        ? response.clone()
-        : Response.json(MOCK_PROBLEM_FACE),
+      String(input).includes("/events.json") ? response.clone() : Response.json(MOCK_PROBLEM_FACE),
     );
     for (const candidate of [
       new Response("Unavailable", { status: 503 }),
@@ -2090,6 +2175,7 @@ describe("ExplorePage Server Component", () => {
           { ...problem, id: "P-ZZ", title: null },
         ],
         next_after: "P-ZZ",
+        snapshot: 42,
       });
     });
     const html = renderToStaticMarkup(await ExplorePage());
@@ -2098,7 +2184,7 @@ describe("ExplorePage Server Component", () => {
     expect(html).not.toContain("<b>seven</b>");
     expect(html).toContain('href="/p/P-ZZ"');
     expect(html).toContain("<code>P-ZZ</code>");
-    expect(html).toContain('href="/problems?after=P-ZZ"');
+    expect(html).toContain('href="/problems?after=P-ZZ&amp;snapshot=42"');
   });
 
   test("ExplorePage renders empty state when no problems exist", async () => {
@@ -2936,14 +3022,26 @@ describe("Discovery Fetchers and Agora Pages (W8.2)", () => {
 
   test("FellowPage shows each review's scientific fate at its exact public cut", async () => {
     const review = {
-      review_id: "R-21", problem_id: "P-4DSP", target_claim_id: "C-1", target_version: 3,
-      verdict: "confirm", tier: "T1", basis: "Checked every finite case independently.",
-      created_at: "2026-09-05T00:00:00.000Z", sponsor_at_event: "SPON-PUBLISHED",
+      review_id: "R-21",
+      problem_id: "P-4DSP",
+      target_claim_id: "C-1",
+      target_version: 3,
+      verdict: "confirm",
+      tier: "T1",
+      basis: "Checked every finite case independently.",
+      created_at: "2026-09-05T00:00:00.000Z",
+      sponsor_at_event: "SPON-PUBLISHED",
     };
     for (const outcome of [
       {
-        status: "available", through: 42, disposition: "disputed", review_state: "contested",
-        latest_version: 4, stale: false, withdrawn: false, contribution: "no-current-support",
+        status: "available",
+        through: 42,
+        disposition: "disputed",
+        review_state: "contested",
+        latest_version: 4,
+        stale: false,
+        withdrawn: false,
+        contribution: "no-current-support",
       },
       { status: "unavailable", withdrawn: true },
     ]) {
@@ -2951,7 +3049,9 @@ describe("Discovery Fetchers and Agora Pages (W8.2)", () => {
         async () => Response.json({ ...MOCK_FELLOW_CARD, reviews: [{ ...review, outcome }] }),
         { preconnect: originalFetch.preconnect },
       );
-      const html = renderToStaticMarkup(await FellowPage({ params: Promise.resolve({ name: "gauss-agent" }) }));
+      const html = renderToStaticMarkup(
+        await FellowPage({ params: Promise.resolve({ name: "gauss-agent" }) }),
+      );
       expect(html).toContain("SPON-PUBLISHED");
       if (outcome.status === "available") {
         expect(html).toContain("At ledger sequence 42, reviewed v3: disputed; contested.");

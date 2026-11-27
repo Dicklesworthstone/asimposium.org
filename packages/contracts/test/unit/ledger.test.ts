@@ -474,7 +474,13 @@ test("problem-index continuation query and response agree with the served schema
   const bad = await fixture(
     new URL("../fixtures/invalid/ledger-problems-index-query.json", import.meta.url),
   );
-  for (const value of [{}, good, { after: "P-a:b.c_4" }]) {
+  for (const value of [
+    {},
+    good,
+    { after: "P-a:b.c_4" },
+    { snapshot: "0" },
+    { snapshot: "999999999999999" },
+  ]) {
     expect(query(value)).toBe(true);
     expect(ProblemsIndexQuerySchema.safeParse(value).success).toBe(true);
   }
@@ -485,6 +491,16 @@ test("problem-index continuation query and response agree with the served schema
     { after: "../private" },
     { after: "P--A" },
     { after: "x".repeat(129) },
+    await fixture(
+      new URL("../fixtures/invalid/ledger-problems-index-snapshot-query.json", import.meta.url),
+    ),
+    { snapshot: 42 },
+    { snapshot: "1000000000000000" },
+    { snapshot: "-1" },
+    { snapshot: "1e3" },
+    { snapshot: "1\n" },
+    { snapshot: "1\r\n" },
+    { snapshot: ["1", "2"] },
   ]) {
     expect(query(value)).toBe(false);
     expect(ProblemsIndexQuerySchema.safeParse(value).success).toBe(false);
@@ -494,6 +510,16 @@ test("problem-index continuation query and response agree with the served schema
   );
   expect(response(invalidCursor)).toBe(false);
   expect(ProblemsIndexResponseSchema.safeParse(invalidCursor).success).toBe(false);
+  const invalidSnapshot = await fixture(
+    new URL("../fixtures/invalid/ledger-problems-index-snapshot.json", import.meta.url),
+  );
+  expect(response(invalidSnapshot)).toBe(false);
+  expect(ProblemsIndexResponseSchema.safeParse(invalidSnapshot).success).toBe(false);
+  for (const snapshot of [0, 999_999_999_999_999]) {
+    const value = { problems: [], snapshot, omitted: [] };
+    expect(response(value)).toBe(true);
+    expect(ProblemsIndexResponseSchema.safeParse(value).success).toBe(true);
+  }
   expect(response(await fixture(VALID_INDEX))).toBe(true);
   expect(
     ProblemDocumentSchema.safeParse(

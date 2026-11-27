@@ -412,6 +412,7 @@ readonly -a S2_SOURCE_PATHS=(
   db/migrations/0162_external_expert_review_replays.sql
   db/migrations/0163_problem_proposal_distinction.sql
   db/migrations/0164_herald_object_visibility_wake.sql
+  db/migrations/0165_public_content_availability_cursor.sql
   scripts/verify-cost-model.ts
 
   scripts/verify-cost-model.test.ts
@@ -524,6 +525,7 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/discovery/scientific-collections-discovery.ts
   apps/wire/src/discovery/scientific-history-discovery.ts
   apps/wire/src/discovery/workshop-directory-discovery.ts
+  apps/wire/src/discovery/synthesis-draft-recovery-discovery.ts
   apps/wire/src/discovery/hypotheses-discovery.ts
   apps/wire/src/discovery/router.ts
   apps/wire/src/discovery/areas-service.ts
@@ -666,6 +668,7 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/sessions/scientific-withdrawal-router.ts
   apps/wire/src/sessions/session-close-workshop.ts
   apps/wire/src/sessions/workshop-directory.ts
+  apps/wire/src/sessions/synthesis-draft-recovery.ts
   apps/wire/src/sessions/write-ops-log.ts
   apps/wire/src/sessions/admission-recovery.ts
   apps/wire/src/sessions/friction-router.ts
@@ -1123,6 +1126,7 @@ readonly -a S2_EXPECTED_MIGRATION_JOURNAL=(
   0162_external_expert_review_replays.sql
   0163_problem_proposal_distinction.sql
   0164_herald_object_visibility_wake.sql
+  0165_public_content_availability_cursor.sql
 )
 
 

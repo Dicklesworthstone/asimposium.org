@@ -116,6 +116,15 @@ import {
 import { eventTailCursor } from "@asimposium/contracts/event-tail";
 import { evidenceListPath, reviewsListPath } from "@asimposium/contracts/research-lists";
 import {
+  SESSION_SYNTHESIS_DRAFT_INDEX_MAX_BYTES,
+  SessionSynthesisDraftQuerySchema,
+  SYNTHESES_SCHEMA_ID,
+  SYNTHESIS_DRAFT_PAGE_MAX_BYTES,
+  SynthesisIdSchema,
+  sessionSynthesisDraftPath,
+  sessionSynthesisDraftsPath,
+} from "@asimposium/contracts/syntheses";
+import {
   WORKSHOP_DIRECTORY_MAX_RESPONSE_BYTES,
   WORKSHOP_DIRECTORY_SCHEMA_ID,
   WorkshopDirectoryQuerySchema,
@@ -142,11 +151,11 @@ import {
   SERVICE_ENVELOPE_HEADER,
 } from "../auth/http";
 import { wrongPrincipalProblem } from "../auth/refusal";
-import { ACTIVE_DIRECTIVE_AUTHORITY_SQL } from "../directives/active-source.ts";
 import {
   accountSponsorDirectiveOmissions,
   readActiveSponsorDirectives,
 } from "../directives/active.ts";
+import { ACTIVE_DIRECTIVE_AUTHORITY_SQL } from "../directives/active-source.ts";
 import type {
   EncryptedEnrollmentReplay,
   EnrollmentService,
@@ -378,6 +387,11 @@ import {
   clientStatementContextConflict,
   clientStatementContextGuard,
 } from "./statement-context";
+import {
+  readSynthesisDraft,
+  readSynthesisDraftDirectory,
+  SynthesisDraftRecoveryUnavailable,
+} from "./synthesis-draft-recovery.ts";
 import { readWorkingMovesPack } from "./working-moves";
 import { readWorkshopDirectory, WorkshopDirectoryUnavailable } from "./workshop-directory.ts";
 import { reserveWorkshopWrite, workshopRateLimitedProblem } from "./workshop-quota";
@@ -3013,6 +3027,142 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     }
   });
 
+  const synthesisDraftNotFound = () =>
+    privateNoStore(
+      validatedProblem({
+        status: 404,
+        code: "WORKSHOP_NOT_FOUND",
+        title: "No such private synthesis",
+        detail: "No synthesis draft visible to this Fellow matches the request.",
+        fixHint:
+          "Use your own session on the draft's problem and follow its synthesis directory read URLs.",
+      }),
+    );
+  const privateSynthesisRead = async (c: Context<{ Bindings: Env }>, next: () => Promise<void>) => {
+    await next();
+    c.res.headers.set("cache-control", "private, no-store");
+    c.res.headers.set("x-robots-tag", "noindex, nofollow");
+    if (c.req.method === "HEAD")
+      c.res = new Response(null, { status: c.res.status, headers: c.res.headers });
+  };
+  app.use("/v1/sessions/:id/syntheses", privateSynthesisRead);
+  app.use("/v1/sessions/:id/syntheses/:synthesisId", privateSynthesisRead);
+  const handleSynthesisDraftRecovery = async (c: Context<{ Bindings: Env }>) => {
+    const auth = await authenticate(c.req.raw);
+    if (!auth.ok) return privateNoStore(auth.response);
+    const sessionId = c.req.param("id") ?? "";
+    const synthesisId = c.req.param("synthesisId");
+    if (synthesisId !== undefined && !SynthesisIdSchema.safeParse(synthesisId).success)
+      return synthesisDraftNotFound();
+    const params = new URL(c.req.url).searchParams;
+    const parsed = SessionSynthesisDraftQuerySchema.safeParse(Object.fromEntries(params));
+    if (
+      !parsed.success ||
+      new Set(params.keys()).size !== params.size ||
+      (synthesisId !== undefined && params.size > 0)
+    )
+      return privateNoStore(
+        validatedProblem({
+          status: 400,
+          code: "SCHEMA_INVALID",
+          title: "Invalid private synthesis selection",
+          detail:
+            "The directory accepts one after, limit and state value; exact draft reads take no query parameters.",
+          fixHint:
+            "Follow a read_url unchanged, or list drafts with limit=1..100 and optional state=draft|published.",
+          rule: "A5",
+          extensions: {
+            schema: SYNTHESES_SCHEMA_ID,
+            example: { method: "GET", path: sessionSynthesisDraftsPath(sessionId) },
+          },
+        }),
+      );
+    try {
+      const ownedSession = () =>
+        c.env.DB.prepare("SELECT problem_id FROM sessions WHERE session_id = ? AND fellow_id = ?")
+          .bind(sessionId, auth.binding.fellowId)
+          .first<{ problem_id: string }>();
+      const session = await ownedSession();
+      if (
+        session === null ||
+        (auth.binding.grantedResources.problemBinding !== undefined &&
+          auth.binding.grantedResources.problemBinding !== session.problem_id)
+      )
+        return synthesisDraftNotFound();
+      await requireSessionProblemAccess(c.env.DB, session.problem_id, auth.binding, {
+        readOnly: true,
+      });
+      const scope = { sessionId, problemId: session.problem_id, fellowId: auth.binding.fellowId };
+      const face =
+        synthesisId === undefined
+          ? await readSynthesisDraftDirectory(c.env.DB, scope, parsed.data)
+          : await readSynthesisDraft(c.env.DB, scope, synthesisId);
+      if (face === null) return synthesisDraftNotFound();
+      const body = JSON.stringify(face);
+      if (
+        byteLength(body) >
+        (synthesisId === undefined
+          ? SESSION_SYNTHESIS_DRAFT_INDEX_MAX_BYTES
+          : SYNTHESIS_DRAFT_PAGE_MAX_BYTES)
+      )
+        throw new SynthesisDraftRecoveryUnavailable();
+      const etag = `"${await sha256Text(body)}"`;
+      // Rebinding, grant reduction, transfer or withdrawn access during storage
+      // reads must not release private content, including a conditional 304.
+      const current = await authenticate(c.req.raw);
+      if (!current.ok) return privateNoStore(current.response);
+      const currentSession = await ownedSession();
+      if (
+        current.binding.fellowId !== auth.binding.fellowId ||
+        currentSession?.problem_id !== session.problem_id ||
+        (current.binding.grantedResources.problemBinding !== undefined &&
+          current.binding.grantedResources.problemBinding !== session.problem_id)
+      )
+        return synthesisDraftNotFound();
+      await requireSessionProblemAccess(c.env.DB, session.problem_id, current.binding, {
+        readOnly: true,
+      });
+      const next =
+        "next_after" in face && face.next_after !== null
+          ? sessionSynthesisDraftsPath(sessionId, { ...parsed.data, after: face.next_after })
+          : null;
+      const headers = {
+        "content-type": "application/json; charset=utf-8",
+        "cache-control": "private, no-store",
+        "x-robots-tag": "noindex, nofollow",
+        etag,
+        link: `<${SYNTHESES_SCHEMA_ID}#/$defs/${synthesisId === undefined ? "session_draft_index" : "session_draft"}>; rel="describedby"${next === null ? "" : `, <${next}>; rel="next"`}`,
+      };
+      if (
+        c.req
+          .header("if-none-match")
+          ?.split(",")
+          .some((value) => value.trim() === etag)
+      )
+        return new Response(null, { status: 304, headers });
+      return new Response(body, { status: 200, headers });
+    } catch (error) {
+      if (
+        error instanceof SessionProblemMissingError ||
+        error instanceof ProblemArchivedError ||
+        error instanceof AdmissionRequiredError
+      )
+        return synthesisDraftNotFound();
+      return privateNoStore(
+        validatedProblem({
+          status: 503,
+          code: "INTERNAL_ERROR",
+          title: "Private synthesis recovery is unavailable",
+          detail: "The current private synthesis could not be read safely.",
+          fixHint: "Retry the same request without advancing its continuation.",
+          headers: { "retry-after": "5" },
+        }),
+      );
+    }
+  };
+  app.get("/v1/sessions/:id/syntheses", handleSynthesisDraftRecovery);
+  app.get("/v1/sessions/:id/syntheses/:synthesisId", handleSynthesisDraftRecovery);
+
   // A recovery read deliberately includes closed sessions. Keep ownership in
   // the SQL predicate and never load the handback or workshop bodies.
   app.get("/v1/sessions/:id", async (c) => {
@@ -3135,6 +3285,12 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           why: "Find your retained private work on this problem and follow its exact revision read URLs.",
         });
       }
+      if (canRead)
+        nextActions.push({
+          method: "GET",
+          url: sessionSynthesisDraftsPath(row.session_id),
+          why: "Recover your private synthesis drafts and their sponsor or steward publication status, including drafts from earlier sessions.",
+        });
       const body = SessionStatusResponseSchema.parse({
         ...status,
         lifecycle_state: lifecycle,
@@ -3950,7 +4106,9 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         "cache-control": "private, no-store",
         "content-type": "application/json; charset=utf-8",
         etag,
-        ...(selectedClaimLocation === undefined ? {} : { "content-location": selectedClaimLocation }),
+        ...(selectedClaimLocation === undefined
+          ? {}
+          : { "content-location": selectedClaimLocation }),
       };
       if (privatePack !== undefined) {
         let current = false;
@@ -4504,7 +4662,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       const heads = await readPackClaimHeads(db, session.problem_id, cursor, 8);
       for (const head of heads) {
         if (head.statement === null) continue;
-        const pin = PackTargetQuerySchema.safeParse({ profile, target: `${head.id}@${head.version}` });
+        const pin = PackTargetQuerySchema.safeParse({
+          profile,
+          target: `${head.id}@${head.version}`,
+        });
         if (!pin.success) continue;
         targetParam = pin.data.target;
         url.search = new URLSearchParams({
@@ -4518,9 +4679,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       if (targetParam === null) {
         claimSelectionOmission = {
           reason: heads.length === 0 ? "no_published_claim" : "content_unavailable",
-          detail: heads.length === 0
-            ? "No claim has been published at the pack cursor."
-            : "No readable current version was found among the first eight claim heads. Choose an exact target from the public claims list.",
+          detail:
+            heads.length === 0
+              ? "No claim has been published at the pack cursor."
+              : "No readable current version was found among the first eight claim heads. Choose an exact target from the public claims list.",
         };
       }
     }
@@ -4541,7 +4703,12 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         stable_prefix: 2,
       });
 
-    if (profile !== "hello" && profile !== "review-queue" && profile !== "claim" && targetParam === null) {
+    if (
+      profile !== "hello" &&
+      profile !== "review-queue" &&
+      profile !== "claim" &&
+      targetParam === null
+    ) {
       // Coordination can precede the first claim: hypotheses, questions and
       // proof gaps are leaseable objects too. This is current state, not a
       // historical assertion about the pack's captured scientific cursor.
@@ -5127,7 +5294,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               ? [
                   {
                     reason: "moves_unavailable",
-                    detail: "working-moves: claim standing could not be verified at the pack cursor.",
+                    detail:
+                      "working-moves: claim standing could not be verified at the pack cursor.",
                   },
                 ]
               : [],
@@ -5254,6 +5422,13 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                 public_read: false,
                 requires: ["workshop:read"],
               },
+              {
+                method: "GET" as const,
+                url: sessionSynthesisDraftsPath(session.session_id),
+                why: "Recover your saved synthesis drafts. Published entries provide an exact public read URL and pins for an explicit shared handoff.",
+                public_read: false,
+                requires: ["workshop:read"],
+              },
             ]
           : []),
         ...(hasLeaseContext || leasesTruncated
@@ -5290,12 +5465,14 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           : []),
         ...(claimSelectionOmission === undefined
           ? []
-          : [{
-              method: "GET" as const,
-              url: `/p/${session.problem_id}/claims.json?through=${cursor}`,
-              why: "Browse the public claims at this cursor and request profile=claim with an exact target.",
-              public_read: true,
-            }]),
+          : [
+              {
+                method: "GET" as const,
+                url: `/p/${session.problem_id}/claims.json?through=${cursor}`,
+                why: "Browse the public claims at this cursor and request profile=claim with an exact target.",
+                public_read: true,
+              },
+            ]),
         ...targetSection.candidates
           .filter((item) => item.kind === "claim-dependency")
           // Actions are mandatory envelope bytes. Every premise carries its
@@ -5312,9 +5489,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               {
                 method: "GET" as const,
                 url: `/v1/sessions/${session.session_id}/pack?profile=review&target=${encodeURIComponent(firstReviewTarget)}&max_tokens=8000`,
-                why: reviewQueue.acceptedTarget !== undefined
-                  ? "Resume the exact claim version you accepted for review in an isolated pack."
-                  : "Read the selected claim's exact version in an isolated review pack; submission rechecks authorization and the review validator.",
+                why:
+                  reviewQueue.acceptedTarget !== undefined
+                    ? "Resume the exact claim version you accepted for review in an isolated pack."
+                    : "Read the selected claim's exact version in an isolated review pack; submission rechecks authorization and the review validator.",
                 public_read: false,
               },
             ]
@@ -13322,6 +13500,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       anchors_count: publication.anchors.length,
       dropped_single_author_count: droppedSingleAuthorCount,
       created_at: createdAt,
+      read_url: sessionSynthesisDraftPath(sessionId, synthesisId),
     });
     try {
       const result = await replayOrCommit(

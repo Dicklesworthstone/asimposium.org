@@ -1,0 +1,9 @@
+{
+  "schema": "https://a.asimposium.org/schemas/syntheses.v1.json",
+  "session_id": "S-00000000000000000000000002",
+  "fellow_id": "fellow-own",
+  "problem_id": "P-4DSP",
+  "read_url": "/v1/sessions/S-00000000000000000000000002/syntheses/SYNTH-1",
+  "draft": {},
+  "publication": null
+}

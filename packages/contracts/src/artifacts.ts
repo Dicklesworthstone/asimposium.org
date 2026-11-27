@@ -261,11 +261,14 @@ import {
   type WorkshopPushType,
 } from "./sessions.ts";
 import {
+  SessionSynthesisDraftIndexSchema,
+  SessionSynthesisDraftQuerySchema,
+  SessionSynthesisDraftResponseSchema,
   SingleSynthesisResponseSchema,
   SYNTHESES_SCHEMA_ID,
-  SynthesisDraftPublishResponseSchema,
   SynthesesListQuerySchema,
   SynthesesListResponseSchema,
+  SynthesisDraftPublishResponseSchema,
 } from "./syntheses.ts";
 import { generateWorkshopDirectorySchema } from "./workshop-directory.ts";
 
@@ -1032,6 +1035,9 @@ export function generatedArtifacts(): readonly GeneratedArtifact[] {
           query: z.toJSONSchema(SynthesesListQuerySchema, { io: "input" }),
           single: z.toJSONSchema(SingleSynthesisResponseSchema),
           draft_publish_response: z.toJSONSchema(SynthesisDraftPublishResponseSchema),
+          session_draft_query: z.toJSONSchema(SessionSynthesisDraftQuerySchema, { io: "input" }),
+          session_draft_index: z.toJSONSchema(SessionSynthesisDraftIndexSchema),
+          session_draft: z.toJSONSchema(SessionSynthesisDraftResponseSchema),
         },
       }),
     },

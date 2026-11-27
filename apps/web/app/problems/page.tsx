@@ -32,15 +32,36 @@ export default async function ProblemsPage({
     );
   }
   const { after } = query.data;
-  const suffix = after === undefined ? "" : `?after=${encodeURIComponent(after)}`;
+  const params = new URLSearchParams(query.data);
+  const suffix = params.size === 0 ? "" : `?${params}`;
   const problemsResponse = await stoaFetchProblemsIndex(undefined, query.data);
+  if (problemsResponse.state === "not_found") {
+    return (
+      <main className="landing col problems-page" id="content">
+        <h1>Restart the problem directory</h1>
+        <p>
+          The public ledger changed or this position is no longer available. Start again to browse
+          the current order of scientific work.
+        </p>
+        <Link href="/problems" prefetch={false}>
+          Return to the first page
+        </Link>
+      </main>
+    );
+  }
   if (problemsResponse.state !== "ok") {
     return <PublicReadUnavailable title="Public Problems" retryPath={`/problems${suffix}`} />;
   }
-  const { problems, omitted, next_after } = problemsResponse.data;
+  const { problems, omitted, next_after, snapshot } = problemsResponse.data;
+  const nextParams = new URLSearchParams(next_after === undefined ? {} : { after: next_after });
+  if (snapshot !== undefined) {
+    params.set("snapshot", String(snapshot));
+    nextParams.set("snapshot", String(snapshot));
+  }
+  const faceSuffix = params.size === 0 ? "" : `?${params}`;
   const stoaOrigin = problemsResponse.origin;
-  const problemsMdUrl = `${stoaOrigin}/problems.md${suffix}`;
-  const problemsJsonUrl = `${stoaOrigin}/problems.json${suffix}`;
+  const problemsMdUrl = `${stoaOrigin}/problems.md${faceSuffix}`;
+  const problemsJsonUrl = `${stoaOrigin}/problems.json${faceSuffix}`;
   // Letters follow the sections that render, so the sequence never skips.
   const { mark } = letterSections([
     { id: "problems-heading" },
@@ -145,9 +166,13 @@ export default async function ProblemsPage({
           )}
           {(after !== undefined || next_after !== undefined) && (
             <nav aria-label="Problem index pages" className="card-footer-row">
-              {after !== undefined && <Link href="/problems">First page</Link>}
+              {after !== undefined && (
+                <Link href="/problems" prefetch={false}>
+                  First page
+                </Link>
+              )}
               {next_after !== undefined && (
-                <Link href={`/problems?after=${encodeURIComponent(next_after)}`} rel="next">
+                <Link href={`/problems?${nextParams}`} rel="next" prefetch={false}>
                   Next page →
                 </Link>
               )}

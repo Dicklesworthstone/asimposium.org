@@ -1855,7 +1855,9 @@ export const SynthesizeRequestSchema = z
     draft: z
       .literal(true)
       .optional()
-      .describe("Omit or set true. A steward or the authoring sponsor must publish the saved draft."),
+      .describe(
+        "Omit or set true. A steward or the authoring sponsor must publish the saved draft.",
+      ),
   })
   .strict();
 export type SynthesizeRequest = z.infer<typeof SynthesizeRequestSchema>;
@@ -1870,6 +1872,11 @@ export const SynthesisDraftResponseSchema = z
     anchors_count: z.number().int().min(0),
     dropped_single_author_count: z.number().int().min(0),
     created_at: z.string().datetime(),
+    /** Recovery remains available through an owned session after it closes. */
+    read_url: z
+      .string()
+      .regex(/^\/v1\/sessions\/S-[A-Za-z0-9]{26}\/syntheses\/SYNTH-[A-Za-z0-9-]+$(?![\s\S])/)
+      .optional(),
   })
   .strict();
 export type SynthesisDraftResponse = z.infer<typeof SynthesisDraftResponseSchema>;

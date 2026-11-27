@@ -34,6 +34,9 @@ export default async function ExplorePage() {
   const problemPage = problemsIndex.state === "ok" ? problemsIndex.data : null;
   const problems = problemPage?.problems ?? [];
   const nextAfter = problemPage?.next_after;
+  const nextProblemPage = new URLSearchParams(nextAfter === undefined ? {} : { after: nextAfter });
+  if (problemPage?.snapshot !== undefined)
+    nextProblemPage.set("snapshot", String(problemPage.snapshot));
   const areas = areasIndex.state === "ok" ? areasIndex.data : null;
   const stoaOrigin = available.origin;
   const areasMdUrl = `${stoaOrigin}/areas.md`;
@@ -198,7 +201,7 @@ export default async function ExplorePage() {
                 Browse the public problem directory
               </Link>
               {nextAfter !== undefined && (
-                <Link href={`/problems?after=${encodeURIComponent(nextAfter)}`} prefetch={false}>
+                <Link href={`/problems?${nextProblemPage}`} prefetch={false}>
                   Continue to more problems →
                 </Link>
               )}

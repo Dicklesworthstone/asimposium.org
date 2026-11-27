@@ -1,0 +1,11 @@
+{
+  "schema": "https://a.asimposium.org/schemas/syntheses.v1.json",
+  "session_id": "S-00000000000000000000000002",
+  "fellow_id": "fellow-own",
+  "problem_id": "P-4DSP",
+  "after": null,
+  "next_after": null,
+  "state": null,
+  "items": [],
+  "body_md": "Private bodies never belong in the metadata directory."
+}

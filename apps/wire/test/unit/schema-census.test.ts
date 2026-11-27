@@ -38,6 +38,7 @@ function names(db: Database, type: "table" | "trigger" | "index"): string[] {
 const CENSUS_TABLES = [
   "events",
   "event_content",
+  "public_content_removals",
   "outbox",
   "idempotency",
   "public_cursor",
@@ -93,6 +94,10 @@ const CENSUS_TRIGGERS = [
   "events_immutable_before_delete",
   "events_chain_head_before_insert",
   "event_content_lawful_redaction_only",
+  // Same-sequence availability changes invalidate public directory snapshots.
+  "event_content_redaction_public_cursor",
+  "event_content_delete_public_cursor",
+  "event_content_restore_public_cursor",
   // The W3.7 per-Fellow credential cap and the three guards that make its
   // capacity release one-way. 0011 already rebuilt fellow_tokens once; if a
   // future rebuild drops any of these, the cap silently stops existing and a

@@ -289,6 +289,28 @@ describe("discovery generators (W1.6)", () => {
     ).toEqual([]);
   });
 
+  test("own synthesis recovery advertises private metadata and full reads with bounded continuation", () => {
+    const doc = JSON.parse(generateOpenApiDocument());
+    const directory = doc.paths["/v1/sessions/{id}/syntheses"].get;
+    const exact = doc.paths["/v1/sessions/{id}/syntheses/{synthesisId}"].get;
+    for (const [operation, shape] of [
+      [directory, "session_draft_index"],
+      [exact, "session_draft"],
+    ]) {
+      expect(operation.security).toEqual([{ bearerAuth: [] }]);
+      expect(operation.responses["200"].content["application/json"].schema.$ref).toBe(
+        `https://a.asimposium.org/schemas/syntheses.v1.json#/$defs/${shape}`,
+      );
+      expect(operation.responses["304"].description).toContain("private, no-store");
+    }
+    expect(
+      directory.parameters
+        .filter((p: { in: string }) => p.in === "query")
+        .map((p: { name: string }) => p.name),
+    ).toEqual(["after", "limit", "state"]);
+    expect(exact.parameters.filter((p: { in: string }) => p.in === "query")).toEqual([]);
+  });
+
   test("question, retraction and conflict discovery exposes mounted faces and resolving write contracts", () => {
     const doc = JSON.parse(generateOpenApiDocument());
     for (const section of ["questions", "retractions", "conflicts"]) {
@@ -349,8 +371,11 @@ describe("discovery generators (W1.6)", () => {
           }
           expect(parameters[1].description).toContain("Requires the original through cursor");
           expect(parameters[2].description).toContain("defaults to 50");
-          expect(parameters.at(-1).description).toContain(section === "retractions"
-            ? "cannot be combined with after" : "cannot be combined with after or status");
+          expect(parameters.at(-1).description).toContain(
+            section === "retractions"
+              ? "cannot be combined with after"
+              : "cannot be combined with after or status",
+          );
           expect(operation.responses["200"].content[media as string]).toBeDefined();
           expect(operation.responses["200"].headers["Content-Location"]).toBeDefined();
           expect(operation.responses["200"].headers.Link).toBeDefined();

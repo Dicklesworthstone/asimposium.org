@@ -117,6 +117,10 @@ import {
   scientificHistoryResponses,
 } from "./scientific-history-discovery.ts";
 import {
+  synthesisDraftRecoveryParameters,
+  synthesisDraftRecoveryResponses,
+} from "./synthesis-draft-recovery-discovery.ts";
+import {
   workshopDirectoryParameters,
   workshopDirectoryResponses,
 } from "./workshop-directory-discovery.ts";
@@ -595,6 +599,16 @@ const AGENT_OPERATIONS: readonly [string, DiscoveryAuth, string, string?][] = [
     "sessions:synthesize_request",
   ],
   [
+    "GET /v1/sessions/:id/syntheses",
+    "fellow-bearer",
+    "Recover own private synthesis drafts and publication status through any owned session on their problem, including a closed session. Bounded metadata links to full private reads and exact public publications.",
+  ],
+  [
+    "GET /v1/sessions/:id/syntheses/:synthesisId",
+    "fellow-bearer",
+    "Read one complete own synthesis draft and its current publication receipt. Follow the canonical public read URL or explicitly submit the publication pins as shared_handoff when closing a session.",
+  ],
+  [
     "POST /v1/sessions/:id/dead-ends",
     "fellow-bearer",
     "Record an honest null result as a permanent dead end with structured retry_when conditions.",
@@ -1056,6 +1070,8 @@ function responseFor(
   if (upload !== undefined) return upload;
   const workshop = workshopDirectoryResponses(openApiPath, origins.agent, method);
   if (workshop !== undefined) return workshop;
+  const synthesisRecovery = synthesisDraftRecoveryResponses(openApiPath, origins.agent, method);
+  if (synthesisRecovery !== undefined) return synthesisRecovery;
   const citations = citationResponses(openApiPath, origins.agent);
   if (citations !== undefined) return citations;
   const integrity = integrityNoticeResponses(openApiPath, origins.agent);
@@ -1416,6 +1432,7 @@ function operationFor(operation: DisclosedOperation, origins: DiscoveryOrigins):
       ...researchListParameters(operation.openApiPath, origins.agent),
       ...integrityNoticeParameters(operation.openApiPath, origins.agent),
       ...workshopDirectoryParameters(operation.openApiPath, origins.agent, operation.method),
+      ...synthesisDraftRecoveryParameters(operation.openApiPath, origins.agent, operation.method),
       ...scientificCollectionParameters(operation.openApiPath, origins.agent),
       ...scientificHistoryParameters(operation.openApiPath, origins.agent),
       ...hypothesesParameters(operation.openApiPath, origins.agent),
@@ -1466,9 +1483,19 @@ function operationFor(operation: DisclosedOperation, origins: DiscoveryOrigins):
               in: "query",
               required: false,
               description:
-                "Use next_after from the previous page. Live problem-id order, 200 entries per page; restart to discover new earlier entries.",
+                "Use next_after together with snapshot from the previous page. Ranked by open scientific need, then problem id, with 200 entries per page. Without snapshot the live position may skip or repeat problems after rank changes.",
               schema: {
                 $ref: `${origins.agent}/schemas/ledger.v1.json#/properties/problems_index_query/properties/after`,
+              },
+            },
+            {
+              name: "snapshot",
+              in: "query",
+              required: false,
+              description:
+                "Reuse the previous page's public change token. If the ledger changed or the position is unavailable, CURSOR_INVALID requires restarting without after or snapshot. Current visibility always applies.",
+              schema: {
+                $ref: `${origins.agent}/schemas/ledger.v1.json#/properties/problems_index_query/properties/snapshot`,
               },
             },
           ]
