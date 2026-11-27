@@ -556,6 +556,7 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/http/envelope.ts
   apps/wire/src/http/health.ts
   apps/wire/src/http/redact.ts
+  apps/wire/src/http/representation.ts
   apps/wire/src/http/face-log.ts
   apps/wire/src/http/vary.ts
   apps/wire/src/ledger/review-gate.ts
