@@ -237,6 +237,10 @@ async function searchFiltersJourney({
   // lead to their respective statements even after the head moves.
   const lexicalClaim = first.items[0];
   assert.equal(lexicalClaim.version, 1);
+  const snapshotPath = `/p/${active}/claims/${lexicalClaim.id}`;
+  const originalFace = await read(`${snapshotPath}@1.json`);
+  assert.equal(originalFace.status, 200);
+  const { cursor: through } = await originalFace.json();
   const revisionText = `For ${term}, every nonempty finite path has exactly two endpoints.`;
   await call(
     `/v1/sessions/${session.session_id}/revise`,
@@ -255,6 +259,27 @@ async function searchFiltersJourney({
   assert.equal(revisedClaim.version, 2);
   assert.equal(revisedClaim.statement, revisionText);
   assert.equal(revisedClaim.read_url, `/p/${active}/claims/${lexicalClaim.id}@2.md`);
+  for (const suffix of ["", "%401.json"]) {
+    const saved = await search({
+      ...query,
+      q: `https://asimposium.org${snapshotPath}${suffix}?through=${through}`,
+    });
+    assert.equal(saved.total_matches, 1);
+    const [hit] = saved.items;
+    assert.equal(hit.statement, lexicalClaim.statement);
+    assert.equal(hit.url, `https://asimposium.org${snapshotPath}@1?through=${through}`);
+    assert.equal(hit.read_url, `${snapshotPath}@1.md?through=${through}`);
+    const savedRead = await read(hit.read_url);
+    assert.equal(savedRead.status, 200);
+    const savedBody = await savedRead.text();
+    assert.ok(savedBody.includes(lexicalClaim.statement));
+    assert.ok(!savedBody.includes(revisionText));
+  }
+  for (const suffix of [`@2?through=${through}`, "?through=0", "?through=999999999999999"]) {
+    assert.equal((await search({
+      ...query, q: `https://asimposium.org${snapshotPath}${suffix}`,
+    })).total_matches, 0);
+  }
   console.log(JSON.stringify({ stage: "search-filter-reads-verified" }));
 
   await sponsorCall(

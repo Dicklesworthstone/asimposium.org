@@ -156,6 +156,33 @@ describe("W6.8 Search contracts", () => {
       });
     });
 
+    test("preserves ledger cuts on readable claim URLs and refuses invalid snapshot forms", () => {
+      const base = "https://a.asimposium.org/p/P-ALPHA/claims/C-1";
+      expect(parseExactReference(`${base}%402.json?through=15`)).toEqual({
+        kind: "claim",
+        id: "C-1",
+        problemId: "P-ALPHA",
+        version: 2,
+        through: 15,
+      });
+      expect(parseExactReference(`${base}?through=0`)).toEqual({
+        kind: "claim",
+        id: "C-1",
+        problemId: "P-ALPHA",
+        through: 0,
+      });
+      for (const suffix of [
+        "?through=01",
+        "?through=-1",
+        "?through=1&through=2",
+        "?through=1000000000000000",
+        ".bib?through=2",
+        ".csl.json?through=2",
+      ]) {
+        expect(parseExactReference(base + suffix)).toBeNull();
+      }
+    });
+
     test("refuses ambiguous, unsafe or foreign canonical targets without a head fallback", () => {
       for (const target of [
         "C-1@0",

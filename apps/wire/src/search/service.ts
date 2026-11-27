@@ -101,8 +101,10 @@ export async function executeSearch(
   const sourceCursor = cursorResult.cursor;
 
   const exactTarget = parseExactReference(request.q);
-  const pinnedClaim = exactTarget?.kind === "claim" && exactTarget.version !== undefined;
-  // A version-pinned reference is a single result; no cursor was ever issued for it.
+  const pinnedClaim =
+    exactTarget?.kind === "claim" &&
+    (exactTarget.version !== undefined || exactTarget.through !== undefined);
+  // A version or ledger snapshot selects one publication and has no next page.
   if (pinnedClaim && request.cursor !== undefined) throw new SearchContinuationError("invalid");
 
   // Only claim text depends on the async index. Scope the lag signal to
@@ -176,7 +178,7 @@ export async function executeSearch(
       }
 
       if ((filterKind === "all" || filterKind === "claim") && exactTarget.kind === "claim") {
-        if (exactTarget.version !== undefined) {
+        if (pinnedClaim) {
           // A historical claim is filtered by its problem's current lifecycle
           // and areas, not by an old statement's metadata. resolveExact runs
           // again after hydration, including the no-FTS exact-version path.
@@ -190,11 +192,29 @@ export async function executeSearch(
               .first<{ id: string }>();
             if (matchingProblem === null) return found;
           }
+          let version = exactTarget.version;
+          if (exactTarget.through !== undefined) {
+            // Select the version at the cited cut before applying current content
+            // controls. A hidden head must never resurrect an earlier revision.
+            const selected = await db
+              .prepare(`
+              SELECT e.object_version AS version FROM events e
+              JOIN problems p ON p.id = e.problem_id
+              WHERE e.problem_id = ?1 AND e.object_id = ?2 AND e.object_kind = 'claim'
+                AND e.type IN ('claim.created','claim.revised') AND e.seq <= ?3
+                AND ?3 <= p.public_seq AND p.status <> 'private-draft' AND p.unlisted = 0
+                AND (?4 IS NULL OR e.object_version = ?4)
+              ORDER BY e.seq DESC LIMIT 1`)
+              .bind(exactTarget.problemId, exactTarget.id, exactTarget.through, version ?? null)
+              .first<{ version: number }>();
+            version = selected?.version;
+          }
+          if (version === undefined) return found;
           const claim = await findScientificClaim(
             db,
             exactTarget.problemId,
             exactTarget.id,
-            exactTarget.version,
+            version,
             { discoverableOnly: true },
           );
           if (claim) {
@@ -203,12 +223,16 @@ export async function executeSearch(
               .bind(claim.eventId)
               .first<{ provenance_json: string }>();
             const screeningNotice = publicationScreeningNotice(receipt?.provenance_json);
+            const path = `/p/${encodeURIComponent(exactTarget.problemId)}/claims/${claim.claimId}@${claim.version}`;
+            const snapshot =
+              exactTarget.through === undefined ? "" : `?through=${exactTarget.through}`;
             found.push({
               kind: "claim",
               id: claim.claimId,
               problem_id: exactTarget.problemId,
               version: claim.version,
-              url: `https://asimposium.org/p/${exactTarget.problemId}/claims/${claim.claimId}@${claim.version}`,
+              url: `https://asimposium.org${path}${snapshot}`,
+              read_url: `${path}.md${snapshot}`,
               title: `Claim ${claim.claimId}@${claim.version} in ${exactTarget.problemId}`,
               statement: claim.statement,
               snippet: claim.statement.slice(0, SEARCH_SNIPPET_MAX_LENGTH),
@@ -347,7 +371,7 @@ export async function executeSearch(
           {
             reason: "exact_version_only",
             detail:
-              "A version-pinned claim reference resolves only that publication, with no current-head or lexical fallback.",
+              "An exact claim version or ledger snapshot selects only the cited publication. Current visibility controls apply.",
           },
         ]
       : []),
@@ -433,9 +457,10 @@ export async function executeSearch(
     items: items.map((item) => ({
       ...item,
       read_url:
-        item.kind === "problem" && item.version !== undefined
+        item.read_url ??
+        (item.kind === "problem" && item.version !== undefined
           ? statementVersionPath(item.id, item.version, "md")
-          : `${new URL(item.url).pathname}.md`,
+          : `${new URL(item.url).pathname}.md`),
     })),
     ...(nextCursor === null ? {} : { cursor: nextCursor }),
     omitted: omissions,

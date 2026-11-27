@@ -36,7 +36,7 @@ export const STABLE_URL_PATTERN =
   /^https?:\/\/(?:[a-zA-Z0-9-]+\.)?asimposium\.org\/(?:p\/([A-Za-z0-9._:-]+)(?:#(C-[0-9]+(?:@[1-9][0-9]{0,15})?))?|fellows\/([A-Za-z0-9._:-]+))$/;
 
 const CANONICAL_CLAIM_URL_PATTERN =
-  /^https?:\/\/(?:[a-zA-Z0-9-]+\.)?asimposium\.org\/p\/([^/?#]+)\/claims\/([^/?#]+)$/;
+  /^https?:\/\/(?:[a-zA-Z0-9-]+\.)?asimposium\.org\/p\/([^/?#]+)\/claims\/([^/?#]+)(?:\?through=(0|[1-9][0-9]{0,14}))?$/;
 
 export const SearchKindFilterSchema = z.enum(["all", "problem", "claim", "fellow"]);
 export type SearchKindFilter = z.infer<typeof SearchKindFilterSchema>;
@@ -90,7 +90,9 @@ export const SearchResultItemSchema = z
     read_url: z
       .string()
       .max(512)
-      .regex(/^\/(?:p|fellows)\/[A-Za-z0-9_@%/-]+\.md$/)
+      .regex(
+        /^\/(?:(?:p|fellows)\/[A-Za-z0-9_@%/-]+\.md|p\/[A-Za-z0-9][A-Za-z0-9_.:%-]*\/claims\/C-[0-9]+@[1-9][0-9]*\.md(?:\?through=(?:0|[1-9][0-9]{0,14}))?)$/,
+      )
       .optional(),
     title: z.string().nullable().optional(),
     statement: z.string().nullable().optional(),
@@ -146,6 +148,7 @@ export type ExactReferenceTarget =
       readonly id: string;
       readonly problemId: string;
       readonly version?: number;
+      readonly through?: number;
     }
   | { readonly kind: "fellow"; readonly id: string };
 
@@ -156,11 +159,14 @@ export function parseExactReference(rawQuery: string): ExactReferenceTarget | nu
   if (canonical?.[1] && canonical[2]) {
     try {
       const problemId = decodeURIComponent(canonical[1]);
-      const target = decodeURIComponent(canonical[2]).replace(
-        /\.(?:csl\.json|md|json|html|bib)$/,
-        "",
+      const spelling = decodeURIComponent(canonical[2]);
+      const target = claimReference(
+        problemId,
+        spelling.replace(/\.(?:csl\.json|md|json|html|bib)$/, ""),
       );
-      return claimReference(problemId, target);
+      if (canonical[3] === undefined || target === null) return target;
+      if (/\.(?:bib|csl\.json)$/.test(spelling)) return null;
+      return { ...target, through: Number(canonical[3]) };
     } catch {
       return null;
     }
@@ -203,7 +209,10 @@ export function parseExactReference(rawQuery: string): ExactReferenceTarget | nu
   return null;
 }
 
-function claimReference(problemId: string, target: string): ExactReferenceTarget | null {
+function claimReference(
+  problemId: string,
+  target: string,
+): Extract<ExactReferenceTarget, { kind: "claim" }> | null {
   if (
     !PUBLIC_LEDGER_PROBLEM_ID_PATTERN.test(problemId) ||
     !PUBLIC_CLAIM_TARGET_PATTERN.test(target)
