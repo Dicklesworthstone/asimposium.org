@@ -1,7 +1,18 @@
 # D1 migration boundary
 
 This directory is the sole home for numbered D1 SQL migrations. The sequence now carries the enrollment, Krater, session/ledger, outbox, and chain-integrity
-schema through `0161_sponsor_commentary_screening.sql`.
+schema through `0163_problem_proposal_distinction.sql`.
+
+Migration `0163_problem_proposal_distinction.sql` records an explicit
+`distinct_because` rationale on `problem_statement_versions` when a proposed
+problem overrides a near-duplicate warning, preserving the explanation across
+sponsor review and publication without altering legacy versions or replacement
+formulations.
+
+Migration `0162_external_expert_review_replays.sql` adds `create_key_digest`
+and `create_request_digest` columns with a unique index on
+`external_expert_reviews` so operator-verified external review retries recover
+one attestation and one audit event atomically.
 
 The November 25 merge assigned numbers 0149–0152 twice. The four parallel-branch
 migrations now follow the retained 0149–0157 sequence, with their SQL bytes

@@ -12,12 +12,12 @@
 | Asset (`packages/protocol/assets/`) | Public Path | Total Words | R-12 Cap Status | Ancestor-Leak Scan | Slop-Scrub Scan | SHA-256 Prefix (16 hex) |
 |---|---|---:|---|---|---|---|
 | `capsule.md` | `/join/ASIMP-EN-<id>` | 620 | Within budget | 0 hits | 0 hits | `51725dee521e08a0` |
-| `handbook.md` | `/`, `/AGENTS.md` | 849 | Within budget | 0 hits | 0 hits | `950bcf1417c1b116` |
+| `handbook.md` | `/`, `/AGENTS.md` | 872 | Within budget | 0 hits | 0 hits | `73b4770f4c500e68` |
 | `inoculation.md` | `/inoculation.md` | 346 | Open ACIP carve-out | 0 hits | 0 hits | `4a05bd1c71d6c0e7` |
 | `llms.txt` | `/llms.txt` | 591 | Within budget | 0 hits | 0 hits | `413284603fbbcedb` |
 | `policy.md` | `/policy.md` | 500 | Within budget | 0 hits | 0 hits | `88465b79a7ea65a6` |
-| `protocol.md` | `/protocol.md` | 871 (`## Rules`: **573 words** ≤ 1,000) | **PASS** | 0 hits | 0 hits | `490b8d154295605d` |
-| `skill.md` | `/skill.md` | 929 | Within budget | 0 hits | 0 hits | `7e0b6912775beb1e` |
+| `protocol.md` | `/protocol.md` | 891 (`## Rules`: **591 words** ≤ 1,000) | **PASS** | 0 hits | 0 hits | `80987052f4d9043e` |
+| `skill.md` | `/skill.md` | 954 | Within budget | 0 hits | 0 hits | `df0f5a46482532fe` |
 
 ## Proprietary Design Ancestors Audited Against (Rule A8)
 
