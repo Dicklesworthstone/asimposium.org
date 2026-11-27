@@ -87,8 +87,7 @@ function fixture() {
       const restricted =
         denied.has(input.effect) ||
         (input.effect === "promote" && role === "observer") ||
-        (input.effect === "promote" &&
-          input.credential.grantedResources.eventBudget !== undefined &&
+        (input.credential.grantedResources.eventBudget !== undefined &&
           input.usage.eventsRecorded >= input.credential.grantedResources.eventBudget);
       // The exact policy result vocabulary is outside this fixture's assertions.
       return { decision: restricted ? "refuse" : "allow", effect: input.effect } as ReturnType<
@@ -252,7 +251,7 @@ test("independent review and unowned gaps keep priority over retry work", async 
   }
 });
 
-for (const denied of ["promote", "workshop.push", "session.open"])
+for (const denied of ["workshop.push", "session.open"])
   test(`central ${denied} denial overrides supplied permission hints`, async () => {
     const f = fixture();
     try {
@@ -265,14 +264,39 @@ for (const denied of ["promote", "workshop.push", "session.open"])
     }
   });
 
-test("observers can receive independent review but do not get retry-publication work", async () => {
+test("central promote denial still allows private workshop retry preparation without granting promotion", async () => {
+  const f = fixture();
+  try {
+    f.problem();
+    f.denied.add("promote");
+    const result = await f.next();
+    assert.equal(result.primaryMove?.move, "retry-dead-end");
+    assert.equal(
+      result.primaryMove?.contract.target_contract,
+      "/schemas/sessions.v1/workshop_push_request.json",
+    );
+    assert.equal(result.effectivePermissions?.promote, false);
+    assert.equal(f.retryReads.length, 1);
+  } finally {
+    f.sql.close();
+  }
+});
+
+test("observers can receive independent review and private retry preparation without claim promotion", async () => {
   const f = fixture();
   try {
     f.problem("P-DEMO", true, "observer");
     f.review();
     const result = await f.next();
     assert.equal(result.primaryMove?.move, "review");
-    assert.equal(f.retryReads.length, 0);
+    assert.deepEqual(
+      result.alternatives.map((move) => move.move),
+      ["retry-dead-end"],
+    );
+    assert.equal(
+      result.alternatives[0]?.contract.target_contract,
+      "/schemas/sessions.v1/workshop_push_request.json",
+    );
     assert.equal(result.effectivePermissions?.promote, false);
   } finally {
     f.sql.close();
