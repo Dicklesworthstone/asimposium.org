@@ -37,6 +37,7 @@ import {
   type ScientificClaim,
   type ScientificEvidence,
   ScientificInputError,
+  validateSupportingVerification,
 } from "./scientific-checks.ts";
 import { readPremiseAwareDisposition } from "./scientific-dependencies.ts";
 import { isNegativeReview, scientificInputEffects } from "./scientific-withdrawal-effects.ts";
@@ -997,6 +998,9 @@ export async function foldScientificRows(
           payload.verdict !== "fails-to-reproduce"
         )
           throw new ScientificInputError("A refutation check cannot establish positive support.");
+        // A historical counterevidence mismatch can discharge that objection;
+        // it is excluded from affirmative claim weight below regardless of label.
+        if (!refutationCheck) validateSupportingVerification(payload.verdict, assessed);
         fullWriteUp = assessed.fullWriteUp;
         if (assessed.certifiedArtifact) artifactEvidenceId = material.evidenceId;
         if (

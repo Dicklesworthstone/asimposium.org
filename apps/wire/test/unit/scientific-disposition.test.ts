@@ -2,7 +2,10 @@ import { expect, test } from "bun:test";
 import { claimContentDigest } from "../../src/krater/claim-version.ts";
 import { sha256Hex } from "../../src/krater/krater.ts";
 import { reviewStateFromRecordedReviews } from "../../src/ledger/dispositions.ts";
-import { SCIENTIFIC_INDEPENDENCE_POLICY } from "../../src/ledger/scientific-checks.ts";
+import {
+  inspectFormalArtifact,
+  SCIENTIFIC_INDEPENDENCE_POLICY,
+} from "../../src/ledger/scientific-checks.ts";
 import { foldScientificRows } from "../../src/ledger/scientific-disposition.ts";
 
 type Row = Parameters<typeof foldScientificRows>[0][number];
@@ -1020,6 +1023,84 @@ async function originalWriteUpCorpus(kind = "argument"): Promise<[Row, Row, Row,
   );
   return [claim, computation, check, proof, ...checked];
 }
+
+test("a confirming label cannot earn standing from an unsuccessful structured verification", async () => {
+  const [claim, proof, check, review] = await corpus();
+  if (!claim || !proof || !check || !review) throw new Error("Expected scientific corpus");
+  const artifact = {
+    language: "lean",
+    declaration: "two_eq_two",
+    source: "theorem two_eq_two : 2 = 2 := rfl",
+    toolchain: "Lean 4",
+    axiom_report: "two_eq_two does not depend on any axioms",
+  };
+  const certificate = await row(
+    4,
+    "evidence.created",
+    {
+      kind: "certificate",
+      direction: "supports",
+      mode: "confirmatory",
+      computed_class: "computation",
+      body_md: "The source states two equals two.",
+      formal_artifact: artifact,
+    },
+    { object_id: "E-cert" },
+  );
+  const formal = {
+    kind: "formal-artifact",
+    target_digest: targetDigest,
+    evidence: {
+      evidence_id: certificate.object_id,
+      digest: `sha256:${certificate.payload_sha256}`,
+    },
+    artifact_digest: await inspectFormalArtifact(artifact),
+    compilation: {
+      command: "lean Two.lean",
+      toolchain: artifact.toolchain,
+      result: "success",
+      output: "Compiled.",
+    },
+    statement_comparison: {
+      declaration: artifact.declaration,
+      statement,
+      result: "equivalent",
+      explanation: "Exact equality.",
+    },
+  };
+  const writeUp = {
+    kind: "full-write-up",
+    target_digest: targetDigest,
+    evidence: { evidence_id: proof.object_id, digest: `sha256:${proof.payload_sha256}` },
+    coverage: ["The full argument."],
+    result: "verified",
+  };
+  const history = [claim, proof, check, certificate];
+  const fold = async (verification: unknown, verdict: string) =>
+    foldScientificRows([
+      ...history,
+      await changedPayload({ ...review, seq: 5, event_id: "EVENT-5" }, { verdict, verification }),
+    ]);
+  for (const verdict of ["confirm", "reproduces"]) {
+    for (const verification of [
+      { ...writeUp, result: "mismatch" },
+      { ...writeUp, result: "cannot-verify" },
+      { ...formal, compilation: { ...formal.compilation, result: "failure" } },
+      { ...formal, statement_comparison: { ...formal.statement_comparison, result: "mismatch" } },
+      { ...formal, statement_comparison: { ...formal.statement_comparison, result: "unresolved" } },
+    ]) {
+      const result = await fold(verification, verdict);
+      expect(result.disposition).toBe("open");
+      expect(result.context.verified_reviews).toHaveLength(0);
+      expect(reviewStateFromRecordedReviews(result.reviewFacets)).toBe("unreviewed");
+    }
+  }
+  expect((await fold(writeUp, "confirm")).disposition).toBe("corroborated");
+  expect((await fold(formal, "confirm")).disposition).toBe("strongly-supported");
+  const objection = await fold({ ...writeUp, result: "mismatch" }, "refute");
+  expect(objection.disposition).toBe("disputed");
+  expect(reviewStateFromRecordedReviews(objection.reviewFacets)).toBe("contested");
+});
 
 test("assertion-only reviews cannot upgrade standing or the positive review facet", async () => {
   const rows = await corpus();

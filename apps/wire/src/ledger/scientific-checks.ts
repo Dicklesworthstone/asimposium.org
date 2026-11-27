@@ -434,6 +434,23 @@ export async function assessScientificVerification(
   };
 }
 
+/** Apply the same verdict rules when admitting a review and replaying a
+ * recorded review into public standing. A checked mismatch may be a useful
+ * finding, but the verdict label alone cannot turn it into confirmation. */
+export function validateSupportingVerification(
+  verdict: unknown,
+  assessment: ScientificVerificationAssessment,
+): void {
+  if (
+    (verdict === "confirm" || verdict === "reproduces") &&
+    !assessment.fullWriteUp &&
+    !assessment.certifiedArtifact
+  )
+    throw new ScientificInputError(
+      "A negative or inconclusive verification cannot be submitted as a supporting verdict.",
+    );
+}
+
 /** Recheck identities inside the same D1 batch as event/projection/replay. The
  * invalid JSON path gives a recognizable transaction-aborting SQLite error,
  * without introducing mutable scientific status or another storage table. */

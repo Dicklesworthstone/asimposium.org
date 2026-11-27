@@ -229,6 +229,7 @@ import {
   scientificContentGuards,
   validateFalsificationCheck,
   validateScientificVerification,
+  validateSupportingVerification,
 } from "../ledger/scientific-checks";
 import {
   readScientificDispositions,
@@ -10597,15 +10598,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             "A mismatching or inconclusive counterevidence check cannot be submitted as a verified refutation.",
           );
         }
-        if (
-          (data.verdict === "confirm" || data.verdict === "reproduces") &&
-          !verification.fullWriteUp &&
-          !verification.certifiedArtifact
-        ) {
-          throw new ScientificInputError(
-            "A negative or inconclusive verification cannot be submitted as a supporting verdict.",
-          );
-        }
+        validateSupportingVerification(data.verdict, verification);
       }
     } catch (error) {
       await cleanupOnFailure();
