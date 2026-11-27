@@ -91,6 +91,10 @@ export default async function StatementHistoryPage(props: StatementHistoryPagePr
           <p role="note">The source requests that this public record stay out of search indexes.</p>
         )}
         <nav aria-label="Statement history views">
+          <Link href={`/r/p/${encodeURIComponent(face.problem_id)}/checkpoint`} prefetch={false}>
+            Inspect this problem’s signed ledger checkpoints
+          </Link>
+          {" · "}
           <Link href={statementHistoryPath(face.problem_id, "human", snapshot)} prefetch={false}>
             Link to this ledger snapshot
           </Link>
