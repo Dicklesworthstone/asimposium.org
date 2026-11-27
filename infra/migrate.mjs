@@ -762,20 +762,19 @@ function isEmptyTargetControl(entry) {
  * a bootstrap's exact forward journal suffix cannot vouch for contaminated
  * DDL by itself.
  */
-export function catalogFingerprint(catalog) {
+export function catalogFingerprint(catalog, { stripComments = false } = {}) {
   const canonical = catalog
     // Only the two runner-owned tables are metadata. A product object merely
     // *named* `_asimposium_*` is catalog evidence and must contaminate the
     // target rather than disappear from the classifier's authority.
     .filter((entry) => !isCatalogFingerprintControl(entry))
-    .map((entry) => ({
-      type: entry.type,
-      name: entry.name,
-      table: entry.table,
-      // sqlite_schema.sql is the authority: do not normalize whitespace,
-      // especially not inside string literals where it changes semantics.
-      sql: typeof entry.sql === "string" ? entry.sql : null,
-    }));
+    .map((entry) => {
+      // Retain SQL whitespace and quoted values exactly, including when
+      // comparing legacy product definitions with SQL comments removed.
+      let sql = typeof entry.sql === "string" ? entry.sql : null;
+      if (stripComments && sql !== null) sql = stripSqlComments(sql);
+      return { type: entry.type, name: entry.name, table: entry.table, sql };
+    });
   canonical.sort((left, right) =>
     Buffer.compare(
       Buffer.from(`${left.type}\u0000${left.name}`, "utf8"),
@@ -880,10 +879,8 @@ export function classifySchemaLineage({ catalog, journal, lineage, migrations, m
   const expectedHead = artifact.head_sequence;
 
   const schemaHeads = schemaHeadsDescending(manifest);
-  const bootstrapHead = schemaHeads.find(
-    (candidate) =>
-      exactAppliedSuffix(journal, migrations, expectedHead, candidate.sequence) &&
-      productDigest === candidate.schema_digest,
+  const bootstrapHead = schemaHeads.find((candidate) =>
+    exactAppliedSuffix(journal, migrations, expectedHead, candidate.sequence),
   );
   if (
     hasLineageTable &&
@@ -895,7 +892,11 @@ export function classifySchemaLineage({ catalog, journal, lineage, migrations, m
     lineage[0].artifact_digest === artifact.digest &&
     lineage[0].schema_digest === artifact.schema_digest &&
     lineage[0].empty_guard === 1 &&
-    bootstrapHead !== undefined
+    bootstrapHead !== undefined &&
+    // Legacy D1 catalogs can retain comments in their CREATE statements.
+    // Compare those definitions after validating the journal and bootstrap witness.
+    (productDigest === bootstrapHead.schema_digest ||
+      catalogFingerprint(catalog, { stripComments: true }) === bootstrapHead.schema_digest)
   ) {
     return {
       kind: BOOTSTRAP_LINEAGE,

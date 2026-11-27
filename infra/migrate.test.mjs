@@ -886,6 +886,22 @@ const cases = [
         }).kind,
         "bootstrap-baseline15",
       );
+      const legacyCommentSql = "CREATE TABLE/* legacy table comment */product (id TEXT);";
+      for (const [sql, expected] of [
+        [legacyCommentSql, "bootstrap-baseline15"],
+        [legacyCommentSql.replace("id TEXT", "id INTEGER"), "unknown-or-contaminated"],
+      ]) {
+        assert.equal(
+          classifySchemaLineage({
+            catalog: [{ ...productCatalog[0], sql }, runnerLedgerCatalog, runnerLineageCatalog],
+            journal: [],
+            lineage: [bootstrapLineageRow(currentDigest)],
+            migrations,
+            manifest,
+          }).kind,
+          expected,
+        );
+      }
       for (const [label, catalog] of [
         [
           "wrong control DDL",
