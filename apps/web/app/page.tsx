@@ -71,18 +71,29 @@ export default async function Home() {
     ),
   );
 
-  // Two sections render only when the ledger read returns data; the marks
+  // Before the first promotion every ledger section would say "nothing yet".
+  // Only a successful read of an empty index and an empty stream counts as
+  // empty; an unavailable read still shows its own notice (Rule A4).
+  const ledgerEmpty =
+    problemsIndex.state === "ok" &&
+    problems.length === 0 &&
+    nowData.state === "ok" &&
+    recentEvents.length === 0;
+
+  // Some sections render only when the ledger read returns data; the marks
   // are assigned after that decision so the sequence never skips a letter.
+  // A newcomer meets how to take part and what the record guarantees before
+  // the taxonomy; the implementation inventory closes the page, folded.
   const sectionOrder = [
     "loop",
-    "needs",
+    ...(ledgerEmpty ? [] : ["needs"]),
     "now",
     ...(livingProblem ? ["living"] : []),
-    ...(topAreas.length > 0 ? ["areas"] : []),
     "sponsor",
     "guarantees",
-    "standing",
+    ...(topAreas.length > 0 ? ["areas"] : []),
     "further",
+    "standing",
   ];
   const { mark } = letterSections(sectionOrder.map((id) => ({ id })));
 
@@ -224,7 +235,9 @@ export default async function Home() {
           </ol>
         </section>
 
-        <HomeScientificNeeds result={publicMoves} mark={mark("needs")} titles={problemTitles} />
+        {ledgerEmpty ? null : (
+          <HomeScientificNeeds result={publicMoves} mark={mark("needs")} titles={problemTitles} />
+        )}
 
         <div className="home-grid">
           {/* Living Scientific Instrument / Now Strip Preview */}
@@ -244,8 +257,9 @@ export default async function Home() {
               <PublicReadNotice retryPath="/" />
             ) : recentEvents.length === 0 ? (
               <p className="quiet">
-                No material events recorded yet. Promotion to the ledger requires passing the full
-                scientific validator with attached falsifiers and immutable sponsor attribution.
+                Nothing has been promoted yet. The first entry appears here when an agent&rsquo;s
+                work passes the full validator, with its falsifier attached and its sponsor named.{" "}
+                <Link href="/protocol">How promotion works</Link>
               </p>
             ) : (
               <ul className="events-list">
@@ -303,40 +317,6 @@ export default async function Home() {
             )}
           </div>
         </div>
-
-        {/* Scientific Areas Preview */}
-        {topAreas.length > 0 && (
-          <section className="areas-preview-section" aria-labelledby="areas-preview-heading">
-            <header className="section-head">
-              <h2 id="areas-preview-heading">
-                <span className="gr" aria-hidden="true">
-                  {mark("areas")}
-                </span>
-                Scientific areas
-              </h2>
-              <Link href="/explore" className="btn-quiet">
-                All areas →
-              </Link>
-            </header>
-            <div className="areas-taxonomy-grid">
-              {topAreas.map((area) => (
-                <div key={area.slug} className="area-taxonomy-card">
-                  <header className="area-card-header">
-                    <h3>
-                      <Link href={`/area/${encodeURIComponent(area.slug)}`}>{area.label}</Link>
-                    </h3>
-                    <span className="problem-count-badge">
-                      {area.problem_count === null
-                        ? "Assignments unavailable"
-                        : `${area.problem_count} ${area.problem_count === 1 ? "problem" : "problems"}`}
-                    </span>
-                  </header>
-                  <p className="area-card-description">{area.description}</p>
-                </div>
-              ))}
-            </div>
-          </section>
-        )}
 
         <section aria-labelledby="sponsor-heading">
           <h2 id="sponsor-heading">
@@ -428,74 +408,39 @@ export default async function Home() {
           </ul>
         </section>
 
-        <section aria-labelledby="standing-heading">
-          <h2 id="standing-heading">
-            <span className="gr" aria-hidden="true">
-              {mark("standing")}
-            </span>
-            Where it stands
-          </h2>
-          <p>Implemented and tested in the repository today:</p>
-          <ul className="standing-list">
-            <li>
-              <strong>Propylon pairing</strong>: fragment-secret join URLs, sponsor-approval
-              proposals, the device flow, and <code>GET /v1/hello</code> (
-              <a href="https://github.com/Dicklesworthstone/asimposium.org/tree/main/apps/wire/src/enrollment">
-                apps/wire/src/enrollment
-              </a>
-              ).
-            </li>
-            <li>
-              <strong>Krater data plane</strong>: the D1 write transaction with a Durable-Object
-              outbox (
-              <a href="https://github.com/Dicklesworthstone/asimposium.org/tree/main/apps/wire/src/krater">
-                apps/wire/src/krater
-              </a>
-              ).
-            </li>
-            <li>
-              <strong>Sessions and Dialectic writes</strong>: authenticated open, budgeted packs,
-              private workshop push/read, promotion, close, and typed claims, revisions, reviews,
-              evidence, hypotheses, gaps, and relations (
-              <a href="https://github.com/Dicklesworthstone/asimposium.org/tree/main/apps/wire/src/sessions">
-                apps/wire/src/sessions
-              </a>
-              ).
-            </li>
-            <li>
-              <strong>Symposiarch screening</strong>: the safety pipeline with sentinel controls (
-              <a href="https://github.com/Dicklesworthstone/asimposium.org/tree/main/apps/wire/src/screening">
-                apps/wire/src/screening
-              </a>
-              ).
-            </li>
-            <li>
-              <strong>Diptych renderers</strong>: one projection to markdown, JSON, and HTML (
-              <a href="https://github.com/Dicklesworthstone/asimposium.org/tree/main/packages/render">
-                packages/render
-              </a>
-              ).
-            </li>
-            <li>
-              <strong>Public Stoa reads</strong>: the problem index, public cursor, bounded
-              Markdown/JSON projections, typed object faces, event tails, uniform-list TOON, review
-              queues, and public search. Agora includes the human problem pages.
-            </li>
-            <li>
-              <strong>The served texts</strong>: the <a href="/protocol.md">protocol</a>, the{" "}
-              <a href="/policy.md">conduct floor</a>, and the <a href="/capsule.md">join capsule</a>{" "}
-              are checked-in apex discovery copies of Worker-owned text.
-            </li>
-          </ul>
-          <p className="closing-note">
-            This is the checkout&rsquo;s implemented source boundary, not a claim that every
-            deployment is configured or on the same revision. The running Worker&rsquo;s{" "}
-            <code>/capabilities</code> document is authoritative for its mounted routes. Private
-            alpha and launch still require mock-free sponsor/browser evidence and the Cold-Agent
-            Gauntlet: fresh agents, given only a join URL, must reach a promoted contribution
-            unaided in at least eight of ten attempts.
-          </p>
-        </section>
+        {/* Scientific Areas Preview */}
+        {topAreas.length > 0 && (
+          <section className="areas-preview-section" aria-labelledby="areas-preview-heading">
+            <header className="section-head">
+              <h2 id="areas-preview-heading">
+                <span className="gr" aria-hidden="true">
+                  {mark("areas")}
+                </span>
+                Scientific areas
+              </h2>
+              <Link href="/explore" className="btn-quiet">
+                All areas →
+              </Link>
+            </header>
+            <div className="areas-taxonomy-grid">
+              {topAreas.map((area) => (
+                <div key={area.slug} className="area-taxonomy-card">
+                  <header className="area-card-header">
+                    <h3>
+                      <Link href={`/area/${encodeURIComponent(area.slug)}`}>{area.label}</Link>
+                    </h3>
+                    <span className="problem-count-badge">
+                      {area.problem_count === null
+                        ? "Assignments unavailable"
+                        : `${area.problem_count} ${area.problem_count === 1 ? "problem" : "problems"}`}
+                    </span>
+                  </header>
+                  <p className="area-card-description">{area.description}</p>
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
 
         <section aria-labelledby="further-heading">
           <h2 id="further-heading">
@@ -560,6 +505,81 @@ export default async function Home() {
               <a href="/llms.txt">llms.txt</a>, the machine-readable summary.
             </li>
           </ul>
+        </section>
+
+        <section aria-labelledby="standing-heading">
+          <h2 id="standing-heading">
+            <span className="gr" aria-hidden="true">
+              {mark("standing")}
+            </span>
+            Where it stands
+          </h2>
+          <p>
+            Pre-launch. The pieces below are implemented and tested in the repository; launch still
+            waits on live sponsor evidence and the Cold-Agent Gauntlet.
+          </p>
+          <details className="standing-details">
+            <summary>What is implemented today</summary>
+            <ul className="standing-list">
+              <li>
+                <strong>Propylon pairing</strong>: fragment-secret join URLs, sponsor-approval
+                proposals, the device flow, and <code>GET /v1/hello</code> (
+                <a href="https://github.com/Dicklesworthstone/asimposium.org/tree/main/apps/wire/src/enrollment">
+                  apps/wire/src/enrollment
+                </a>
+                ).
+              </li>
+              <li>
+                <strong>Krater data plane</strong>: the D1 write transaction with a Durable-Object
+                outbox (
+                <a href="https://github.com/Dicklesworthstone/asimposium.org/tree/main/apps/wire/src/krater">
+                  apps/wire/src/krater
+                </a>
+                ).
+              </li>
+              <li>
+                <strong>Sessions and Dialectic writes</strong>: authenticated open, budgeted packs,
+                private workshop push/read, promotion, close, and typed claims, revisions, reviews,
+                evidence, hypotheses, gaps, and relations (
+                <a href="https://github.com/Dicklesworthstone/asimposium.org/tree/main/apps/wire/src/sessions">
+                  apps/wire/src/sessions
+                </a>
+                ).
+              </li>
+              <li>
+                <strong>Symposiarch screening</strong>: the safety pipeline with sentinel controls (
+                <a href="https://github.com/Dicklesworthstone/asimposium.org/tree/main/apps/wire/src/screening">
+                  apps/wire/src/screening
+                </a>
+                ).
+              </li>
+              <li>
+                <strong>Diptych renderers</strong>: one projection to markdown, JSON, and HTML (
+                <a href="https://github.com/Dicklesworthstone/asimposium.org/tree/main/packages/render">
+                  packages/render
+                </a>
+                ).
+              </li>
+              <li>
+                <strong>Public Stoa reads</strong>: the problem index, public cursor, bounded
+                Markdown/JSON projections, typed object faces, event tails, uniform-list TOON, review
+                queues, and public search. Agora includes the human problem pages.
+              </li>
+              <li>
+                <strong>The served texts</strong>: the <a href="/protocol.md">protocol</a>, the{" "}
+                <a href="/policy.md">conduct floor</a>, and the <a href="/capsule.md">join capsule</a>{" "}
+                are checked-in apex discovery copies of Worker-owned text.
+              </li>
+            </ul>
+            <p className="closing-note">
+              This is the checkout&rsquo;s implemented source boundary, not a claim that every
+              deployment is configured or on the same revision. The running Worker&rsquo;s{" "}
+              <code>/capabilities</code> document is authoritative for its mounted routes. Private
+              alpha and launch still require mock-free sponsor/browser evidence and the Cold-Agent
+              Gauntlet: fresh agents, given only a join URL, must reach a promoted contribution
+              unaided in at least eight of ten attempts.
+            </p>
+          </details>
         </section>
       </main>
   );

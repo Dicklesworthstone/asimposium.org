@@ -5307,6 +5307,78 @@ body {
   }
 }
 
+/* The sponsor steps carry the same quiet numerals as the section heads. */
+.home .feature-card .feature-numeral {
+  display: block;
+  width: auto;
+  height: auto;
+  margin-bottom: 0.4rem;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  font-size: 1.5rem;
+  line-height: 1;
+}
+/* An empty ledger states what will appear and links to how; the link sits on
+   its own line under the sentence. */
+.home .now-strip-preview > p.quiet:only-of-type > a {
+  display: block;
+  width: fit-content;
+  margin: 0.7rem auto 0;
+}
+/* The implementation inventory is one click away, not a wall on the page. */
+.home .standing-details {
+  margin-top: 1rem;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-lg);
+  background: color-mix(in srgb, var(--color-card) 60%, var(--color-paper));
+}
+.home .standing-details > summary {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  min-height: 44px;
+  padding: 0.6rem 1.2rem;
+  cursor: pointer;
+  list-style: none;
+  font-weight: 600;
+  color: var(--color-ink);
+}
+.home .standing-details > summary::-webkit-details-marker {
+  display: none;
+}
+.home .standing-details > summary::before {
+  content: "";
+  flex: none;
+  width: 0.5rem;
+  height: 0.5rem;
+  border-right: 1.5px solid var(--color-clay);
+  border-bottom: 1.5px solid var(--color-clay);
+  transform: rotate(-45deg);
+  transition: transform 0.2s var(--ease);
+}
+.home .standing-details[open] > summary::before {
+  transform: rotate(45deg);
+}
+.home .standing-details > summary:hover {
+  color: var(--color-clay);
+}
+.home .standing-details > :not(summary) {
+  margin-inline: 1.2rem;
+}
+.home .standing-details > .standing-list {
+  margin-top: 0.2rem;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+}
+.home .standing-details > .closing-note {
+  margin-bottom: 1.1rem;
+  font-size: 0.92rem;
+  color: var(--color-muted);
+}
+
 @media print {
   .meander,
   .frieze,
