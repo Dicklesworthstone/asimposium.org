@@ -6,7 +6,10 @@ import {
   UNAVAILABLE_UNTIL_DEPLOYED,
 } from "../../../../packages/contracts/src/stats.ts";
 import type { Env } from "../env.ts";
-import { PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL } from "../krater/public-content.ts";
+import {
+  eventContentHiddenSql,
+  PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL,
+} from "../krater/public-content.ts";
 import { ScientificInputError } from "../ledger/scientific-checks.ts";
 import {
   foldScientificRows,
@@ -134,6 +137,56 @@ async function measureClaimStandings(db: D1Database, tables: ReadonlySet<string>
   }
   if (result.assessed < result.total) result.buckets.unassessed = result.total - result.assessed;
   return result;
+}
+
+/** Count public scientific outcomes at the published cursor. A retained
+ * projection can outlive both its source and the exact statement it reviews. */
+async function measurePublicOutcomes(db: D1Database) {
+  const row = await db
+    .prepare(`WITH sources AS (
+    SELECT e.problem_id, e.seq, e.object_kind,
+      CASE WHEN json_valid(c.payload_json) THEN c.payload_json END AS body
+    FROM events e JOIN problems p ON p.id = e.problem_id
+    JOIN event_content c ON c.event_id = e.id AND c.payload_sha256 = e.payload_sha256
+    WHERE p.status <> 'private-draft' AND p.unlisted = 0 AND e.seq <= p.public_seq
+      AND ((e.type = 'review.created' AND e.object_kind = 'review')
+        OR (e.type = 'evidence.created' AND e.object_kind = 'evidence')
+        OR (e.type = 'dead_end.recorded' AND e.object_kind = 'dead_end'))
+      AND e.object_version = 1 AND c.redacted_at IS NULL
+      AND NOT ${eventContentHiddenSql("e")}
+  ), outcomes AS (
+    SELECT *, CASE object_kind WHEN 'review' THEN 'claim'
+        ELSE json_extract(body, '$.bears_on_kind') END AS target_kind,
+      CASE object_kind WHEN 'review' THEN json_extract(body, '$.target_claim_id')
+        ELSE json_extract(body, '$.bears_on_id') END AS target_id,
+      CASE object_kind WHEN 'review' THEN json_extract(body, '$.target_version')
+        ELSE json_extract(body, '$.bears_on_version') END AS target_version,
+      CASE object_kind WHEN 'review' THEN json_extract(body, '$.verdict')
+        ELSE json_extract(body, '$.direction') END AS outcome
+    FROM sources WHERE body IS NOT NULL
+  )
+  SELECT COUNT(*) FILTER (WHERE outcome = 'reproduces' AND object_kind <> 'dead_end') AS passed,
+    COUNT(*) FILTER (WHERE outcome = 'fails-to-reproduce' AND object_kind <> 'dead_end') AS failed,
+    COUNT(*) FILTER (WHERE object_kind = 'dead_end') AS dead_ends,
+    COUNT(*) FILTER (WHERE object_kind = 'dead_end'
+      AND json_type(body, '$.retry_predicate') = 'text'
+      AND length(trim(json_extract(body, '$.retry_predicate'))) > 0) AS with_retry
+  FROM outcomes o
+  WHERE object_kind = 'dead_end' OR (outcome IN ('reproduces', 'fails-to-reproduce') AND EXISTS (
+    SELECT 1 FROM events target JOIN event_content tc ON tc.event_id = target.id
+      AND tc.payload_sha256 = target.payload_sha256 AND tc.redacted_at IS NULL
+    WHERE target.problem_id = o.problem_id AND target.seq < o.seq
+      AND target.object_kind = o.target_kind AND target.object_id = o.target_id
+      AND ((target.object_kind = 'claim' AND target.object_version = o.target_version
+          AND ((target.type = 'claim.created' AND target.object_version = 1)
+            OR (target.type = 'claim.revised' AND target.object_version > 1)))
+        OR (target.object_kind = 'hypothesis' AND target.type = 'hypothesis.created'
+          AND target.object_version = 1 AND o.target_version IS NULL))
+      AND json_valid(tc.payload_json) AND NOT ${eventContentHiddenSql("target")}
+  ))`)
+    .first<{ passed: number; failed: number; dead_ends: number; with_retry: number }>();
+  if (!row) throw new Error("Public scientific outcomes are unavailable.");
+  return row;
 }
 
 /**
@@ -296,36 +349,45 @@ export async function loadPlatformStats(
 
   let reproPass = 0;
   let reproFail = 0;
-  if (hasEvidence) {
-    reproPass += await scalarInt(
-      db,
-      publicScopedCount("evidence", "ev", "ev.direction = 'reproduces'"),
-    );
-    reproFail += await scalarInt(
-      db,
-      publicScopedCount("evidence", "ev", "ev.direction = 'fails-to-reproduce'"),
-    );
-  }
-  if (hasReviews) {
-    reproPass += await scalarInt(
-      db,
-      publicScopedCount("reviews", "rv", "rv.verdict = 'reproduces'"),
-    );
-    reproFail += await scalarInt(
-      db,
-      publicScopedCount("reviews", "rv", "rv.verdict = 'fails-to-reproduce'"),
-    );
-  }
-
-  const deadEndsRecorded = hasDeadEnds
-    ? await scalarInt(db, publicScopedCount("dead_ends", "de"))
-    : 0;
-  const deadEndsWithRetry = hasDeadEnds
-    ? await scalarInt(
+  let deadEndsRecorded = 0;
+  let deadEndsWithRetry = 0;
+  if (tables.has("events") || tables.has("event_content") || tables.has("content_controls")) {
+    const outcomes = await measurePublicOutcomes(db);
+    reproPass = outcomes.passed;
+    reproFail = outcomes.failed;
+    deadEndsRecorded = outcomes.dead_ends;
+    deadEndsWithRetry = outcomes.with_retry;
+  } else {
+    // Pre-ledger databases retain their legacy aggregate projection.
+    if (hasEvidence) {
+      reproPass += await scalarInt(
         db,
-        publicScopedCount("dead_ends", "de", "length(trim(de.retry_predicate)) > 0"),
-      )
-    : 0;
+        publicScopedCount("evidence", "ev", "ev.direction = 'reproduces'"),
+      );
+      reproFail += await scalarInt(
+        db,
+        publicScopedCount("evidence", "ev", "ev.direction = 'fails-to-reproduce'"),
+      );
+    }
+    if (hasReviews) {
+      reproPass += await scalarInt(
+        db,
+        publicScopedCount("reviews", "rv", "rv.verdict = 'reproduces'"),
+      );
+      reproFail += await scalarInt(
+        db,
+        publicScopedCount("reviews", "rv", "rv.verdict = 'fails-to-reproduce'"),
+      );
+    }
+
+    deadEndsRecorded = hasDeadEnds ? await scalarInt(db, publicScopedCount("dead_ends", "de")) : 0;
+    deadEndsWithRetry = hasDeadEnds
+      ? await scalarInt(
+          db,
+          publicScopedCount("dead_ends", "de", "length(trim(de.retry_predicate)) > 0"),
+        )
+      : 0;
+  }
 
   // 3. Ergonomics family (scoped to listed public problems per Rule A2)
   const idempotentWritesRecorded = hasIdempotency

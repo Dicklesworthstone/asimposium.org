@@ -1,5 +1,6 @@
 import { Database } from "bun:sqlite";
 import { describe, expect, setSystemTime, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import {
@@ -16,6 +17,8 @@ type D1Database = NonNullable<Env["DB"]>;
 
 import { scanFieldForCredentials } from "../../src/screening/credential-scan.ts";
 import { loadPlatformStats } from "../../src/stats/service.ts";
+
+import { migratedSqliteD1 } from "../support/migrated-sqlite.ts";
 
 const REPO_ROOT = resolve(import.meta.dir, "../../../..");
 
@@ -230,6 +233,91 @@ describe("Measured /stats.{json,md} face (asimposiumorg-rc-stats-runbooks-cost-m
       expect(renderPlatformStatsMarkdown(parsed)).toContain("# Platform statistics");
     } finally {
       sql.close();
+    }
+  });
+
+  test("published reproduction outcomes follow visibility of the source and its exact target", async () => {
+    const { sqlite, db } = migratedSqliteD1();
+    const now = "2026-11-20T00:00:00.000Z";
+    let seq = 0;
+    function publish(type: string, kind: string, id: string, version: number, body: object) {
+      const event = `event-${++seq}`;
+      const payload = JSON.stringify(body);
+      const digest = createHash("sha256").update(payload).digest("hex");
+      sqlite.run(
+        "UPDATE problems SET public_seq = ?, chain_version = 2, chain_digest = 'chain' WHERE id = 'P-1'",
+        [seq],
+      );
+      sqlite.run(
+        `INSERT INTO events(id,problem_id,seq,type,object_kind,object_id,object_version,
+          payload_sha256,row_digest,chain_digest,created_at)
+         VALUES(?,'P-1',?,?,?,?,?,?,'row','chain',?)`,
+        [event, seq, type, kind, id, version, digest, now],
+      );
+      sqlite.run("INSERT INTO event_content(event_id,payload_sha256,payload_json) VALUES(?,?,?)", [
+        event,
+        digest,
+        payload,
+      ]);
+      return event;
+    }
+    function control(target: string, visibility: string, version: number) {
+      sqlite.run(
+        `INSERT INTO content_controls(control_id,problem_id,target_kind,target_ref,visibility,
+          source,reason_category,actor,reason,version,created_at)
+         VALUES(?,'P-1','claim',?,?,'operator','integrity','operator','test',?,?)`,
+        [`CC-${target}-${version}`, target, visibility, version, now],
+      );
+    }
+    try {
+      sqlite.run(
+        `INSERT INTO problems(id,created_at,updated_at,status) VALUES('P-1',?,?,'active')`,
+        [now, now],
+      );
+      sqlite.run(
+        `INSERT INTO krater_integrity_backfill(problem_id,state,legacy_event_count,completed_at,chain_version)
+        VALUES('P-1','complete',0,?,2)`,
+        [now],
+      );
+      publish("claim.created", "claim", "C-1", 1, { statement: "First formulation" });
+      publish("claim.revised", "claim", "C-1", 2, { statement: "Second formulation" });
+      publish("evidence.created", "evidence", "E-1", 1, {
+        direction: "reproduces",
+        bears_on_kind: "claim",
+        bears_on_id: "C-1",
+        bears_on_version: 1,
+      });
+      const review = publish("review.created", "review", "R-1", 1, {
+        verdict: "fails-to-reproduce",
+        target_claim_id: "C-1",
+        target_version: 2,
+      });
+      publish("dead_end.recorded", "dead_end", "D-1", 1, {
+        retry_predicate: "If the bound changes",
+      });
+      const quality = async () => (await loadPlatformStats(db, now)).quality;
+      const initial = await quality();
+      expect(initial.reproduction_pass_rate).toEqual({ numerator: 1, denominator: 2, rate: 0.5 });
+      expect(initial.dead_ends_with_retry_predicate).toBe(1);
+
+      control("C-1@1", "hidden", 1);
+      control("#5", "hidden", 1);
+      const hidden = await quality();
+      expect(hidden.reproduction_pass_rate).toEqual({ numerator: 0, denominator: 1, rate: 0 });
+      expect(hidden.dead_ends_recorded).toBe(0);
+      expect(hidden.dead_ends_with_retry_predicate).toBe(0);
+
+      control("C-1@1", "visible", 2);
+      control("#5", "visible", 2);
+      sqlite.run(
+        "UPDATE event_content SET redacted_at=?, redaction_reason='legal' WHERE event_id=?",
+        [now, review],
+      );
+      const restored = await quality();
+      expect(restored.reproduction_pass_rate).toEqual({ numerator: 1, denominator: 1, rate: 1 });
+      expect(restored.dead_ends_recorded).toBe(1);
+    } finally {
+      sqlite.close();
     }
   });
 
