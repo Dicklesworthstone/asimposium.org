@@ -160,6 +160,7 @@ export async function readScientificDispositions(
   claimLimit: number,
   target?: { claimId: string; version: number },
   budget: ScientificReadBudget = DEFAULT_SCIENTIFIC_READ_BUDGET,
+  onInvalidClaim?: (claimId: string) => void,
 ): Promise<Map<string, ScientificDisposition>> {
   const result = await prepareScientificDispositions(
     db,
@@ -179,7 +180,21 @@ export async function readScientificDispositions(
   }
   const output = new Map<string, ScientificDisposition>();
   for (const [claimId, rows] of groups) {
-    const fold = await foldScientificRows(rows);
+    let fold: ScientificDisposition;
+    try {
+      fold = await foldScientificRows(rows);
+    } catch (error) {
+      // Collections that expose partial coverage may omit one invalid claim.
+      // The budget covers the entire selection. Overflow invalidates every row.
+      if (
+        !onInvalidClaim ||
+        !(error instanceof ScientificInputError) ||
+        error instanceof ScientificReadBudgetExceededError
+      )
+        throw error;
+      onInvalidClaim(claimId);
+      continue;
+    }
     output.set(
       claimId,
       await readPremiseAwareDisposition(db, problemId, cursor, claimId, rows, fold),

@@ -26,6 +26,7 @@ import { loadHonorsRecord } from "../../src/discovery/honors-service.ts";
 import { loadNowStrip } from "../../src/discovery/now-service.ts";
 import { REVIEW_QUEUE_DISCOVERY_SQL } from "../../src/discovery/review-queue-sql.ts";
 import type { Env } from "../../src/env.ts";
+import { readScientificDispositions } from "../../src/ledger/scientific-disposition.ts";
 import { migratedSqlite } from "../support/migrated-sqlite";
 
 type LocalBinding = string | number | null;
@@ -2850,6 +2851,40 @@ describe("W8.2 Stoa Discovery, Areas, Fellow Card & Now routes", () => {
       );
     },
   );
+
+  test("honors omits an inconsistent candidate without losing valid sibling histories", async () => {
+    const { db, raw } = createMigratedDb();
+    try {
+      seedDiscoveryData(raw, JSON.stringify({ claim_id: "C-1", statement: "Conflicting bytes." }));
+      seedScopeClaim(raw, "P-4DSP", "C-2", 2);
+      await expect(readScientificDispositions(db, "P-4DSP", 2, 100)).rejects.toThrow();
+      const omitted: string[] = [];
+      const standing = await readScientificDispositions(
+        db,
+        "P-4DSP",
+        2,
+        100,
+        undefined,
+        undefined,
+        (claim) => omitted.push(claim),
+      );
+      expect(omitted).toEqual(["C-1"]);
+      expect([...standing.keys()]).toEqual(["C-2"]);
+      const response = await createApp().request(
+        "https://a.asimposium.org/results.json",
+        {},
+        mockEnv(db),
+      );
+      expect(response.status).toBe(200);
+      const record = HonorsResponseSchema.parse(await response.json());
+      expect(record.results).toEqual([]);
+      expect(record.omitted).toContain(
+        "some claim histories could not be verified; those claims were omitted from recognition",
+      );
+    } finally {
+      raw.close();
+    }
+  });
 
   test("Honors record (/results) recomputes on demand, mechanically gates settled items, and serves Diptych faces", async () => {
     const { db, raw } = createMigratedDb();

@@ -10,6 +10,7 @@ import type { D1Database } from "@cloudflare/workers-types";
 import { sha256Hex } from "../krater/krater.ts";
 import { hiddenByContentControlSql } from "../krater/public-content.ts";
 import {
+  DEFAULT_SCIENTIFIC_READ_BUDGET,
   readScientificDispositions,
   type ScientificDisposition,
   ScientificReadBudgetExceededError,
@@ -89,7 +90,19 @@ export async function loadHonorsRecord(
     // publication/dependency snapshot below must independently earn recognition.
     let dispositions = new Map<string, ScientificDisposition>();
     try {
-      dispositions = await readScientificDispositions(db, problem.id, problem.public_seq, 100);
+      dispositions = await readScientificDispositions(
+        db,
+        problem.id,
+        problem.public_seq,
+        100,
+        undefined,
+        DEFAULT_SCIENTIFIC_READ_BUDGET,
+        () => {
+          unavailable.add(
+            "some claim histories could not be verified; those claims were omitted from recognition",
+          );
+        },
+      );
     } catch (error) {
       if (!(error instanceof ScientificReadBudgetExceededError)) throw error;
       unavailable.add(
