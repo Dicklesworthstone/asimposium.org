@@ -1,6 +1,10 @@
 import { z } from "zod";
 import { ProblemIndexTimestampSchema, PublicLedgerProblemIdSchema } from "./ledger.ts";
-import { completeProblemBoundaries, OptionalProblemBoundaryFields, ProposalDistinctionSchema } from "./problem-boundaries.ts";
+import {
+  completeProblemBoundaries,
+  OptionalProblemBoundaryFields,
+  ProposalDistinctionSchema,
+} from "./problem-boundaries.ts";
 import { ProblemStatementAuthorSchema } from "./problems.ts";
 import { ScreeningPublicationNoticeSchema } from "./screening.ts";
 

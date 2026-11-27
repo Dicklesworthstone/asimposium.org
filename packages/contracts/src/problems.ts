@@ -1,7 +1,11 @@
 import { z } from "zod";
 import { AreaSlugSchema } from "./discovery.ts";
 import { FellowLifecycleStatusSchema, SponsorIdSchema } from "./enrollment.ts";
-import { completeProblemBoundaries, OptionalProblemBoundaryFields, ProposalDistinctionSchema } from "./problem-boundaries.ts";
+import {
+  completeProblemBoundaries,
+  OptionalProblemBoundaryFields,
+  ProposalDistinctionSchema,
+} from "./problem-boundaries.ts";
 import {
   SponsorProblemHideReceiptSchema,
   SponsorProblemHideRequestSchema,

@@ -354,10 +354,26 @@ function seedCalibrationPublication(
 }
 
 function seedDiscoveryData(raw: Database, eventPayload?: string, eventDigest?: string) {
+  const defaultStatement = "Every trisection has a twist.";
+  const defaultFalsifier = "A counterexample 4-manifold.";
   const payload =
     eventPayload ??
-    JSON.stringify({ claim_id: "C-1", kind: "claim", statement: "Every trisection has a twist." });
+    JSON.stringify({
+      claim_id: "C-1",
+      kind: "conjecture",
+      statement: defaultStatement,
+      falsifier: defaultFalsifier,
+    });
   const digest = eventDigest ?? createHash("sha256").update(payload).digest("hex");
+  const contentDigest = `sha256:${createHash("sha256")
+    .update(
+      JSON.stringify({
+        falsifier: defaultFalsifier,
+        kind: "conjecture",
+        statement: defaultStatement,
+      }),
+    )
+    .digest("hex")}`;
   // 1. Sponsor & Fellow
   raw.run(
     "INSERT INTO sponsors (sponsor_id, created_at, last_seen_at) VALUES ('SPON-01', 1786800000000, 1786800000000)",
@@ -382,10 +398,12 @@ function seedDiscoveryData(raw: Database, eventPayload?: string, eventDigest?: s
 
   // 3. Claims
   raw.run(
-    "INSERT INTO claims (id, problem_id, statement, payload_sha256, source_seq, created_at) VALUES ('C-1', 'P-4DSP', 'Every trisection has a twist.', 'sha256:abcd', 1, '2026-08-02T01:00:00.000Z')",
+    "INSERT INTO claims (id, problem_id, statement, payload_sha256, source_seq, created_at) VALUES ('C-1', 'P-4DSP', ?, ?, 1, '2026-08-02T01:00:00.000Z')",
+    [defaultStatement, digest],
   );
   raw.run(
-    "INSERT INTO claim_versions (claim_id, problem_id, version, kind, statement, falsifier, content_digest, editor_fellow_id, created_at) VALUES ('C-1', 'P-4DSP', 1, 'conjecture', 'Every trisection has a twist.', 'A counterexample 4-manifold.', 'sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef', 'F-01M0HCVW4XTFWMZCQ40EJ0S0J7', '2026-08-02T01:00:00.000Z')",
+    "INSERT INTO claim_versions (claim_id, problem_id, version, kind, statement, falsifier, content_digest, editor_fellow_id, created_at) VALUES ('C-1', 'P-4DSP', 1, 'conjecture', ?, ?, ?, 'F-01M0HCVW4XTFWMZCQ40EJ0S0J7', '2026-08-02T01:00:00.000Z')",
+    [defaultStatement, defaultFalsifier, contentDigest],
   );
 
   // 4. Events
@@ -2064,39 +2082,100 @@ describe("off-scope discovery boundaries on migrated SQLite (not D1 integration 
       // after a clean claim head succeeds the warned version. These rows do
       // not pretend to establish independent review or evidence acceptance.
       for (const [seq, kind, id, payload] of [
-        [5, "review", "R-SCOPE-OLD", { target_claim_id: "C-1", target_version: 2 }],
+        [
+          5,
+          "review",
+          "R-SCOPE-OLD",
+          {
+            target_claim_id: "C-1",
+            target_version: 2,
+            verdict: "inform",
+            tier: "T1",
+            basis: "Fixture scope-old review.",
+            body_md: "Verified scope-old note on C-1@2.",
+            capable_of_failure: null,
+          },
+        ],
         [
           6,
           "evidence",
           "E-SCOPE-OLD",
-          { bears_on_kind: "claim", bears_on_id: "C-1", bears_on_version: 2 },
+          {
+            bears_on_kind: "claim",
+            bears_on_id: "C-1",
+            bears_on_version: 2,
+            direction: "supports",
+            kind: "computation",
+            body_md: "Fixture scope-old computational evidence on C-1@2.",
+          },
         ],
-        [7, "review", "R-SCOPE-CONTROL", { target_claim_id: "C-2", target_version: 1 }],
+        [
+          7,
+          "review",
+          "R-SCOPE-CONTROL",
+          {
+            target_claim_id: "C-2",
+            target_version: 1,
+            verdict: "inform",
+            tier: "T1",
+            basis: "Fixture scope-control review.",
+            body_md: "Verified scope-control note on C-2.",
+            capable_of_failure: null,
+          },
+        ],
       ] as const) {
         const text = JSON.stringify(payload);
         const hash = createHash("sha256").update(text).digest("hex");
+        const createdAt = `2026-09-09T00:00:${String(seq).padStart(2, "0")}.000Z`;
         raw.run("UPDATE problems SET public_seq=?,chain_digest='sha256:chain' WHERE id='P-SCOPE'", [
           seq,
         ]);
         raw.run(
           `INSERT INTO events(id,problem_id,seq,type,object_kind,object_id,object_version,
-          payload_sha256,row_digest,chain_digest,created_at)
-          VALUES(?,'P-SCOPE',?,?,?,?,1,?,'sha256:row','sha256:chain',?)`,
-          [
-            `EVENT-${id}`,
-            seq,
-            `${kind}.created`,
-            kind,
-            id,
-            hash,
-            `2026-09-09T00:00:${String(seq).padStart(2, "0")}.000Z`,
-          ],
+          payload_sha256,row_digest,chain_digest,actor_fellow_id,actor_sponsor_id,created_at)
+          VALUES(?,'P-SCOPE',?,?,?,?,1,?,'sha256:row','sha256:chain','F-SCOPE-REV','SPON-REV',?)`,
+          [`EVENT-${id}`, seq, `${kind}.created`, kind, id, hash, createdAt],
         );
         raw.run("INSERT INTO event_content(event_id,payload_sha256,payload_json) VALUES(?,?,?)", [
           `EVENT-${id}`,
           hash,
           text,
         ]);
+        if (kind === "review") {
+          raw.run(
+            `INSERT INTO reviews(review_id,problem_id,target_claim_id,target_version,
+              reviewer_fellow_id,tier,verdict,basis,body_md,created_at,source_event_id,source_seq,
+              capable_of_failure,rubric_json)
+              VALUES(?,'P-SCOPE',?,?,'F-SCOPE-REV','T1','inform',?,?,?, ?, ?,NULL,'[]')`,
+            [
+              id,
+              payload.target_claim_id,
+              payload.target_version,
+              payload.basis,
+              payload.body_md,
+              createdAt,
+              `EVENT-${id}`,
+              seq,
+            ],
+          );
+        } else if (kind === "evidence") {
+          raw.run(
+            `INSERT INTO evidence(evidence_id,problem_id,bears_on_kind,bears_on_id,bears_on_version,
+              direction,kind,source_kind,mode,computed_class,author_fellow_id,body_md,created_at,
+              source_event_id,source_seq)
+              VALUES(?,'P-SCOPE','claim',?,?,'supports','computation','locator','confirmatory',
+                'computation','F-SCOPE-REV',?,?,?,?)`,
+            [
+              id,
+              payload.bears_on_id,
+              payload.bears_on_version,
+              payload.body_md,
+              createdAt,
+              `EVENT-${id}`,
+              seq,
+            ],
+          );
+        }
       }
       raw.run("UPDATE problems SET public_seq=7,chain_digest='sha256:chain' WHERE id='P-SCOPE'");
       const now = NowStripResponseSchema.parse(await read("/now.json"));
@@ -2970,11 +3049,25 @@ describe("W8.2 Stoa Discovery, Areas, Fellow Card & Now routes", () => {
     raw.run(
       "UPDATE problems SET public_seq = 3, chain_digest = 'sha256:chain', updated_at = '2026-08-05T01:00:00.000Z' WHERE id = 'P-4DSP'",
     );
+    const honorsStatement =
+      "Riemannian metric existence: every compact surface admits a Riemannian metric.";
+    const honorsFalsifier = "A counterexample 4-manifold.";
     const claimPayload = JSON.stringify({
       claim_id: "C-HONORS",
-      statement: "Riemannian metric existence: every compact surface admits a Riemannian metric.",
+      kind: "theorem-attempt",
+      statement: honorsStatement,
+      falsifier: honorsFalsifier,
     });
     const claimSha = createHash("sha256").update(claimPayload).digest("hex");
+    const honorsContentDigest = `sha256:${createHash("sha256")
+      .update(
+        JSON.stringify({
+          falsifier: honorsFalsifier,
+          kind: "theorem-attempt",
+          statement: honorsStatement,
+        }),
+      )
+      .digest("hex")}`;
     raw.run(`
       INSERT INTO events (id, problem_id, seq, type, object_kind, object_id, object_version, payload_sha256, row_digest, chain_digest, created_at, actor_fellow_id, actor_sponsor_id)
       VALUES ('E-CHON-1', 'P-4DSP', 3, 'claim.created', 'claim', 'C-HONORS', 1, '${claimSha}', 'sha256:rowc', 'sha256:chain', '2026-08-05T01:00:00.000Z', 'F-01M0HCVW4XTFWMZCQ40EJ0S0J7', 'SPON-01')
@@ -2985,11 +3078,11 @@ describe("W8.2 Stoa Discovery, Areas, Fellow Card & Now routes", () => {
     `);
     raw.run(`
       INSERT INTO claims (problem_id, id, statement, payload_sha256, source_seq, created_at)
-      VALUES ('P-4DSP', 'C-HONORS', 'Riemannian metric existence: every compact surface admits a Riemannian metric.', '${claimSha}', 3, '2026-08-05T01:00:00.000Z')
+      VALUES ('P-4DSP', 'C-HONORS', '${honorsStatement}', '${claimSha}', 3, '2026-08-05T01:00:00.000Z')
     `);
     raw.run(`
       INSERT INTO claim_versions (problem_id, claim_id, version, kind, statement, falsifier, content_digest, editor_fellow_id, created_at)
-      VALUES ('P-4DSP', 'C-HONORS', 1, 'theorem', 'Riemannian metric existence: every compact surface admits a Riemannian metric.', 'A counterexample 4-manifold.', 'sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef', 'F-01M0HCVW4XTFWMZCQ40EJ0S0J7', '2026-08-05T01:00:00.000Z')
+      VALUES ('P-4DSP', 'C-HONORS', 1, 'theorem-attempt', '${honorsStatement}', '${honorsFalsifier}', '${honorsContentDigest}', 'F-01M0HCVW4XTFWMZCQ40EJ0S0J7', '2026-08-05T01:00:00.000Z')
     `);
 
     // DAG context: depends on C-1, addresses gap G-1

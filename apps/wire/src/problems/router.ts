@@ -503,7 +503,12 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
             )
             .bind(problemId, problem.current_statement_version)
             .first<
-              StoredProblemBoundaries & { statement: string; falsifier: string; motivation: string; distinct_because: string | null }
+              StoredProblemBoundaries & {
+                statement: string;
+                falsifier: string;
+                motivation: string;
+                distinct_because: string | null;
+              }
             >()
         : publicFormulation?.problem;
 

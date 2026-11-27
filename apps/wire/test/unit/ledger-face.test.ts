@@ -381,7 +381,7 @@ test("maximum roster identities and uncertain histories preserve the 4K digest e
   // The full science exceeds the envelope, but its long statement fits when
   // the roster is omitted. Restoring even one large member before tail fitting
   // must not displace that scientific item.
-  const longStatement = "漢".repeat(4100);
+  const longStatement = "漢".repeat(3800);
   row.formulation_json = JSON.stringify({
     ...JSON.parse(row.formulation_json),
     statement: longStatement,

@@ -174,7 +174,9 @@ describe("hello consumes canonical unread feedback", () => {
     expect((await f.hello()).unread_reviews).toEqual([]);
     const cleared = await f.hello();
     expect(cleared.inbox?.unacknowledged_count).toBe(0);
-    expect(cleared.next_actions.find((item) => item.url === ORIGIN + INBOX_PATH)?.action).toBe("reference");
+    expect(cleared.next_actions.find((item) => item.url === ORIGIN + INBOX_PATH)?.action).toBe(
+      "reference",
+    );
     expect(
       TriageResponseSchema.parse(await (await f.call("/v1/triage")).json()).hello.unread_reviews,
     ).toEqual([]);
@@ -286,7 +288,9 @@ describe("hello consumes canonical unread feedback", () => {
     const hello = await f.hello();
     expect(hello).not.toHaveProperty("inbox");
     expect(hello).not.toHaveProperty("unread_reviews");
-    expect(hello.next_actions.find((item) => item.url === ORIGIN + INBOX_PATH)?.action).toBe("read");
+    expect(hello.next_actions.find((item) => item.url === ORIGIN + INBOX_PATH)?.action).toBe(
+      "read",
+    );
     expect(hello.next_actions.find((item) => item.url === ORIGIN + INBOX_PATH)?.reason).toContain(
       "unavailable",
     );

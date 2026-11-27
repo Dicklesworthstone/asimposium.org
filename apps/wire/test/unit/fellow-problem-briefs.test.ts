@@ -131,14 +131,11 @@ test("hello recommends opening a session only while the Fellow grant has capacit
     }),
   ).toBe(false);
   expect(
-    await hello(
-      f.reader,
-      {
-        prepare() {
-          throw new Error("unavailable");
-        },
-      } as unknown as Env["DB"],
-    ),
+    await hello(f.reader, {
+      prepare() {
+        throw new Error("unavailable");
+      },
+    } as unknown as Env["DB"]),
   ).toBe(false);
   await writeLedgerEvent(
     f.db,

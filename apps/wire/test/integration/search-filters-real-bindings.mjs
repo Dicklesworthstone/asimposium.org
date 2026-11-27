@@ -276,9 +276,15 @@ async function searchFiltersJourney({
     assert.ok(!savedBody.includes(revisionText));
   }
   for (const suffix of [`@2?through=${through}`, "?through=0", "?through=999999999999999"]) {
-    assert.equal((await search({
-      ...query, q: `https://asimposium.org${snapshotPath}${suffix}`,
-    })).total_matches, 0);
+    assert.equal(
+      (
+        await search({
+          ...query,
+          q: `https://asimposium.org${snapshotPath}${suffix}`,
+        })
+      ).total_matches,
+      0,
+    );
   }
   console.log(JSON.stringify({ stage: "search-filter-reads-verified" }));
 

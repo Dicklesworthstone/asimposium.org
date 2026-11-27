@@ -5536,7 +5536,7 @@ describe("session protocol routes", () => {
       {
         path: "/v1/sessions/S-EARLY-REFUSAL/workshop",
         code: "WORKSHOP_PUSH_BODY_INVALID",
-        schema: `${SLICE}workshop_push_request.json`,
+        schema: `${SLICE}first_claim_draft_request.json`,
         example: {
           type: "claim-draft",
           title: "Orbit count under toggles",

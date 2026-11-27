@@ -2320,7 +2320,9 @@ await runLocalWorkerJourney(async (context) => {
     const problem = await call(`/p/${problemId}.json`, undefined, undefined, 200);
     const claim = await call(
       `/p/${problemId}/claims/${c1Id}@1.json?through=${problem.cursor}`,
-      undefined, undefined, 200,
+      undefined,
+      undefined,
+      200,
     );
     for (const face of [problem, claim]) {
       assert.equal(face.has_famous_guardrail, expected);

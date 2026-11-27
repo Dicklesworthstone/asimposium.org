@@ -116,8 +116,7 @@ export class WorkshopRoomStreams {
     const now = deps.now ?? Date.now;
     const verifyWorkshopTicket = deps.verifyWorkshopTicket;
     const workshopHead = deps.workshopHead;
-    if (!verifyWorkshopTicket || !workshopHead)
-      return deps.refuse("unavailable", request.method);
+    if (!verifyWorkshopTicket || !workshopHead) return deps.refuse("unavailable", request.method);
     if (this.count() + deps.socketCount() >= LIMITS.connections)
       return deps.refuse("capacity", request.method);
     const connection = Symbol();
@@ -140,11 +139,7 @@ export class WorkshopRoomStreams {
           const fresh = await deps.consumeTicketNonce(verified.nonce, verified.expMs, now());
           alive(signal);
           if (!fresh) return null;
-          const head = await workshopHead(
-            verified.sponsorId,
-            scope.fellowId,
-            scope.problemId,
-          );
+          const head = await workshopHead(verified.sponsorId, scope.fellowId, scope.problemId);
           alive(signal);
           return head === null ? null : { sponsorId: verified.sponsorId, cursor: head.cursor };
         },
