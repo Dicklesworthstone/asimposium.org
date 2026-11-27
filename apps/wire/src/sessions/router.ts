@@ -18,6 +18,7 @@ import {
   problemMembershipAdmissionProblem,
 } from "./problem-membership-admission.ts";
 import { admitFellowRead, fellowReadBudgetHeaders } from "./read-quota.ts";
+import { narrowSessionRefusalSchema } from "./refusal-schema.ts";
 import { ReviewPackSelectionError, selectIsolatedReviewPack } from "./review-pack-selection.ts";
 import {
   authenticateSessionFellow,
@@ -35,6 +36,11 @@ import { createSponsorWorkshopRoomTicketRouter } from "./sponsor-workshop-room-t
 export * from "./router-core.ts";
 export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindings: Env }> {
   const app = new Hono<{ Bindings: Env }>();
+  // The ledger router installs the narrow schema middleware for session
+  // writers. Problem-level review/evidence writers are mounted through this
+  // wrapper instead; give their 400/422 contract refusals the same small
+  // request slices without changing the underlying authorization or writer.
+  app.use("/v1/p/*", narrowSessionRefusalSchema);
   // Writers recover their accepted replay before an uncaught transaction
   // refusal reaches this boundary. Never relabel a successful or uncertain
   // response based on a fresh mutable-state read.
