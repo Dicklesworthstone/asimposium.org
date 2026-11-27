@@ -37,6 +37,14 @@ function appReturning(
   const app = new Hono();
   app.use("/v1/sessions/*", narrowSessionRefusalSchema);
   app.post(
+    "/v1/sessions/:id/workshop",
+    () =>
+      new Response(JSON.stringify(body), {
+        status,
+        headers: { "content-type": type, "x-keep": "1" },
+      }),
+  );
+  app.post(
     "/v1/sessions/:id/promote",
     () =>
       new Response(JSON.stringify(body), {
@@ -89,5 +97,48 @@ test("success bodies, other schema links and non-problem responses are untouched
       },
     );
     expect(((await response.json()) as { schema: string }).schema).toBe(body.schema);
+  }
+});
+
+test("first-claim and saved-draft recovery refusals link the precise served request shape", async () => {
+  for (const [path, example, property] of [
+    [
+      "/v1/sessions/S-1/workshop",
+      { type: "claim-draft", title: "Conjecture", body_md: "A falsifiable claim." },
+      "first_claim_draft_request",
+    ],
+    [
+      "/v1/sessions/S-1/promote",
+      { workshop_id: "W-123", expected_workshop_version: 1 },
+      "promote_saved_draft_request",
+    ],
+  ] as const) {
+    const response = await appReturning({
+      status: 422,
+      code: "SCHEMA_INVALID",
+      schema: SESSIONS_SCHEMA_URL,
+      example,
+      fix_hint: "Correct the request and retry with the same key.",
+    }).request(path, { method: "POST" });
+    const problem = (await response.json()) as Record<string, unknown>;
+    expect(problem.schema).toBe(`https://a.asimposium.org/schemas/sessions.v1/${property}.json`);
+    expect(problem.example).toEqual(example);
+    expect(response.headers.get("x-keep")).toBe("1");
+  }
+});
+
+test("ambiguous or unrelated recovery examples retain the generic route schema", async () => {
+  for (const [path, example, property] of [
+    ["/v1/sessions/S-1/promote", { kind: "conjecture", statement: "A", workshop_id: "W-1" }, "promote_request"],
+    ["/v1/sessions/S-1/promote", { workshop_id: 123 }, "promote_request"],
+    ["/v1/sessions/S-1/workshop", { type: "research-note" }, "workshop_push_request"],
+    ["/v1/sessions/S-1/workshop", { type: "claim-draft" }, "first_claim_draft_request"],
+  ] as const) {
+    const response = await appReturning({
+      schema: SESSIONS_SCHEMA_URL,
+      example,
+    }).request(path, { method: "POST" });
+    const problem = (await response.json()) as Record<string, unknown>;
+    expect(problem.schema).toBe(`https://a.asimposium.org/schemas/sessions.v1/${property}.json`);
   }
 });
