@@ -79,6 +79,62 @@ no-JavaScript and skip-target checks, and a 25-route check that every title
 names the site once. Stoa was not redeployed. Roll back with
 `vercel promote dpl_918TdehDwqaV7Tsttgz2cwteUsUW`.
 
+On November 27, at the operator's request, production moved from the frozen
+November 23 source to main, ending the candidate lineage under
+`e2e/artifacts/prod-r*-*`.
+
+The production D1 journal recorded three migrations under their names from
+before the post-merge renumbering, `0149`–`0151`. Main had renamed those
+byte-identical files to `0158`–`0160`, and main's `0149`–`0157` and
+`0161`–`0165` had never run there. `infra/migrate.mjs` refuses production, so
+the reconciliation was manual:
+
+- a digest-guarded rename of the three journal rows;
+- then each missing migration in order, as its exact file plus its journal row.
+
+The procedure was first rehearsed in local SQLite against a captured
+production catalog.
+
+A Time Travel bookmark was recorded before the first write:
+`000004ec-00000000-00005130-a1c46914eb37996837a0a99f7d2fb448`. Afterwards the
+production catalog equals a clean replay of `0001`–`0165`: 804 objects, with
+three known cosmetic differences that predate this change. The journal
+matches all 165 files except the known historical `0016` digest. The data
+holds 7 sponsors, 20 enrollment records, and no problems or events.
+
+Stoa then took main `a2b8443b` as Worker version
+`c75c6b42-1358-4043-820c-95d12d145861`, followed by `1ace5105` as
+`636ba7f0-d9ab-4a3f-9bb6-e58abaf1f73c`. Capabilities report `0.2.0-draft`
+with 269 operations, and `/internal/health` shows every binding bound.
+
+Agora took the same revisions: `dpl_8vNtuY42wQDrHDnhXS7R9UbTWm2d`, then
+`dpl_47vV1cM6fSEgCT7vu89wNGtCSeG5` with the round-10 front page. The local build, each unaliased deployment and the live
+domain all passed:
+- the 16-route browser checks in both colour schemes at 1440 and 390 pixels;
+- the 14 extra probes, titles and backslash checks;
+- the bare sign-in callback redirect, and sign-in start to Google with the
+  registered client and callback.
+
+At `a2b8443b` the Worker unit suite has 8,306 passes and 7 failures. Two are
+host-load timeouts. Five are fixture drift that the pending `628934b3`
+corrects in tests only.
+
+Roll back with:
+- `wrangler rollback c75c6b42-1358-4043-820c-95d12d145861` (or
+  `a5688fe9-f1fb-4cce-903a-02b798e09dad`), with
+  `--config infra/environments/production.deploy.wrangler.toml`;
+- `vercel promote dpl_8vNtuY42wQDrHDnhXS7R9UbTWm2d` (or
+  `dpl_3AmjeJjnKe8X7U9PkLG8dVB9cBvv`).
+
+The migrations are additive, so an older Worker runs on the migrated schema.
+
+Still open for public launch:
+- the operator publishes the Google OAuth consent screen (it is in Testing);
+- one real sponsor signs in and pairs a Fellow;
+- that Fellow proposes the first problem, The Instrument, for the sponsor to
+  publish;
+- the legal, terms and IP sign-offs listed above.
+
 ### Candidate and rollout
 
 - [x] Check the public Agora and Stoa, including Explore, the problem index and capabilities.
