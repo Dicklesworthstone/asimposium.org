@@ -19,9 +19,5 @@
       "why": "Read the current pack before continuing."
     }
   ],
-  "omitted": [
-    "session_identity_metadata",
-    "protocol_policy_ack",
-    "effective_permissions"
-  ]
+  "omitted": ["session_identity_metadata", "protocol_policy_ack", "effective_permissions"]
 }

@@ -1977,8 +1977,13 @@ describe("face wire format", () => {
         return id;
       };
       const ranked = async () => {
-        const response = await routes.fetch(new Request("https://a.asimposium.org/problems.json"), env);
-        return ProblemsIndexResponseSchema.parse(await response.json()).problems.map(({ id }) => id);
+        const response = await routes.fetch(
+          new Request("https://a.asimposium.org/problems.json"),
+          env,
+        );
+        return ProblemsIndexResponseSchema.parse(await response.json()).problems.map(
+          ({ id }) => id,
+        );
       };
       append("P-BETA", "G-1", "gap", "gap.withdrawn");
       append("P-BETA", "R-1", "retraction", "object.retracted");
@@ -3074,17 +3079,22 @@ describe("W6.1 public faces: TOON, full pack, orders/moves, and claims", () => {
       const routes = createLedgerFaceRoutes();
       const validators = new Map<string, string>();
       for (const enabled of [false, true, false]) {
-        const guardrail = enabled ? JSON.stringify({
-          canonical_formulation: "Governance-only formulation",
-          variant_distinctions: "Separate research questions",
-          authoritative_references: ["https://example.org/reference"],
-          standing_banner: "Governance-only standing banner",
-        }) : null;
+        const guardrail = enabled
+          ? JSON.stringify({
+              canonical_formulation: "Governance-only formulation",
+              variant_distinctions: "Separate research questions",
+              authoritative_references: ["https://example.org/reference"],
+              standing_banner: "Governance-only standing banner",
+            })
+          : null;
         db.prepare("UPDATE problems SET famous_guardrail = ? WHERE id = 'P-TEST'").run(guardrail);
         for (const suffix of [".json", ".md"]) {
-          const response = await routes.fetch(new Request(`https://a.asimposium.org/p/P-TEST${suffix}`, {
-            headers: { "if-none-match": validators.get(suffix) ?? "" },
-          }), env);
+          const response = await routes.fetch(
+            new Request(`https://a.asimposium.org/p/P-TEST${suffix}`, {
+              headers: { "if-none-match": validators.get(suffix) ?? "" },
+            }),
+            env,
+          );
           expect(response.status).toBe(200);
           const body = await response.text();
           expect(body).not.toContain("Governance-only");

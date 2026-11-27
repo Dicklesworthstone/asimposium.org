@@ -197,14 +197,18 @@ export const SynthesisDraftRecordSchema = z
 export type SynthesisDraftRecord = z.infer<typeof SynthesisDraftRecordSchema>;
 
 /** Private continuation ordered by creation time, then immutable draft ID. */
-export const SynthesisDraftCursorSchema = z.object({
-  created_at: z.string().datetime(),
-  synthesis_id: SynthesisIdSchema,
-}).strict();
+export const SynthesisDraftCursorSchema = z
+  .object({
+    created_at: z.string().datetime(),
+    synthesis_id: SynthesisIdSchema,
+  })
+  .strict();
 export type SynthesisDraftCursor = z.infer<typeof SynthesisDraftCursorSchema>;
-export const SynthesisDraftPageRequestSchema = z.object({
-  after: SynthesisDraftCursorSchema.optional(),
-}).strict();
+export const SynthesisDraftPageRequestSchema = z
+  .object({
+    after: SynthesisDraftCursorSchema.optional(),
+  })
+  .strict();
 // One large admitted draft may occupy its own page.
 export const SYNTHESIS_DRAFT_PAGE_MAX_BYTES = 2 * 1024 * 1024;
 

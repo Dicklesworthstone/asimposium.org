@@ -104,7 +104,10 @@ test("an accepted key cannot identify changed prose, and an ordinary new-key dup
   expect(drafts(f)).toHaveLength(1);
 });
 
-for (const explanation of [undefined, "This version counts rooted trees with a prescribed depth."]) {
+for (const explanation of [
+  undefined,
+  "This version counts rooted trees with a prescribed depth.",
+]) {
   test(`a concurrent same-sponsor duplicate ${explanation ? "keeps its distinction" : "requires a distinction"} at commit`, async () => {
     const f = await fixture();
     const brief = await saveBrief(f);
@@ -135,11 +138,15 @@ for (const explanation of [undefined, "This version counts rooted trees with a p
         existing_problem_id: winnerId,
       });
       expect(drafts(f)).toHaveLength(1);
-      expect(f.sql.query("SELECT status FROM sponsor_problem_briefs WHERE id=?").get(brief.id)).toEqual({
+      expect(
+        f.sql.query("SELECT status FROM sponsor_problem_briefs WHERE id=?").get(brief.id),
+      ).toEqual({
         status: "active",
       });
       expect(f.sql.query("SELECT * FROM problem_proposal_command_receipts").all()).toHaveLength(1);
-      expect((await getProblemCreationBudget(f.baseDb, f.principal.sponsorId, Date.now())).remaining).toBe(1);
+      expect(
+        (await getProblemCreationBudget(f.baseDb, f.principal.sponsorId, Date.now())).remaining,
+      ).toBe(1);
     }
   });
 }
@@ -503,7 +510,9 @@ async function publishedDuplicateSource(
   expect(receipt.problem.distinct_because).toBe(distinctBecause);
   const preview = await readProblemPublicationPreview(f.baseDb, problemId, f.principal.sponsorId);
   expect(preview?.problem.distinct_because).toBe(distinctBecause);
-  expect(await readProblemPublicationPreview(f.baseDb, problemId, f.receiver.sponsorId)).toBeUndefined();
+  expect(
+    await readProblemPublicationPreview(f.baseDb, problemId, f.receiver.sponsorId),
+  ).toBeUndefined();
   expect(await readPublishedProblemFormulation(f.baseDb, problemId, 0)).toBeUndefined();
   const problem = await f.baseDb
     .prepare("SELECT * FROM problems WHERE id=?")
@@ -525,7 +534,10 @@ async function publishedDuplicateSource(
     }),
   );
   expect(published.status).toBe(200);
-  expect((await published.json() as { problem: { distinct_because?: string } }).problem.distinct_because).toBe(distinctBecause);
+  expect(
+    ((await published.json()) as { problem: { distinct_because?: string } }).problem
+      .distinct_because,
+  ).toBe(distinctBecause);
   const event = await f.baseDb
     .prepare(
       "SELECT id,seq,object_version FROM events WHERE problem_id=? AND type='problem.admitted'",
@@ -539,10 +551,13 @@ async function publishedDuplicateSource(
 test("a real duplicate override follows the reviewed version through publication and withdrawal", async () => {
   const f = await fixture();
   expect((await f.propose(formulation, "first-proposal")).status).toBe(201);
-  expect((await f.propose({ ...formulation, distinct_because: "  \n " }, "blank-override")).status).toBe(422);
+  expect(
+    (await f.propose({ ...formulation, distinct_because: "  \n " }, "blank-override")).status,
+  ).toBe(422);
   const rationale = "We test a different boundary condition.\nOnly nonempty paths are considered.";
   const publication = await publishedDuplicateSource(f, rationale);
-  const read = () => readPublishedProblemFormulation(f.baseDb, publication.problemId, publication.seq);
+  const read = () =>
+    readPublishedProblemFormulation(f.baseDb, publication.problemId, publication.seq);
   expect((await read())?.problem.distinct_because).toBe(rationale);
   await redactEventContent(f.baseDb, publication.id, "privacy", new Date().toISOString());
   expect(await read()).toBeUndefined();

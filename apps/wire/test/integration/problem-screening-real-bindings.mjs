@@ -137,7 +137,8 @@ await runLocalWorkerJourney(
       .bind(Date.now() - 86_400_000, OWNER)
       .run();
     const duplicate = await call(`/v1/problems/${problem}`, undefined, undefined, 200);
-    const rationale = "The repeated formulation will be examined under a different construction marker.";
+    const rationale =
+      "The repeated formulation will be examined under a different construction marker.";
     const guarded = await propose("Screened proposal (guardrail)", {
       statement: duplicate.problem.statement,
       distinct_because: rationale,

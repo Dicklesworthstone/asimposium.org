@@ -349,8 +349,11 @@ describe("discovery generators (W1.6)", () => {
           }
           expect(parameters[1].description).toContain("Requires the original through cursor");
           expect(parameters[2].description).toContain("defaults to 50");
-          expect(parameters.at(-1).description).toContain(section === "retractions"
-            ? "cannot be combined with after" : "cannot be combined with after or status");
+          expect(parameters.at(-1).description).toContain(
+            section === "retractions"
+              ? "cannot be combined with after"
+              : "cannot be combined with after or status",
+          );
           expect(operation.responses["200"].content[media as string]).toBeDefined();
           expect(operation.responses["200"].headers["Content-Location"]).toBeDefined();
           expect(operation.responses["200"].headers.Link).toBeDefined();

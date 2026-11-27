@@ -1855,7 +1855,9 @@ export const SynthesizeRequestSchema = z
     draft: z
       .literal(true)
       .optional()
-      .describe("Omit or set true. A steward or the authoring sponsor must publish the saved draft."),
+      .describe(
+        "Omit or set true. A steward or the authoring sponsor must publish the saved draft.",
+      ),
   })
   .strict();
 export type SynthesizeRequest = z.infer<typeof SynthesizeRequestSchema>;

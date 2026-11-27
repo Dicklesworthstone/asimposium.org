@@ -2419,7 +2419,9 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
 
   // --- W5.8d Retractions Diptych faces ---
   for (const format of ["json", "md", "html"] as const)
-    app.on(["GET", "HEAD"], `/p/:id/retractions.${format}`, (c) => handleRetractionsList(c, format));
+    app.on(["GET", "HEAD"], `/p/:id/retractions.${format}`, (c) =>
+      handleRetractionsList(c, format),
+    );
 
   for (const format of ["json", "md", "html"] as const)
     app.on(["GET", "HEAD"], `/p/:id/conflicts.${format}`, (c) => handleConflictsList(c, format));

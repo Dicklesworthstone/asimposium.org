@@ -204,11 +204,13 @@ await runLocalWorkerJourney(
     ]);
     assert.deepEqual(repeatedReviews[0], repeatedReviews[1]);
     assert.equal(
-      (await createExpertReview(
-        "external-review-one",
-        { ...expertReviewBody, verdict: "supports-resolution" },
-        409,
-      )).code,
+      (
+        await createExpertReview(
+          "external-review-one",
+          { ...expertReviewBody, verdict: "supports-resolution" },
+          409,
+        )
+      ).code,
       "IDEMPOTENCY_CONFLICT",
     );
     await sponsorCall(
@@ -222,15 +224,23 @@ await runLocalWorkerJourney(
       "external-review-one",
     );
     assert.equal(
-      (await env.DB.prepare(
-        "SELECT COUNT(*) AS n FROM external_expert_reviews WHERE problem_id = ?",
-      ).bind(problemId).first()).n,
+      (
+        await env.DB.prepare(
+          "SELECT COUNT(*) AS n FROM external_expert_reviews WHERE problem_id = ?",
+        )
+          .bind(problemId)
+          .first()
+      ).n,
       2,
     );
     assert.equal(
-      (await env.DB.prepare(
-        "SELECT COUNT(*) AS n FROM operator_audit WHERE action = 'external-expert-review-recorded' AND target_id = ?",
-      ).bind(`${problemId}/${claim1Id}@1`).first()).n,
+      (
+        await env.DB.prepare(
+          "SELECT COUNT(*) AS n FROM operator_audit WHERE action = 'external-expert-review-recorded' AND target_id = ?",
+        )
+          .bind(`${problemId}/${claim1Id}@1`)
+          .first()
+      ).n,
       2,
     );
 
@@ -284,10 +294,17 @@ await runLocalWorkerJourney(
       "synth-idempotent-key-1",
     );
     assert.equal(synth1Draft.state, "draft");
-    assert.equal((await env.DB.prepare("SELECT public_seq FROM problems WHERE id = ?")
-      .bind(problemId).first()).public_seq, maxSeq1);
-    assert.equal(await env.DB.prepare("SELECT id FROM events WHERE object_id = ?")
-      .bind(synth1Draft.synthesis_id).first(), null);
+    assert.equal(
+      (await env.DB.prepare("SELECT public_seq FROM problems WHERE id = ?").bind(problemId).first())
+        .public_seq,
+      maxSeq1,
+    );
+    assert.equal(
+      await env.DB.prepare("SELECT id FROM events WHERE object_id = ?")
+        .bind(synth1Draft.synthesis_id)
+        .first(),
+      null,
+    );
     const synth1 = await publishSynthesis(synth1Draft);
     assert.ok(synth1.synthesis_id.startsWith("SYNTH-"));
     assert.equal(synth1.problem_id, problemId);
@@ -573,7 +590,11 @@ await runLocalWorkerJourney(
       };
       const key = `frozen-anchor-${index}`;
       const draft = await call(
-        `/v1/sessions/${historySession.session_id}/synthesize`, body, historyWriter, null, key,
+        `/v1/sessions/${historySession.session_id}/synthesize`,
+        body,
+        historyWriter,
+        null,
+        key,
       );
       if (allowed) {
         assert.equal(
@@ -634,7 +655,11 @@ await runLocalWorkerJourney(
           "The provider input also binds the surrounding public context",
         );
         const replay = await call(
-          `/v1/sessions/${historySession.session_id}/synthesize`, body, historyWriter, 200, key,
+          `/v1/sessions/${historySession.session_id}/synthesize`,
+          body,
+          historyWriter,
+          200,
+          key,
         );
         assert.deepEqual(replay, draft);
         assert.deepEqual(await publishSynthesis(draft, 200), response);
@@ -645,7 +670,10 @@ await runLocalWorkerJourney(
           draft.code === "SYNTHESIS_UNANCHORED" && draft.rule === "P13",
           `${label}: P13 refusal`,
         );
-        check(JSON.stringify(await footprint()) === JSON.stringify(before), `${label}: no public mutation`);
+        check(
+          JSON.stringify(await footprint()) === JSON.stringify(before),
+          `${label}: no public mutation`,
+        );
         check((await fixtures.screeningCalls()) === screeningBefore, `${label}: no paid screen`);
       }
     }
@@ -1409,7 +1437,11 @@ await runLocalWorkerJourney(
       while ((await fixtures.screeningCalls()) < heldCall && Date.now() < deadline) {
         await new Promise((resolve) => setTimeout(resolve, 25));
       }
-      assert.equal(await fixtures.screeningCalls(), heldCall, "draft reached the screening barrier");
+      assert.equal(
+        await fixtures.screeningCalls(),
+        heldCall,
+        "draft reached the screening barrier",
+      );
       await call(
         `${closingPath}/close`,
         { handback: "The saved private synthesis is ready; this session is closed.", promote: [] },
@@ -1430,23 +1462,33 @@ await runLocalWorkerJourney(
       "The refused draft creates no public event, projection, outbox or successful replay",
     );
     assert.equal(
-      (await env.DB.prepare("SELECT COUNT(*) AS n FROM synthesis_drafts WHERE session_id = ?")
-        .bind(closingSession.session_id)
-        .first()).n,
+      (
+        await env.DB.prepare("SELECT COUNT(*) AS n FROM synthesis_drafts WHERE session_id = ?")
+          .bind(closingSession.session_id)
+          .first()
+      ).n,
       1,
       "Only the previously accepted draft is retained",
     );
     assert.equal(
-      (await env.DB.prepare(
-        "SELECT COUNT(*) AS n FROM session_write_replays WHERE scope = 'synthesize' AND idempotency_key = ?",
-      ).bind("synthesis-close-during-screening").first()).n,
+      (
+        await env.DB.prepare(
+          "SELECT COUNT(*) AS n FROM session_write_replays WHERE scope = 'synthesize' AND idempotency_key = ?",
+        )
+          .bind("synthesis-close-during-screening")
+          .first()
+      ).n,
       0,
       "Refusal leaves the idempotency key unclaimed",
     );
     assert.equal(
-      (await env.DB.prepare(
-        "SELECT status FROM public_write_attempt_reservations WHERE route = 'synthesize' AND idempotency_key = ?",
-      ).bind("synthesis-close-during-screening").first()).status,
+      (
+        await env.DB.prepare(
+          "SELECT status FROM public_write_attempt_reservations WHERE route = 'synthesize' AND idempotency_key = ?",
+        )
+          .bind("synthesis-close-during-screening")
+          .first()
+      ).status,
       "settled_failed",
     );
     assert.deepEqual(
@@ -1461,16 +1503,22 @@ await runLocalWorkerJourney(
       "A completed draft receipt survives session closure",
     );
     assert.equal(
-      (await call(
-        `${closingPath}/synthesize`,
-        retainedBody,
-        closingWriter,
-        409,
-        "synthesis-new-after-close",
-      )).code,
+      (
+        await call(
+          `${closingPath}/synthesize`,
+          retainedBody,
+          closingWriter,
+          409,
+          "synthesis-new-after-close",
+        )
+      ).code,
       "SESSION_CLOSED",
     );
-    assert.equal(await fixtures.screeningCalls(), heldCall, "closed-session replay needs no screening");
+    assert.equal(
+      await fixtures.screeningCalls(),
+      heldCall,
+      "closed-session replay needs no screening",
+    );
     console.log(JSON.stringify({ stage: "synthesis-close-during-screening", status: "pass" }));
 
     // W2.6 (79n, z3or): claims (anchored across a statement revision), their

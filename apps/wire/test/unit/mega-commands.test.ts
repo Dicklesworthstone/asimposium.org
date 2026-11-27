@@ -598,57 +598,83 @@ describe("W6.2 Mega-Commands (hello, triage, next)", () => {
     const fellow = await enrollFellow();
     const origin = "https://a.asimposium.org";
     const headers = { authorization: `Bearer ${fellow.token}` };
-    const hello = async () => EnrollmentHelloResponseSchema.parse(await (
-      await app.fetch(new Request(origin + "/v1/hello", { headers }), env)
-    ).json());
+    const hello = async () =>
+      EnrollmentHelloResponseSchema.parse(
+        await (await app.fetch(new Request(origin + "/v1/hello", { headers }), env)).json(),
+      );
     await seedPublishedProblem("P-ASSIGNED", "Assigned problem", fellow);
     await seedMembership("P-ASSIGNED", fellow.fellowId, "contributor");
     const first = await hello();
     expect(first.granted_resources.problem_binding).toBeUndefined();
-    expect(first.next_actions.find((a) => a.url.includes("/v1/directives/active"))?.url)
-      .toBe(origin + "/v1/directives/active?problem_id=P-ASSIGNED");
+    expect(first.next_actions.find((a) => a.url.includes("/v1/directives/active"))?.url).toBe(
+      origin + "/v1/directives/active?problem_id=P-ASSIGNED",
+    );
     const open = first.next_actions.find((a) => a.action === "session.open");
     expect(open?.request?.body_prefill).toEqual({ problem_id: "P-ASSIGNED" });
     if (!open?.request) throw new Error("Missing session-open continuation");
-    const opened = await app.fetch(new Request(open.url, {
-      method: open.request.method,
-      headers: { ...headers, "content-type": "application/json", "idempotency-key": "assigned-from-hello" },
-      body: JSON.stringify(open.request.body_prefill),
-    }), env);
+    const opened = await app.fetch(
+      new Request(open.url, {
+        method: open.request.method,
+        headers: {
+          ...headers,
+          "content-type": "application/json",
+          "idempotency-key": "assigned-from-hello",
+        },
+        body: JSON.stringify(open.request.body_prefill),
+      }),
+      env,
+    );
     expect(opened.status, await opened.clone().text()).toBe(201);
-    const { session_id: sessionId } = await opened.json() as { session_id: string };
-    const resume = (await hello()).next_actions.find(a => a.url.includes(sessionId));
+    const { session_id: sessionId } = (await opened.json()) as { session_id: string };
+    const resume = (await hello()).next_actions.find((a) => a.url.includes(sessionId));
     expect(resume?.url).toBe(origin + "/v1/sessions/" + sessionId + "/pack?profile=working");
     if (!resume) throw new Error("Missing working pack continuation");
     const pack = await app.fetch(new Request(resume.url, { headers }), env);
     expect(pack.status, await pack.clone().text()).toBe(200);
-    await db.prepare("UPDATE sessions SET idle_close_at=? WHERE session_id=?")
-      .bind(new Date(Date.now() - 1_000).toISOString(), sessionId).run();
-    const inactive = (await hello()).next_actions.find(a => a.url.includes(sessionId));
+    await db
+      .prepare("UPDATE sessions SET idle_close_at=? WHERE session_id=?")
+      .bind(new Date(Date.now() - 1_000).toISOString(), sessionId)
+      .run();
+    const inactive = (await hello()).next_actions.find((a) => a.url.includes(sessionId));
     expect(inactive?.url).toBe(origin + "/v1/sessions/" + sessionId);
     const replacement = (await hello()).next_actions.find((a) => a.action === "session.open");
     expect(replacement?.request?.body_prefill).toEqual({ problem_id: "P-ASSIGNED" });
     if (!replacement?.request) throw new Error("Missing replacement session continuation");
-    const reopened = await app.fetch(new Request(replacement.url, {
-      method: replacement.request.method,
-      headers: { ...headers, "content-type": "application/json", "idempotency-key": "replace-from-hello" },
-      body: JSON.stringify(replacement.request.body_prefill),
-    }), env);
+    const reopened = await app.fetch(
+      new Request(replacement.url, {
+        method: replacement.request.method,
+        headers: {
+          ...headers,
+          "content-type": "application/json",
+          "idempotency-key": "replace-from-hello",
+        },
+        body: JSON.stringify(replacement.request.body_prefill),
+      }),
+      env,
+    );
     expect(reopened.status, await reopened.clone().text()).toBe(201);
-    expect((await reopened.json() as { session_id: string }).session_id).not.toBe(sessionId);
-
+    expect(((await reopened.json()) as { session_id: string }).session_id).not.toBe(sessionId);
 
     const other = await enrollFellow();
     await seedProblem("P-OTHER");
     await seedMembership("P-ASSIGNED", other.fellowId, "observer");
     await seedMembership("P-OTHER", other.fellowId, "contributor");
-    const multiple = EnrollmentHelloResponseSchema.parse(await (await app.fetch(
-      new Request(origin + "/v1/hello", { headers: { authorization: `Bearer ${other.token}` } }), env,
-    )).json());
-    expect(multiple.next_actions.find(a => a.action === "session.open")?.request)
-      .not.toHaveProperty("body_prefill");
-    expect(multiple.next_actions.find(a => a.url.includes("/v1/directives/active"))?.url)
-      .toBe(origin + "/v1/directives/active");
+    const multiple = EnrollmentHelloResponseSchema.parse(
+      await (
+        await app.fetch(
+          new Request(origin + "/v1/hello", {
+            headers: { authorization: `Bearer ${other.token}` },
+          }),
+          env,
+        )
+      ).json(),
+    );
+    expect(
+      multiple.next_actions.find((a) => a.action === "session.open")?.request,
+    ).not.toHaveProperty("body_prefill");
+    expect(multiple.next_actions.find((a) => a.url.includes("/v1/directives/active"))?.url).toBe(
+      origin + "/v1/directives/active",
+    );
   });
 
   test("hello and triage only suggest work the current Fellow can discover", async () => {
@@ -658,17 +684,23 @@ describe("W6.2 Mega-Commands (hello, triage, next)", () => {
     const headers = { authorization: `Bearer ${fellow.token}` };
     const now = new Date().toISOString();
     await seedProblem("P-ACTIVE");
-    for (const [id, status] of [["P-PAST", "retired"], ["P-PRIVATE", "private-draft"]] as const) {
-      await db.prepare(`INSERT INTO problems
+    for (const [id, status] of [
+      ["P-PAST", "retired"],
+      ["P-PRIVATE", "private-draft"],
+    ] as const) {
+      await db
+        .prepare(`INSERT INTO problems
         (id,title,status,sponsor_id,created_by_fellow_id,created_at,updated_at)
         VALUES (?,?,?,?,?,?,?)`)
-        .bind(id, "title-" + id, status, "usr_previous_sponsor", fellow.fellowId, now, now).run();
+        .bind(id, "title-" + id, status, "usr_previous_sponsor", fellow.fellowId, now, now)
+        .run();
     }
     for (const id of ["P-PAST", "P-ACTIVE", "P-PRIVATE"]) {
       await seedMembership(id, fellow.fellowId, "contributor");
     }
     const session = "S-" + "7".repeat(26);
-    await db.prepare(`INSERT INTO sessions
+    await db
+      .prepare(`INSERT INTO sessions
       (session_id,problem_id,fellow_id,opened_at,last_heartbeat_at,idle_close_at)
       VALUES(?,'P-PRIVATE',?,?,?,?)`)
       .bind(session, fellow.fellowId, now, now, new Date(Date.now() + 3_600_000).toISOString())
@@ -682,20 +714,26 @@ describe("W6.2 Mega-Commands (hello, triage, next)", () => {
       expect(payload).not.toContain(session);
       const data = JSON.parse(payload);
       const hello = EnrollmentHelloResponseSchema.parse(data.hello ?? data);
-      expect(hello.assignments?.map((item) => item.problem_id).sort())
-        .toEqual(["P-ACTIVE", "P-PAST"]);
+      expect(hello.assignments?.map((item) => item.problem_id).sort()).toEqual([
+        "P-ACTIVE",
+        "P-PAST",
+      ]);
       expect(hello.open_sessions).toEqual([]);
-      expect(hello.next_actions.find((a) => a.action === "session.open")?.request?.body_prefill)
-        .toEqual({ problem_id: "P-ACTIVE" });
+      expect(
+        hello.next_actions.find((a) => a.action === "session.open")?.request?.body_prefill,
+      ).toEqual({ problem_id: "P-ACTIVE" });
     }
 
-    await db.prepare("UPDATE problems SET sponsor_id=? WHERE id='P-PRIVATE'")
-      .bind(fellow.sponsorId).run();
-    const restored = EnrollmentHelloResponseSchema.parse(await (await app.fetch(
-      new Request(origin + "/v1/hello", { headers }), env,
-    )).json());
-    expect(restored.assignments?.find((a) => a.problem_id === "P-PRIVATE")?.title)
-      .toBe("title-P-PRIVATE");
+    await db
+      .prepare("UPDATE problems SET sponsor_id=? WHERE id='P-PRIVATE'")
+      .bind(fellow.sponsorId)
+      .run();
+    const restored = EnrollmentHelloResponseSchema.parse(
+      await (await app.fetch(new Request(origin + "/v1/hello", { headers }), env)).json(),
+    );
+    expect(restored.assignments?.find((a) => a.problem_id === "P-PRIVATE")?.title).toBe(
+      "title-P-PRIVATE",
+    );
     expect(restored.open_sessions?.map((item) => item.session_id)).toEqual([session]);
   });
 

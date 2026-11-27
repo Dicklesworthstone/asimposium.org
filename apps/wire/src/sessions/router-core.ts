@@ -142,11 +142,11 @@ import {
   SERVICE_ENVELOPE_HEADER,
 } from "../auth/http";
 import { wrongPrincipalProblem } from "../auth/refusal";
-import { ACTIVE_DIRECTIVE_AUTHORITY_SQL } from "../directives/active-source.ts";
 import {
   accountSponsorDirectiveOmissions,
   readActiveSponsorDirectives,
 } from "../directives/active.ts";
+import { ACTIVE_DIRECTIVE_AUTHORITY_SQL } from "../directives/active-source.ts";
 import type {
   EncryptedEnrollmentReplay,
   EnrollmentService,
@@ -3950,7 +3950,9 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         "cache-control": "private, no-store",
         "content-type": "application/json; charset=utf-8",
         etag,
-        ...(selectedClaimLocation === undefined ? {} : { "content-location": selectedClaimLocation }),
+        ...(selectedClaimLocation === undefined
+          ? {}
+          : { "content-location": selectedClaimLocation }),
       };
       if (privatePack !== undefined) {
         let current = false;
@@ -4504,7 +4506,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       const heads = await readPackClaimHeads(db, session.problem_id, cursor, 8);
       for (const head of heads) {
         if (head.statement === null) continue;
-        const pin = PackTargetQuerySchema.safeParse({ profile, target: `${head.id}@${head.version}` });
+        const pin = PackTargetQuerySchema.safeParse({
+          profile,
+          target: `${head.id}@${head.version}`,
+        });
         if (!pin.success) continue;
         targetParam = pin.data.target;
         url.search = new URLSearchParams({
@@ -4518,9 +4523,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       if (targetParam === null) {
         claimSelectionOmission = {
           reason: heads.length === 0 ? "no_published_claim" : "content_unavailable",
-          detail: heads.length === 0
-            ? "No claim has been published at the pack cursor."
-            : "No readable current version was found among the first eight claim heads. Choose an exact target from the public claims list.",
+          detail:
+            heads.length === 0
+              ? "No claim has been published at the pack cursor."
+              : "No readable current version was found among the first eight claim heads. Choose an exact target from the public claims list.",
         };
       }
     }
@@ -4541,7 +4547,12 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         stable_prefix: 2,
       });
 
-    if (profile !== "hello" && profile !== "review-queue" && profile !== "claim" && targetParam === null) {
+    if (
+      profile !== "hello" &&
+      profile !== "review-queue" &&
+      profile !== "claim" &&
+      targetParam === null
+    ) {
       // Coordination can precede the first claim: hypotheses, questions and
       // proof gaps are leaseable objects too. This is current state, not a
       // historical assertion about the pack's captured scientific cursor.
@@ -5127,7 +5138,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               ? [
                   {
                     reason: "moves_unavailable",
-                    detail: "working-moves: claim standing could not be verified at the pack cursor.",
+                    detail:
+                      "working-moves: claim standing could not be verified at the pack cursor.",
                   },
                 ]
               : [],
@@ -5290,12 +5302,14 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           : []),
         ...(claimSelectionOmission === undefined
           ? []
-          : [{
-              method: "GET" as const,
-              url: `/p/${session.problem_id}/claims.json?through=${cursor}`,
-              why: "Browse the public claims at this cursor and request profile=claim with an exact target.",
-              public_read: true,
-            }]),
+          : [
+              {
+                method: "GET" as const,
+                url: `/p/${session.problem_id}/claims.json?through=${cursor}`,
+                why: "Browse the public claims at this cursor and request profile=claim with an exact target.",
+                public_read: true,
+              },
+            ]),
         ...targetSection.candidates
           .filter((item) => item.kind === "claim-dependency")
           // Actions are mandatory envelope bytes. Every premise carries its
@@ -5312,9 +5326,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               {
                 method: "GET" as const,
                 url: `/v1/sessions/${session.session_id}/pack?profile=review&target=${encodeURIComponent(firstReviewTarget)}&max_tokens=8000`,
-                why: reviewQueue.acceptedTarget !== undefined
-                  ? "Resume the exact claim version you accepted for review in an isolated pack."
-                  : "Read the selected claim's exact version in an isolated review pack; submission rechecks authorization and the review validator.",
+                why:
+                  reviewQueue.acceptedTarget !== undefined
+                    ? "Resume the exact claim version you accepted for review in an isolated pack."
+                    : "Read the selected claim's exact version in an isolated review pack; submission rechecks authorization and the review validator.",
                 public_read: false,
               },
             ]

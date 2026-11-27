@@ -263,9 +263,9 @@ import {
 import {
   SingleSynthesisResponseSchema,
   SYNTHESES_SCHEMA_ID,
-  SynthesisDraftPublishResponseSchema,
   SynthesesListQuerySchema,
   SynthesesListResponseSchema,
+  SynthesisDraftPublishResponseSchema,
 } from "./syntheses.ts";
 import { generateWorkshopDirectorySchema } from "./workshop-directory.ts";
 

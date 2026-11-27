@@ -375,21 +375,31 @@ await runLocalWorkerJourney(
     assert.ok(authorFellow && viewerFellow);
     const workshopScope = { fellow_id: authorFellow.fellow_id, problem_id: problem };
     const ticketFor = (sponsor = OWNER, scope = workshopScope, expected = 200) =>
-      sponsorCall(sponsor, "POST", "/v1/sponsors/workshop/room-ticket", "workshop.read", scope, expected);
-    const privateUrl = origin + "/v1/workshop-room?" +
+      sponsorCall(
+        sponsor,
+        "POST",
+        "/v1/sponsors/workshop/room-ticket",
+        "workshop.read",
+        scope,
+        expected,
+      );
+    const privateUrl =
+      origin +
+      "/v1/workshop-room?" +
       new URLSearchParams({ fellow: authorFellow.fellow_id, problem });
     const agoraOrigin = "https://staging.asimposium.org";
-    const privateOpen = (ticket, extraHeaders = {}) => worker.fetch(privateUrl, {
-      method: "POST",
-      headers: {
-        "User-Agent": userAgent,
-        origin: agoraOrigin,
-        accept: "text/event-stream",
-        "content-type": "application/json",
-        ...extraHeaders,
-      },
-      body: JSON.stringify(ticket === undefined ? {} : { auth: ticket }),
-    });
+    const privateOpen = (ticket, extraHeaders = {}) =>
+      worker.fetch(privateUrl, {
+        method: "POST",
+        headers: {
+          "User-Agent": userAgent,
+          origin: agoraOrigin,
+          accept: "text/event-stream",
+          "content-type": "application/json",
+          ...extraHeaders,
+        },
+        body: JSON.stringify(ticket === undefined ? {} : { auth: ticket }),
+      });
     const deadline = async (operation) => {
       let timer;
       try {
@@ -417,16 +427,24 @@ await runLocalWorkerJourney(
     assert.equal((await privateOpen()).status, 401, "anonymous stream has no private access");
     await ticketFor("usr_herald_viewer", workshopScope, 404);
     const otherTicket = await ticketFor("usr_herald_viewer", {
-      fellow_id: viewerFellow.fellow_id, problem_id: problem,
+      fellow_id: viewerFellow.fellow_id,
+      problem_id: problem,
     });
     assert.equal(
-      (await privateOpen(otherTicket.ticket)).status, 401,
+      (await privateOpen(otherTicket.ticket)).status,
+      401,
       "another sponsor's valid ticket cannot select this Fellow",
     );
     const minted = await ticketFor();
-    assert.equal((await privateOpen(minted.ticket, { origin: "https://outside.invalid" })).status, 401);
+    assert.equal(
+      (await privateOpen(minted.ticket, { origin: "https://outside.invalid" })).status,
+      401,
+    );
     assert.equal((await privateOpen(minted.ticket, { cookie: "session=forbidden" })).status, 401);
-    assert.equal((await privateOpen(minted.ticket, { authorization: "Bearer " + author })).status, 401);
+    assert.equal(
+      (await privateOpen(minted.ticket, { authorization: "Bearer " + author })).status,
+      401,
+    );
     const streamed = await privateOpen(minted.ticket);
     assert.equal(streamed.status, 200);
     assert.equal(streamed.headers.get("content-type"), "text/event-stream; charset=utf-8");
@@ -437,23 +455,26 @@ await runLocalWorkerJourney(
     const privateReader = streamed.body.getReader();
     let pendingFrame = "";
     const privateFrames = [];
-    const nextFrame = async () => deadline((async () => {
-      while (true) {
-        const boundary = pendingFrame.indexOf("\n\n");
-        if (boundary !== -1) {
-          const frame = pendingFrame.slice(0, boundary);
-          pendingFrame = pendingFrame.slice(boundary + 2);
-          const event = /^event: (.+)$/m.exec(frame)?.[1];
-          const raw = /^data: (.+)$/m.exec(frame)?.[1];
-          if (!event || !raw) continue;
-          privateFrames.push(frame);
-          return { event, data: JSON.parse(raw) };
-        }
-        const part = await privateReader.read();
-        assert.equal(part.done, false, "private room stays open until a bounded close");
-        pendingFrame += new TextDecoder().decode(part.value);
-      }
-    })());
+    const nextFrame = async () =>
+      deadline(
+        (async () => {
+          while (true) {
+            const boundary = pendingFrame.indexOf("\n\n");
+            if (boundary !== -1) {
+              const frame = pendingFrame.slice(0, boundary);
+              pendingFrame = pendingFrame.slice(boundary + 2);
+              const event = /^event: (.+)$/m.exec(frame)?.[1];
+              const raw = /^data: (.+)$/m.exec(frame)?.[1];
+              if (!event || !raw) continue;
+              privateFrames.push(frame);
+              return { event, data: JSON.parse(raw) };
+            }
+            const part = await privateReader.read();
+            assert.equal(part.done, false, "private room stays open until a bounded close");
+            pendingFrame += new TextDecoder().decode(part.value);
+          }
+        })(),
+      );
     try {
       const first = await nextFrame();
       assert.equal(first.event, "workshop-update");
@@ -461,7 +482,8 @@ await runLocalWorkerJourney(
       assert.equal(first.data.problem_id, problem);
       assert.equal(first.data.workshop_cursor, minted.workshop_cursor);
       assert.equal(
-        (await privateOpen(minted.ticket)).status, 401,
+        (await privateOpen(minted.ticket)).status,
+        401,
         "SSE cannot replay its consumed ticket",
       );
       const openPrivateSocket = async () => {
@@ -481,10 +503,12 @@ await runLocalWorkerJourney(
       const replayMessages = [];
       replay.addEventListener("message", (event) => replayMessages.push(String(event.data)));
       const replayClosed = new Promise((resolve) =>
-        replay.addEventListener("close", (event) => resolve(event.code)));
+        replay.addEventListener("close", (event) => resolve(event.code)),
+      );
       replay.send(JSON.stringify({ auth: minted.ticket }));
       assert.equal(
-        await deadline(replayClosed), 1008,
+        await deadline(replayClosed),
+        1008,
         "a ticket consumed by SSE also refuses WebSocket replay",
       );
       assert.deepEqual(replayMessages, []);
@@ -492,25 +516,39 @@ await runLocalWorkerJourney(
       const privateSocket = await openPrivateSocket();
       try {
         const connected = new Promise((resolve) =>
-          privateSocket.addEventListener("message", (event) => resolve(String(event.data))));
+          privateSocket.addEventListener("message", (event) => resolve(String(event.data))),
+        );
         privateSocket.send(JSON.stringify({ auth: wsTicket.ticket }));
         assert.equal(JSON.parse(await deadline(connected)).control, "workshop-update");
         assert.equal(
-          (await privateOpen(wsTicket.ticket)).status, 401,
+          (await privateOpen(wsTicket.ticket)).status,
+          401,
           "SSE refuses a ticket already consumed by WebSocket",
         );
       } finally {
         privateSocket.close(1000, "transport replay check complete");
       }
       const privateCanary = "PRIVATE_WORKSHOP_SSE_BODY_MUST_NEVER_STREAM";
-      await call("/v1/sessions/" + session + "/workshop", {
-        type: "note", title: "Private stream update", body_md: privateCanary,
-      }, author, 201);
+      await call(
+        "/v1/sessions/" + session + "/workshop",
+        {
+          type: "note",
+          title: "Private stream update",
+          body_md: privateCanary,
+        },
+        author,
+        201,
+      );
       const updated = await nextFrame();
       assert.equal(updated.event, "workshop-update");
       assert.ok(updated.data.workshop_cursor > first.data.workshop_cursor);
       assert.deepEqual(Object.keys(updated.data).sort(), [
-        "control", "fellow_id", "heartbeat", "problem_id", "schema", "workshop_cursor",
+        "control",
+        "fellow_id",
+        "heartbeat",
+        "problem_id",
+        "schema",
+        "workshop_cursor",
       ]);
       assert.ok(
         !privateFrames.join("").includes(privateCanary),
@@ -524,7 +562,8 @@ await runLocalWorkerJourney(
       });
       assert.deepEqual(await nextFrame(), { event: "closed", data: { reason: "access-ended" } });
       assert.equal(
-        (await deadline(privateReader.read())).done, true,
+        (await deadline(privateReader.read())).done,
+        true,
         "current revocation closes the live stream",
       );
       await ticketFor(OWNER, workshopScope, 404);

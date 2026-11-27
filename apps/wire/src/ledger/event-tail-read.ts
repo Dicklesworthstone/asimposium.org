@@ -227,8 +227,11 @@ function publicObjectUrl(problemId: string, row: TailRow, through: number): stri
     return `${prefix}/hypotheses/${row.object_id}.json?through=${through}`;
   if (row.object_kind === "gap" && ProofGapIdSchema.safeParse(row.object_id).success)
     return `${prefix}/gaps.json?target=${row.object_id}&through=${through}`;
-  if (row.object_kind === "retraction" && row.object_version === 1 &&
-    RetractionIdSchema.safeParse(row.object_id).success)
+  if (
+    row.object_kind === "retraction" &&
+    row.object_version === 1 &&
+    RetractionIdSchema.safeParse(row.object_id).success
+  )
     return retractionsListPath(problemId, "json", { target: row.object_id as string, through });
   if (
     row.object_kind === "synthesis" &&
