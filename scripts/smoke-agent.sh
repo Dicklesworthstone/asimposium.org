@@ -150,10 +150,9 @@ process.exit(ProblemsIndexResponseSchema.safeParse(value).success ? 0 : 1);
   )
 }
 
-smoke_agent_check_unauthorized_problem() {
-  # stdin: the sponsor route refusal. Opaque authorization problems have one
-  # exact strict RFC 7807 shape; requiring all six fields prevents a generic
-  # WAF or wrong-principal response from impersonating the mounted boundary.
+smoke_agent_check_wrong_principal_problem() {
+  # An unsigned request must reach the mounted sponsor principal check.
+  # Require its full problem face so a generic proxy denial cannot pass.
   python3 -c '
 import json
 import sys
@@ -164,12 +163,12 @@ except Exception:
     sys.exit(1)
 
 expected = {
-    "type": "https://asimposium.org/errors/UNAUTHORIZED",
-    "title": "Authorization was not accepted",
-    "status": 401,
-    "code": "UNAUTHORIZED",
-    "detail": "The request did not include an authorization accepted by this route.",
-    "fix_hint": "Obtain a fresh sponsor authorization and retry the request.",
+    "type": "https://asimposium.org/errors/WRONG_PRINCIPAL",
+    "title": "Credential cannot authorize this route",
+    "status": 403,
+    "code": "WRONG_PRINCIPAL",
+    "detail": "The credential class presented cannot authorize this route.",
+    "fix_hint": "Use the credential class required by this route and hostname.",
 }
 if doc != expected:
     sys.exit(1)
@@ -404,19 +403,19 @@ print(json.dumps({"problems": [entry] * 201, "omitted": []}, separators=(",", ":
     return 1
   fi
 
-  local valid_unauthorized_problem='{"type":"https://asimposium.org/errors/UNAUTHORIZED","title":"Authorization was not accepted","status":401,"code":"UNAUTHORIZED","detail":"The request did not include an authorization accepted by this route.","fix_hint":"Obtain a fresh sponsor authorization and retry the request."}'
-  if ! printf '%s' "$valid_unauthorized_problem" | smoke_agent_check_unauthorized_problem; then
+  local valid_wrong_principal_problem='{"type":"https://asimposium.org/errors/WRONG_PRINCIPAL","title":"Credential cannot authorize this route","status":403,"code":"WRONG_PRINCIPAL","detail":"The credential class presented cannot authorize this route.","fix_hint":"Use the credential class required by this route and hostname."}'
+  if ! printf '%s' "$valid_wrong_principal_problem" | smoke_agent_check_wrong_principal_problem; then
     return 1
   fi
   for refusal in \
     '{}' \
-    "${valid_unauthorized_problem/\"code\":\"UNAUTHORIZED\"/\"code\":\"WRONG_PRINCIPAL\"}" \
-    "${valid_unauthorized_problem/\"status\":401/\"status\":403}" \
-    "${valid_unauthorized_problem/Authorization was not accepted/Generic denial}" \
-    "${valid_unauthorized_problem/The request did not include an authorization accepted by this route./Generic detail.}" \
-    "${valid_unauthorized_problem/Obtain a fresh sponsor authorization and retry the request./Retry later.}" \
-    '{"type":"https://asimposium.org/errors/UNAUTHORIZED","title":"Authorization was not accepted","status":401,"code":"UNAUTHORIZED","detail":"The request did not include an authorization accepted by this route.","fix_hint":"Retry.","extra":true}'; do
-    if printf '%s' "$refusal" | smoke_agent_check_unauthorized_problem; then
+    "${valid_wrong_principal_problem/\"code\":\"WRONG_PRINCIPAL\"/\"code\":\"UNAUTHORIZED\"}" \
+    "${valid_wrong_principal_problem/\"status\":403/\"status\":401}" \
+    "${valid_wrong_principal_problem/Credential cannot authorize this route/Generic denial}" \
+    "${valid_wrong_principal_problem/The credential class presented cannot authorize this route./Generic detail.}" \
+    "${valid_wrong_principal_problem/Use the credential class required by this route and hostname./Retry later.}" \
+    "${valid_wrong_principal_problem%\}},\"extra\":true}"; do
+    if printf '%s' "$refusal" | smoke_agent_check_wrong_principal_problem; then
       return 1
     fi
   done
@@ -609,9 +608,9 @@ workshop_anonymous_content_type="${workshop_anonymous_meta#*$'\t'}"
   exit 87
 }
 case "$workshop_anonymous_status" in
-  401)
+  403)
     if [[ "$(printf '%s' "$workshop_anonymous_content_type" | e2e_ascii_lower)" != "application/problem+json; charset=utf-8" ]] \
-      || ! printf '%s' "$workshop_anonymous_body" | smoke_agent_check_unauthorized_problem 2>/dev/null; then
+      || ! printf '%s' "$workshop_anonymous_body" | smoke_agent_check_wrong_principal_problem 2>/dev/null; then
       e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "AGENT_SPONSOR_AUTH_BOUNDARY_UNPROVEN" "$reproduce"
       exit 87
     fi

@@ -406,6 +406,7 @@ assert_cli_parsing_table "$repository_root/e2e/gauntlet/run.sh"
 assert_production_refused() {
   local entrypoint="$1"
   local expected_code="$2"
+  local expected_status="${3:-78}"
   local output
   local status
 
@@ -417,7 +418,7 @@ assert_production_refused() {
   )"
   status=$?
   set -e
-  if [[ "$status" -ne 78 || "$output" != *"\"code\":\"$expected_code\""* ]]; then
+  if [[ "$status" -ne "$expected_status" || "$output" != *"\"code\":\"$expected_code\""* ]]; then
     emit "fail" "PRODUCTION_ORIGIN_NOT_BLOCKED"
     exit 1
   fi
@@ -430,7 +431,7 @@ assert_production_refused() {
 assert_production_refused "$repository_root/scripts/smoke-agent.sh" "STAGING_AGENT_BASE_URL_INVALID"
 assert_production_refused "$repository_root/scripts/smoke-gallery.sh" "STAGING_AGORA_BASE_URL_INVALID"
 assert_production_refused "$repository_root/e2e/run-playwright.sh" "STAGING_SURFACE_BASE_URL_INVALID"
-assert_production_refused "$repository_root/e2e/gauntlet/run.sh" "STAGING_AGENT_BASE_URL_INVALID"
+assert_production_refused "$repository_root/e2e/gauntlet/run.sh" "STAGING_AGENT_BASE_URL_INVALID" 64
 
 playwright_node="$(e2e_select_node_runtime)" || {
   emit "blocked" "PLAYWRIGHT_NODE_UNAVAILABLE"
@@ -470,7 +471,11 @@ if [[ -e "$forged_playwright_run" || -L "$forged_playwright_run" ]]; then
   emit "fail" "DIRECT_PLAYWRIGHT_CLAIM_FIXTURE_COLLISION"
   exit 1
 fi
-playwright_artifact_root_identity="$(e2e_artifact_directory_identity "$repository_root/e2e/artifacts")" || {
+playwright_artifact_root="$(e2e_artifacts_root_at_root "$repository_root" 1)" || {
+  emit "fail" "DIRECT_PLAYWRIGHT_CLAIM_FIXTURE_UNAVAILABLE"
+  exit 1
+}
+playwright_artifact_root_identity="$(e2e_artifact_directory_identity "$playwright_artifact_root")" || {
   emit "fail" "DIRECT_PLAYWRIGHT_CLAIM_FIXTURE_UNAVAILABLE"
   exit 1
 }
@@ -623,27 +628,28 @@ printf '%s\n' \
   '      parser) printf "%s" '\''{"problems":[{"id":"P-4DSP","public_seq":0,"created_at":"2026-01-01T00:00:00.000Z","updated_at":"2026-01-01T00:00:00.000Z","title":null,"status":"active"}],"omitted":[]}'\'' ;;' \
   '      shape) printf "%s" '\''{"problems":[{"id":"P-4DSP","public_seq":0,"created_at":"2026-01-01T00:00:00.000Z","updated_at":"2026-01-01T00:00:00.000Z","title":null,"status":"active"}],"omitted":[]}'\'' ;;' \
   '      unproven) printf "%s" '\''{"problems":[],"omitted":[]}'\'' ;;' \
-  '      auth-wrong-code | auth-forbidden | auth-malformed | auth-wrong-title | auth-wrong-detail | auth-wrong-fix | auth-wrong-media) printf "%s" '\''{"problems":[],"omitted":[]}'\'' ;;' \
+  '      auth-wrong-code | auth-wrong-status | auth-forbidden | auth-malformed | auth-wrong-title | auth-wrong-detail | auth-wrong-fix | auth-wrong-media) printf "%s" '\''{"problems":[],"omitted":[]}'\'' ;;' \
   '      workshop) printf "%s" '\''{"problems":[{"id":"P-4DSP","public_seq":0,"created_at":"2026-01-01T00:00:00.000Z","updated_at":"2026-01-01T00:00:00.000Z","title":null,"status":"active"}],"omitted":[]}'\'' ;;' \
   '      *) exit 7 ;;' \
   '    esac' \
   '    if [[ "$write_out" == *"content_type"* ]]; then printf "\n%s\t%s" "$problem_status" "$problem_content_type"; elif [[ "$write_out" == *"http_code"* ]]; then printf "\n%s" "$problem_status"; fi' \
   '    ;;' \
   '  */v1/sponsors/workshop*)' \
-  '    workshop_body='\''{"type":"https://asimposium.org/errors/UNAUTHORIZED","title":"Authorization was not accepted","status":401,"code":"UNAUTHORIZED","detail":"The request did not include an authorization accepted by this route.","fix_hint":"Obtain a fresh sponsor authorization and retry the request."}'\''' \
-  '    workshop_status="401"' \
+  '    workshop_body='\''{"type":"https://asimposium.org/errors/WRONG_PRINCIPAL","title":"Credential cannot authorize this route","status":403,"code":"WRONG_PRINCIPAL","detail":"The credential class presented cannot authorize this route.","fix_hint":"Use the credential class required by this route and hostname."}'\''' \
+  '    workshop_status="403"' \
   '    workshop_content_type="Application/Problem+JSON; Charset=UTF-8"' \
   '    case "${SMOKE_FAKE_PROBLEMS_MODE:-fail}" in' \
   '      reachable) workshop_body='\''{}'\''; workshop_status="200" ;;' \
   '      parser) workshop_body='\''{}'\''; workshop_status="422" ;;' \
   '      shape) if [[ "$method" != "POST" || "$content_type" != "content-type: application/json" || "$request_body" != '\''{}'\'' ]]; then workshop_body='\''{}'\''; workshop_status="422"; fi ;;' \
   '      unproven) workshop_body='\''{}'\''; workshop_status="503" ;;' \
-  '      auth-wrong-code) workshop_body='\''{"type":"https://asimposium.org/errors/WRONG_PRINCIPAL","title":"Wrong principal","status":401,"code":"WRONG_PRINCIPAL","detail":"Wrong credential class.","fix_hint":"Use the required credential."}'\'' ;;' \
+  '      auth-wrong-code) workshop_body='\''{"type":"https://asimposium.org/errors/WRONG_PRINCIPAL","title":"Credential cannot authorize this route","status":403,"code":"UNAUTHORIZED","detail":"The credential class presented cannot authorize this route.","fix_hint":"Use the credential class required by this route and hostname."}'\'' ;;' \
+  '      auth-wrong-status) workshop_status="401" ;;' \
   '      auth-forbidden) workshop_body='\''{"type":"https://asimposium.org/errors/WRONG_PRINCIPAL","title":"Wrong principal","status":403,"code":"WRONG_PRINCIPAL","detail":"Wrong credential class.","fix_hint":"Use the required credential."}'\''; workshop_status="403" ;;' \
   '      auth-malformed) workshop_body='\''{}'\'' ;;' \
-  '      auth-wrong-title) workshop_body="${workshop_body/Authorization was not accepted/Generic denial}" ;;' \
-  '      auth-wrong-detail) workshop_body="${workshop_body/The request did not include an authorization accepted by this route./Generic detail.}" ;;' \
-  '      auth-wrong-fix) workshop_body="${workshop_body/Obtain a fresh sponsor authorization and retry the request./Retry later.}" ;;' \
+  '      auth-wrong-title) workshop_body="${workshop_body/Credential cannot authorize this route/Generic denial}" ;;' \
+  '      auth-wrong-detail) workshop_body="${workshop_body/The credential class presented cannot authorize this route./Generic detail.}" ;;' \
+  '      auth-wrong-fix) workshop_body="${workshop_body/Use the credential class required by this route and hostname./Retry later.}" ;;' \
   '      auth-wrong-media) workshop_content_type="application/json; charset=utf-8" ;;' \
   '      cursor-*) ;;' \
   '      *) exit 7 ;;' \
@@ -907,6 +913,7 @@ fi
 
 for invalid_auth_mode in \
   auth-wrong-code \
+  auth-wrong-status \
   auth-forbidden \
   auth-malformed \
   auth-wrong-title \

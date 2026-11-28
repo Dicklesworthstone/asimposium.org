@@ -25,7 +25,7 @@ Current scope:
   is claimed until run against reconciled staging). The anonymous
   agent smoke requires `/problems.json` to return exact status 200, canonical
   `application/json; charset=utf-8`, and the generated closed contract; it also
-  validates the sponsor route's exact 401 `UNAUTHORIZED` problem face, but it does not claim byte-level workshop
+  validates the unsigned sponsor route's exact 403 `WRONG_PRINCIPAL` problem face, but it does not claim byte-level workshop
   privacy without a seeded private canary and its paired public observation.
   `scripts/smoke-agent.sh` accepts `ASIMPOSIUM_SMOKE_PROBLEM_ID` (defaulting to
   `P-4DSP`, validated against the canonical problem-ID grammar).

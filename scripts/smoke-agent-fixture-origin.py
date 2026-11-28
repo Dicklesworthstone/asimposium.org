@@ -44,13 +44,13 @@ DEVICE_BODY = {
     "expires_in_seconds": 900,
 }
 
-UNAUTHORIZED_PROBLEM = {
-    "type": "https://asimposium.org/errors/UNAUTHORIZED",
-    "title": "Authorization was not accepted",
-    "status": 401,
-    "code": "UNAUTHORIZED",
-    "detail": "The request did not include an authorization accepted by this route.",
-    "fix_hint": "Obtain a fresh sponsor authorization and retry the request.",
+WRONG_PRINCIPAL_PROBLEM = {
+    "type": "https://asimposium.org/errors/WRONG_PRINCIPAL",
+    "title": "Credential cannot authorize this route",
+    "status": 403,
+    "code": "WRONG_PRINCIPAL",
+    "detail": "The credential class presented cannot authorize this route.",
+    "fix_hint": "Use the credential class required by this route and hostname.",
 }
 
 PROBLEM_INDEX = {
@@ -241,12 +241,12 @@ class Handler(BaseHTTPRequestHandler):
                 if DEFECT == "sponsor-boundary-face":
                     send_json(
                         self,
-                        401,
-                        problem("WRONG_PRINCIPAL", 401),
+                        403,
+                        json.dumps(WRONG_PRINCIPAL_PROBLEM).encode(),
                         "application/json; charset=utf-8",
                     )
                     return
-                send_json(self, 401, json.dumps(UNAUTHORIZED_PROBLEM).encode(), PROBLEM_CT)
+                send_json(self, 403, json.dumps(WRONG_PRINCIPAL_PROBLEM).encode(), PROBLEM_CT)
                 return
 
             # Device flow start / idempotent replay.
