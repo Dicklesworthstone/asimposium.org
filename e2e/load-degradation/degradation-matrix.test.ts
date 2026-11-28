@@ -211,6 +211,12 @@ describe("W10.7 Load tests, performance budgets, degradation-table fault injecti
           "utf8",
         ),
       );
+      sqlite.exec(
+        readFileSync(
+          new URL("../../db/migrations/0164_herald_object_visibility_wake.sql", import.meta.url),
+          "utf8",
+        ),
+      );
       const { db } = createCountingSqliteD1(sqlite);
       const env = { DB: db, STOA_ORIGIN: "https://a.asimposium.org" };
 
