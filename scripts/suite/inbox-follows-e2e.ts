@@ -51,15 +51,17 @@ function localD1(sqlite: Database): Env["DB"] {
         query,
         values,
         async run() {
-          if (/^\s*SELECT\b/i.test(query)) {
+          if (/^\s*(?:SELECT|WITH|PRAGMA)\b/i.test(query)) {
             const rows = sqlite.prepare<unknown, LocalBinding[]>(query).all(...values);
             return {
+              success: true,
               results: rows,
               meta: { changes: 0, rows_read: rows.length, rows_written: 0, duration: 0 },
             };
           }
           const result = sqlite.prepare<unknown, LocalBinding[]>(query).run(...values);
           return {
+            success: true,
             results: [],
             meta: {
               changes: result.changes,
@@ -69,13 +71,25 @@ function localD1(sqlite: Database): Env["DB"] {
             },
           };
         },
-        async first<T>(): Promise<T | null> {
-          const row = sqlite.prepare<T, LocalBinding[]>(query).get(...values);
-          return (row ?? null) as T | null;
+        async first<T>(column?: string): Promise<T | null> {
+          const row = sqlite.prepare<Record<string, unknown>, LocalBinding[]>(query).get(...values);
+          if (row === null || row === undefined) return null;
+          if (column !== undefined) {
+            return ((row as Record<string, unknown>)[column] ?? null) as T | null;
+          }
+          return row as unknown as T;
         },
-        async all<T>(): Promise<{ results: T[] }> {
+        async all<T>(): Promise<{
+          success: true;
+          results: T[];
+          meta: { changes: number; rows_read: number; rows_written: number; duration: number };
+        }> {
           const rows = sqlite.prepare<T, LocalBinding[]>(query).all(...values) as T[];
-          return { results: rows };
+          return {
+            success: true,
+            results: rows,
+            meta: { changes: 0, rows_read: rows.length, rows_written: 0, duration: 0 },
+          };
         },
       });
 
