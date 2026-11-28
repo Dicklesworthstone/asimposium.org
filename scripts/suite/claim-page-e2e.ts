@@ -795,7 +795,9 @@ export async function runClaimPageE2e(): Promise<void> {
     if (!withdrawnHtml.includes('data-disposition="withdrawn"')) {
       throw new Error("Withdrawn claim missing data-disposition='withdrawn'");
     }
-    if (!withdrawnHtml.includes("The author withdrew this statement through a recorded retraction.")) {
+    if (
+      !withdrawnHtml.includes("The author withdrew this statement through a recorded retraction.")
+    ) {
       throw new Error("Withdrawn claim missing withdrawal explanation in 'Why this status?'");
     }
 

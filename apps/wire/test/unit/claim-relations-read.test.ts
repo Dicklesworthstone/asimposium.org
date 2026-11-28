@@ -648,7 +648,9 @@ test("invalid dispute payloads degrade to unavailable even when their screening 
   assert.equal(read.relations[0]?.status, "unavailable");
   assert.equal(read.relations[0]?.dispute, undefined);
   assert.deepEqual(read.relations[0]?.screening_notice, assertionNotice);
-  assert.ok(read.omitted.some((entry) => entry.detail === `typed-relations:${edge.id}:dispute-state`));
+  assert.ok(
+    read.omitted.some((entry) => entry.detail === `typed-relations:${edge.id}:dispute-state`),
+  );
 });
 
 test("database failures are visible rather than reported as an empty graph", async () => {

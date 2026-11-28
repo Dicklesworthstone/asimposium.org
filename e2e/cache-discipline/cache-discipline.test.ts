@@ -904,9 +904,7 @@ describe("W7.4 Cache Discipline, Surrogate-Key Purge Map & Paired-User Leak Harn
 
       // Private synthesis drafts must remain hidden (404, no-store) before sponsor publication
       const draftBeforePublish = await f.app.fetch(
-        new Request(
-          `https://a.asimposium.org/p/${f.publicProblem}/syntheses/${synthesisId}.json`,
-        ),
+        new Request(`https://a.asimposium.org/p/${f.publicProblem}/syntheses/${synthesisId}.json`),
         f.env,
       );
       expect(draftBeforePublish.status).toBe(404);
