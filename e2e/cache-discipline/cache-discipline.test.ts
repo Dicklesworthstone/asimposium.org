@@ -902,7 +902,41 @@ describe("W7.4 Cache Discipline, Surrogate-Key Purge Map & Paired-User Leak Harn
       expect(synthRes.status).toBe(201);
       const { synthesis_id: synthesisId } = (await synthRes.json()) as { synthesis_id: string };
 
-      // Fresh synthesis face has stale=false right after creation
+      // Private synthesis drafts must remain hidden (404, no-store) before sponsor publication
+      const draftBeforePublish = await f.app.fetch(
+        new Request(
+          `https://a.asimposium.org/p/${f.publicProblem}/syntheses/${synthesisId}.json`,
+        ),
+        f.env,
+      );
+      expect(draftBeforePublish.status).toBe(404);
+      expect((draftBeforePublish.headers.get("cache-control") ?? "").toLowerCase()).toContain(
+        "no-store",
+      );
+
+      // Publish the synthesis draft explicitly as Sponsor A
+      const publishSynthPath = `/v1/sponsors/problems/${f.publicProblem}/syntheses/${synthesisId}/publish`;
+      const publishSynthHeaders = await f.signSponsor(
+        f.sponsorA.sponsorId,
+        "POST",
+        publishSynthPath,
+        "sponsor.syntheses.drafts.publish",
+        "",
+      );
+      const publishSynthRes = await f.app.fetch(
+        new Request(`https://a.asimposium.org${publishSynthPath}`, {
+          method: "POST",
+          headers: {
+            ...publishSynthHeaders,
+            "idempotency-key": "w74-stale-synth-publish",
+          },
+          body: "",
+        }),
+        f.env,
+      );
+      expect(publishSynthRes.status).toBe(201);
+
+      // Fresh synthesis face has stale=false right after publication
       const freshJson = (await (
         await f.app.fetch(
           new Request(

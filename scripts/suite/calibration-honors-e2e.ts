@@ -756,6 +756,15 @@ async function main() {
     await sponsorCall(
       SPON_1,
       "POST",
+      `/v1/sponsors/problems/${problemId}/syntheses/${closing.synthesis_id}/publish`,
+      `/v1/sponsors/problems/${problemId}/syntheses/${closing.synthesis_id}/publish`,
+      "sponsor.syntheses.drafts.publish",
+      undefined,
+      201,
+    );
+    await sponsorCall(
+      SPON_1,
+      "POST",
       `/v1/sponsors/problems/${problemId}/lifecycle`,
       `/v1/sponsors/problems/${problemId}/lifecycle`,
       "problem-lifecycle",

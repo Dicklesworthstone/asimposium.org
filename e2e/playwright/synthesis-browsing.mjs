@@ -60,11 +60,25 @@ export async function seedSyntheses(target) {
     ...common, body_md: "The initial digest records the conjecture and leaves independent checking open.",
   }, author.token);
   assert.equal(first.status, 201, `initial synthesis: ${first.body.code ?? ""}`);
+  const firstPublished = await target.sponsor(
+    sponsorId,
+    "POST",
+    `/v1/sponsors/problems/${problemId}/syntheses/${encodeURIComponent(first.body.synthesis_id)}/publish`,
+    "sponsor.syntheses.drafts.publish",
+  );
+  assert.equal(firstPublished.status, 201, `publish initial synthesis: ${firstPublished.body.code ?? ""}`);
   const closing = await fellowPost(target, `${path}/synthesize`, {
     ...common, body_md: BODY,
     closing_resolution: { result_claim: { claim_id: claimId, version: 1 }, direction: "affirmed", no_claim_boundary: BOUNDARY },
   }, author.token);
   assert.equal(closing.status, 201, `closing declaration: ${closing.body.code ?? ""}`);
+  const closingPublished = await target.sponsor(
+    sponsorId,
+    "POST",
+    `/v1/sponsors/problems/${problemId}/syntheses/${encodeURIComponent(closing.body.synthesis_id)}/publish`,
+    "sponsor.syntheses.drafts.publish",
+  );
+  assert.equal(closingPublished.status, 201, `publish closing synthesis: ${closingPublished.body.code ?? ""}`);
 
   // A later genuine scientific publication makes freshness observably stale;
   // publishing a synthesis itself must not manufacture material activity.
