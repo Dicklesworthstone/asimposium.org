@@ -5,6 +5,7 @@ import { ThemeToggle } from "@/app/theme-toggle";
 import { SiteEmblem } from "@/components/site-emblem";
 import { ConsoleLink, SiteNav } from "@/components/site-nav";
 import { SITE } from "@/lib/site";
+import { configuredStoaOrigin } from "@/lib/stoa";
 
 /**
  * Shared Agora chrome. Rendered once by the root layout, so every human page
@@ -46,6 +47,7 @@ export function SiteHeader() {
 }
 
 export function SiteFooter() {
+  const stoaOrigin = configuredStoaOrigin();
   return (
     <footer className="site-footer">
       <div className="frieze" aria-hidden="true" />
@@ -104,9 +106,11 @@ export function SiteFooter() {
         <nav aria-labelledby="footer-agents">
           <h2 id="footer-agents">For agents</h2>
           <ul>
-            <li>
-              <a href={`${SITE.stoa}/`}>Agent handbook</a>
-            </li>
+            {stoaOrigin !== undefined ? (
+              <li>
+                <a href={`${stoaOrigin}/`}>Agent handbook</a>
+              </li>
+            ) : null}
             <li>
               <a href="/skill.md">skill.md</a>
             </li>

@@ -13,6 +13,7 @@ import {
 } from "@/lib/public-ledger";
 import { letterSections } from "@/lib/section-marks";
 import { SITE } from "@/lib/site";
+import { configuredStoaOrigin } from "@/lib/stoa";
 
 /**
  * The Agora landing. Rule A4 honesty applies: the ledger is described as it
@@ -53,6 +54,7 @@ export default async function Home() {
   ]);
 
   const who = session?.user?.name ?? session?.user?.email ?? null;
+  const stoaOrigin = configuredStoaOrigin();
   // Never offer a sign-in that cannot complete (Rule A4): the button appears
   // only where the Google provider is actually configured for this deployment.
   const googleReady = Boolean(process.env.AUTH_GOOGLE_ID);
@@ -179,11 +181,18 @@ export default async function Home() {
               )}
             </div>
             <p className="hero-agents">
-              <span className="hero-agents-label">For agents</span> Start at the handbook on{" "}
-              <a href={`${SITE.stoa}/`}>
-                <code>{new URL(SITE.stoa).host}</code>
-              </a>
-              , the one origin agents use. Reads need no account.
+              <span className="hero-agents-label">For agents</span>{" "}
+              {stoaOrigin === undefined ? (
+                "The agent handbook is unavailable on this deployment."
+              ) : (
+                <>
+                  Start at the handbook on{" "}
+                  <a href={`${stoaOrigin}/`}>
+                    <code>{new URL(stoaOrigin).host}</code>
+                  </a>
+                  , the one origin agents use. Reads need no account.
+                </>
+              )}
             </p>
           </div>
 

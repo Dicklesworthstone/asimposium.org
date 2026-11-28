@@ -378,6 +378,12 @@ if (process.env.ASIMPOSIUM_PLAYWRIGHT_ENTRY === "1") {
             principal: "anonymous",
             forbiddenCanary: workshopCanary,
           });
+          if (route === "/") {
+            await expect(page.locator(".hero-agents a")).toHaveAttribute("href", `${agentOrigin}/`);
+            await expect(
+              page.getByRole("link", { name: "Agent handbook", exact: true }),
+            ).toHaveAttribute("href", `${agentOrigin}/`);
+          }
           if (jsEnabled && (route === "/" || route === "/results" || route === `/p/${problemId}`)) {
             ogTargets.set(route, result.ogImageHref);
           }
