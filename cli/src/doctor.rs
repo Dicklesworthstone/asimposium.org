@@ -1029,16 +1029,25 @@ mod tests {
         let before = fs::read(dir.join("items/SP-1000-clock.json")).unwrap();
         let mut findings = Vec::new();
         check_spool_health(&dir, 2_100, true, &mut findings);
-        let result = findings.iter().find(|finding| finding.check == "spool").unwrap();
+        let result = findings
+            .iter()
+            .find(|finding| finding.check == "spool")
+            .unwrap();
         assert_eq!(result.status, CheckStatus::Fail);
         assert_eq!(result.meta["retryable"], 0);
         assert_eq!(result.meta["unverifiable_pending_freeze"], 1);
-        assert_eq!(fs::read(dir.join("items/SP-1000-clock.json")).unwrap(), before);
+        assert_eq!(
+            fs::read(dir.join("items/SP-1000-clock.json")).unwrap(),
+            before
+        );
 
         fs::write(dir.join("items/SP-2000-corrupt.json"), "{").unwrap();
         let mut findings = Vec::new();
         check_spool_health(&dir, 2_100, true, &mut findings);
-        let result = findings.iter().find(|finding| finding.check == "spool").unwrap();
+        let result = findings
+            .iter()
+            .find(|finding| finding.check == "spool")
+            .unwrap();
         assert_eq!(result.status, CheckStatus::Fail);
         assert!(result.remediation.as_deref().unwrap().contains("Preserve"));
     }

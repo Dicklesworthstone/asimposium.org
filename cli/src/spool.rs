@@ -415,8 +415,7 @@ impl SpoolItem {
         if attempted != self.first_attempted_epoch_s.is_some()
             || attempted != self.first_attempted_clock.is_some()
             || (attempted
-                && (self.idempotency_key.is_none()
-                    || !matches!(clock, Some("server" | "local"))))
+                && (self.idempotency_key.is_none() || !matches!(clock, Some("server" | "local"))))
             || (self.state == SpoolState::Unsent
                 && (attempted
                     || self.last_http_status.is_some()
@@ -606,10 +605,12 @@ fn lock_spool_mutation(dir: &Path) -> Result<fs::File, &'static str> {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    let file = options.open(&path).map_err(|_| "Cannot open the spool lock.")?;
-    file.try_lock().map_err(|_| {
-        "Another spool writer is active or locking is unavailable; retry after it finishes."
-    })?;
+    let file = options
+        .open(&path)
+        .map_err(|_| "Cannot open the spool lock.")?;
+    file.try_lock().map_err(
+        |_| "Another spool writer is active or locking is unavailable; retry after it finishes.",
+    )?;
     Ok(file)
 }
 
@@ -865,7 +866,9 @@ pub fn load_all_items(spool_dir: &Path) -> Result<Vec<SpoolItem>, String> {
             .file_stem()
             .and_then(|name| name.to_str())
             .filter(|id| is_safe_spool_id(id))
-            .ok_or_else(|| "Spool item filename is invalid; preserve it for recovery.".to_owned())?;
+            .ok_or_else(|| {
+                "Spool item filename is invalid; preserve it for recovery.".to_owned()
+            })?;
         // Never turn malformed or unreadable work into an apparently empty
         // successful sync. Validate the whole queue before sending any write.
         items.push(read_item_file(&path, id)?);
@@ -1998,18 +2001,17 @@ pub fn run_sync_with_io(
                     Ok(resp) => {
                         let valid_receipt = (200..=299).contains(&resp.status)
                             && resp.body.len() as u64 <= crate::MAX_BODY_BYTES
-                            && serde_json::from_str::<Value>(&resp.body)
-                                .ok()
-                                .is_some_and(|value| {
+                            && serde_json::from_str::<Value>(&resp.body).ok().is_some_and(
+                                |value| {
                                     value.is_object()
                                         && value.get("ok").and_then(Value::as_bool) != Some(false)
-                                });
+                                },
+                            );
                         if !valid_receipt {
                             // The write may have committed despite a truncated,
                             // malformed or contradictory success response.
-                            item.last_http_status = (100..=599)
-                                .contains(&resp.status)
-                                .then_some(resp.status);
+                            item.last_http_status =
+                                (100..=599).contains(&resp.status).then_some(resp.status);
                             item.last_error_code = Some("RECEIPT_UNAVAILABLE".to_owned());
                             if let Err(msg) = save_item(&dir, item) {
                                 return input_error(msg);
@@ -2449,7 +2451,10 @@ mod tests {
         item.first_attempted_epoch_s = Some(2_000);
         item.first_attempted_clock = Some("server".into());
         item.attempts = 1;
-        assert_eq!(decide_replay(&item, 2_001, true), ReplayDecision::ReplayInWindow);
+        assert_eq!(
+            decide_replay(&item, 2_001, true),
+            ReplayDecision::ReplayInWindow
+        );
         for now in [1_999, 2_001, 2_000 + REPLAY_WINDOW_SECONDS] {
             assert_eq!(
                 decide_replay(&item, now, false),
@@ -2458,9 +2463,15 @@ mod tests {
         }
         for (now, server) in [
             (1_999, true),
-            (2_000 + REPLAY_WINDOW_SECONDS - REPLAY_SEND_MARGIN_SECONDS, true),
+            (
+                2_000 + REPLAY_WINDOW_SECONDS - REPLAY_SEND_MARGIN_SECONDS,
+                true,
+            ),
             // A POST-only margin misses a delayed clock probe.
-            (2_000 + REPLAY_WINDOW_SECONDS - READ_TIMEOUT.as_secs() - 2, true),
+            (
+                2_000 + REPLAY_WINDOW_SECONDS - READ_TIMEOUT.as_secs() - 2,
+                true,
+            ),
             (2_000 + REPLAY_WINDOW_SECONDS, true),
         ] {
             assert_eq!(
@@ -2479,10 +2490,7 @@ mod tests {
 
     #[test]
     fn missing_current_server_clock_defers_without_mutation_then_recovers() {
-        for (server_now, should_replay) in [
-            (2_100, true),
-            (2_000 + REPLAY_WINDOW_SECONDS, false),
-        ] {
+        for (server_now, should_replay) in [(2_100, true), (2_000 + REPLAY_WINDOW_SECONDS, false)] {
             let dir = test_dir("deferred-clock");
             let mut item = test_item();
             item.state = SpoolState::InFlight;
@@ -2529,7 +2537,10 @@ mod tests {
                 },
             );
             let retained = load_all_items(&dir).unwrap().remove(0);
-            assert_eq!(retained.first_attempted_epoch_s, item.first_attempted_epoch_s);
+            assert_eq!(
+                retained.first_attempted_epoch_s,
+                item.first_attempted_epoch_s
+            );
             assert_eq!(retained.first_attempted_clock, item.first_attempted_clock);
             assert_eq!(retained.idempotency_key, item.idempotency_key);
             assert_eq!(retained.body_json, item.body_json);
@@ -2560,7 +2571,9 @@ mod tests {
             200_000,
             |_, _, _, _, _, body| {
                 assert_eq!(body, item.body_json);
-                Err(SyncPostError::Network { server_epoch_s: None })
+                Err(SyncPostError::Network {
+                    server_epoch_s: None,
+                })
             },
         );
         assert_eq!(first.exit_code, 1);
@@ -2580,8 +2593,14 @@ mod tests {
         assert_eq!(frozen.state, SpoolState::UnknownCommit);
         assert_eq!(frozen.idempotency_key, attempted.idempotency_key);
         assert_eq!(frozen.body_json, item.body_json);
-        assert_eq!(frozen.first_attempted_epoch_s, attempted.first_attempted_epoch_s);
-        assert_eq!(frozen.first_attempted_clock, attempted.first_attempted_clock);
+        assert_eq!(
+            frozen.first_attempted_epoch_s,
+            attempted.first_attempted_epoch_s
+        );
+        assert_eq!(
+            frozen.first_attempted_clock,
+            attempted.first_attempted_clock
+        );
         assert_eq!(frozen.attempts, 1);
     }
 
@@ -2633,7 +2652,10 @@ mod tests {
             assert_eq!(second.exit_code, 0);
             let committed = load_all_items(&dir).unwrap().remove(0);
             assert_eq!(committed.state, SpoolState::Committed);
-            assert_eq!(committed.first_attempted_epoch_s, attempted.first_attempted_epoch_s);
+            assert_eq!(
+                committed.first_attempted_epoch_s,
+                attempted.first_attempted_epoch_s
+            );
             assert_eq!(committed.idempotency_key, attempted.idempotency_key);
             assert_eq!(committed.attempts, 2);
         }
