@@ -26,6 +26,7 @@ import {
 } from "@asimposium/contracts";
 import { createApp } from "../../apps/wire/src/app.ts";
 import type { Env } from "../../apps/wire/src/env.ts";
+import { claimContentDigest } from "../../apps/wire/src/krater/claim-version.ts";
 import { parseProblemsIndexToon } from "../../apps/wire/src/ledger-face.ts";
 import { TOON_MEDIA_TYPE } from "../../packages/render/src/toon.ts";
 
@@ -179,6 +180,22 @@ async function runDiptychE2E() {
   });
   const payload5 = sha256Hex(c1Payload);
   const payload8 = sha256Hex(c2Payload);
+  const c1ContentDigest = await claimContentDigest(
+    {
+      kind: "conjecture",
+      statement: "Invariants distinguish Donaldson boundaries.",
+      falsifier: "Counterexample",
+    },
+    async (text) => sha256Hex(text),
+  );
+  const c2ContentDigest = await claimContentDigest(
+    {
+      kind: "conjecture",
+      statement: HOSTILE_STATEMENT,
+      falsifier: "Counterexample",
+    },
+    async (text) => sha256Hex(text),
+  );
   rawDb.run(`
     INSERT INTO problems (id, public_seq, chain_version, chain_digest, title, status, unlisted, current_statement_version, created_at, updated_at)
     VALUES
@@ -355,8 +372,8 @@ async function runDiptychE2E() {
 
     INSERT INTO claim_versions (problem_id, claim_id, version, kind, statement, falsifier, content_digest, editor_fellow_id, created_at)
     VALUES
-      ('P-DIPTYCH', 'C-1', 1, 'conjecture', 'Invariants distinguish Donaldson boundaries.', 'Counterexample', 'sha256:${payload5}', 'fel_1', '2026-08-20T00:00:00.000Z'),
-      ('P-DIPTYCH', 'C-2', 1, 'conjecture', '${HOSTILE_STATEMENT.replace(/'/g, "''")}', 'Counterexample', 'sha256:${payload8}', 'fel_1', '2026-08-20T00:00:00.000Z');
+      ('P-DIPTYCH', 'C-1', 1, 'conjecture', 'Invariants distinguish Donaldson boundaries.', 'Counterexample', '${c1ContentDigest}', 'fel_1', '2026-08-20T00:00:00.000Z'),
+      ('P-DIPTYCH', 'C-2', 1, 'conjecture', '${HOSTILE_STATEMENT.replace(/'/g, "''")}', 'Counterexample', '${c2ContentDigest}', 'fel_1', '2026-08-20T00:00:00.000Z');
   `);
 
   // Insert a private workshop row with canary to ensure private work cannot leak
