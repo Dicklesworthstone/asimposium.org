@@ -205,12 +205,14 @@ export async function startLocalTarget({
       }
       const url = new URL(req.url ?? "/", origin);
       let response;
+      let bytes;
       try {
         response = await worker.fetch(url.href, {
           method: req.method,
           headers,
           ...(body && req.method !== "GET" && req.method !== "HEAD" ? { body } : {}),
         });
+        bytes = Buffer.from(await response.arrayBuffer());
       } catch {
         publishObservation({
           started_order: startedOrder,
@@ -226,7 +228,6 @@ export async function startLocalTarget({
         }
         return;
       }
-      const bytes = Buffer.from(await response.arrayBuffer());
       let code = null;
       let claimId = null;
       let firstClaimFormulation = null;
