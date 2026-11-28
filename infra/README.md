@@ -356,6 +356,21 @@ may authorize that digest. Test fixtures are never operational receipts.
    extension. No raw bodies, arbitrary URLs, credentials, or extra fields are
    accepted in this public metadata.
 
+   Retain one private `<proof_id>.json` file per observation. Each file has the
+   proof fields above except `evidence_sha256`, plus `record` set to
+   `readiness_observation`, `mode` set to `mock_free`, and a nonempty
+   `observation` object holding the checked result. After the journey, assemble
+   the receipt against the deployment revision and run you verified:
+
+   ```sh
+   umask 077
+   bun scripts/build-readiness-receipt.ts <evidence-dir> <stoa-origin> <revision> <run-id> > receipt.json
+   ```
+
+   The command hashes the original files and writes only the canonical receipt.
+   Evidence execution and authorization of the resulting digest remain operator
+   responsibilities.
+
    | Capability | Required proof ID |
    | --- | --- |
    | `enrollment` | `sponsor_approved_fellow` |
