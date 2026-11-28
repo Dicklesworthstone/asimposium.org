@@ -1099,7 +1099,7 @@ print(json.dumps({"project_id": sys.argv[1], "git_linked": False}, separators=("
     --fail --silent --show-error \
     --user-agent "$USER_AGENT" \
     --connect-timeout 5 --max-time 20 \
-    "https://api.vercel.com/v7/deployments?projectId=$VERCEL_PROJECT_ID&teamId=$VERCEL_ORG_ID&target=preview&limit=1" | \
+    "https://api.vercel.com/v7/deployments?projectId=$VERCEL_PROJECT_ID&teamId=$VERCEL_ORG_ID&target=preview&limit=20" | \
     python3 -c '
 import json
 import re
@@ -1112,30 +1112,35 @@ except (json.JSONDecodeError, UnicodeDecodeError):
 if not isinstance(document, dict):
     sys.exit(1)
 deployments = document.get("deployments")
-if not isinstance(deployments, list):
+if not isinstance(deployments, list) or len(deployments) > 20:
     sys.exit(1)
-if not deployments:
-    sys.exit(78)
-if len(deployments) != 1:
-    sys.exit(1)
-baseline = deployments[0]
-# The Vercel API encodes Preview as a null target; production and custom staging
-# have named targets. Normalize only after proving the provider value is null.
-if not isinstance(baseline, dict) or "target" not in baseline or baseline["target"] is not None:
-    sys.exit(1)
-project_id = baseline.get("projectId")
-if project_id is None and isinstance(baseline.get("project"), dict):
-    project_id = baseline["project"].get("id")
-deployment_id = baseline.get("id") or baseline.get("uid")
-if project_id != sys.argv[1]:
-    sys.exit(1)
-if not isinstance(deployment_id, str) or not re.fullmatch(r"dpl_[A-Za-z0-9]{8,128}", deployment_id):
-    sys.exit(1)
-print(json.dumps({
-    "deployment_id": deployment_id,
-    "project_id": project_id,
-    "target": "preview",
-}, separators=(",", ":")))
+# The provider includes named custom environments in its Preview listing and
+# gives their deployments a null target too. Require a ready ordinary Preview.
+for deployment in deployments:
+    if not isinstance(deployment, dict) or "target" not in deployment:
+        sys.exit(1)
+    if (
+        deployment["target"] is not None
+        or deployment.get("customEnvironment") is not None
+        or deployment.get("customEnvironmentId") is not None
+        or (deployment.get("readyState") or deployment.get("state")) != "READY"
+    ):
+        continue
+    project_id = deployment.get("projectId")
+    if project_id is None and isinstance(deployment.get("project"), dict):
+        project_id = deployment["project"].get("id")
+    deployment_id = deployment.get("id") or deployment.get("uid")
+    if project_id != sys.argv[1]:
+        sys.exit(1)
+    if not isinstance(deployment_id, str) or not re.fullmatch(r"dpl_[A-Za-z0-9]{8,128}", deployment_id):
+        sys.exit(1)
+    print(json.dumps({
+        "deployment_id": deployment_id,
+        "project_id": project_id,
+        "target": "preview",
+    }, separators=(",", ":")))
+    sys.exit(0)
+sys.exit(78)
 ' "$VERCEL_PROJECT_ID" > "$preview_baseline_receipt"
   pipeline_statuses=("${PIPESTATUS[@]}")
   status="${pipeline_statuses[0]}"
@@ -1148,7 +1153,6 @@ print(json.dumps({
   deployment_output="$(bunx --bun "vercel@$VERCEL_CLI_VERSION" deploy "$repository_root" \
     --yes \
     --target preview \
-    --skip-domain \
     --meta "asimposiumRevision=$REVISION" \
     --build-env "STOA_ORIGIN=$STAGING_WORKER_ORIGIN" \
     --build-env "ASIMPOSIUM_SOURCE_REVISION=$REVISION" \
@@ -1160,16 +1164,26 @@ print(json.dumps({
 
   ci_artifact_capability_is_current || return 64
   printf '%s' "$deployment_output" | python3 -c '
+import json
+import re
 import sys
-from urllib.parse import urlsplit
 
 value = sys.stdin.read().strip()
-parts = urlsplit(value if "://" in value else "https://" + value)
-if parts.scheme != "https" or not parts.hostname or parts.port is not None or parts.path not in ("", "/") or parts.query or parts.fragment:
+if value.startswith("{"):
+    try:
+        document = json.loads(value)
+    except json.JSONDecodeError:
+        sys.exit(1)
+    deployment = document.get("deployment") if isinstance(document, dict) else None
+    value = deployment.get("url") if isinstance(deployment, dict) else None
+if not isinstance(value, str):
     sys.exit(1)
-if not parts.hostname.endswith(".vercel.app"):
+match = re.fullmatch(
+    r"(?:https://)?([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.vercel\.app)/?", value
+)
+if match is None:
     sys.exit(1)
-print("https://" + parts.hostname)
+print("https://" + match[1])
 ' > "$deployment_url_file"
   status=$?
   deployment_output=""
@@ -1252,6 +1266,8 @@ if parts.scheme != "https" or not parts.hostname or parts.port is not None or pa
 if not parts.hostname.endswith(".vercel.app"):
     sys.exit(1)
 if state != "READY" or "target" not in document or document["target"] is not None:
+    sys.exit(1)
+if document.get("customEnvironment") is not None or document.get("customEnvironmentId") is not None:
     sys.exit(1)
 project_id = document.get("projectId")
 if project_id is None and isinstance(document.get("project"), dict):

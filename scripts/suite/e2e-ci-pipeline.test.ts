@@ -912,6 +912,8 @@ ${name}
     expect(values("worker_deploy", "--config")).toEqual([
       join(REPO_ROOT, "infra", "deploy-resolved", `staging.${deploymentRunId}.wrangler.toml`),
     ]);
+    expect(values("web_deploy", "--target")).toEqual(["preview"]);
+    expect(argumentsByStage.web_deploy).not.toContain("--skip-domain");
     for (const flag of ["--build-env", "--env"]) {
       expect(values("web_deploy", flag)).toEqual([
         "STOA_ORIGIN=https://a-staging.asimposium.org",
@@ -929,6 +931,119 @@ ${name}
     expect(source).toContain(
       'if state != "READY" or "target" not in document or document["target"] is not None:',
     );
+    expect(source).toContain(
+      'if document.get("customEnvironment") is not None or document.get("customEnvironmentId") is not None:',
+    );
+  });
+
+  test("web deploy finds an ordinary Preview behind custom deployments and accepts the CLI JSON URL", () => {
+    const preview = {
+      uid: "dpl_preview001",
+      projectId: "prj_fixture",
+      target: null,
+      state: "READY",
+    };
+    const staging = {
+      ...preview,
+      uid: "dpl_staging001",
+      customEnvironment: { id: "env_fixture", slug: "staging" },
+    };
+    const previewOrigin = "https://asimposium-fixture.vercel.app";
+    const cases = [
+      {
+        label: "mixed-targets-json",
+        deployments: [staging, preview],
+        output: JSON.stringify({ deployment: { url: previewOrigin } }),
+        exit: 93,
+        expectedOrigin: previewOrigin,
+      },
+      {
+        label: "plain-deploy-url",
+        deployments: [preview],
+        output: previewOrigin,
+        exit: 93,
+        expectedOrigin: previewOrigin,
+      },
+      {
+        label: "custom-baseline-only",
+        deployments: [staging],
+        output: previewOrigin,
+        exit: 78,
+      },
+      {
+        label: "userinfo-in-preview-url",
+        deployments: [preview],
+        output: "https://unexpected@asimposium-fixture.vercel.app",
+        exit: 1,
+      },
+    ];
+    for (const { label, deployments, output, exit, expectedOrigin } of cases) {
+      const paths = fixture(label);
+      const result = spawnSync(
+        "bash",
+        [
+          "-c",
+          `
+set -u -o pipefail
+repository_root="$1"
+ARTIFACT_DIRECTORY="$2"
+trace="$3"
+REVISION="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+STAGING_WORKER_ORIGIN="https://a-staging.asimposium.org"
+VERCEL_CLI_VERSION="59.5.0"
+USER_AGENT="asimposium.org-agent"
+CLOUDFLARE_API_TOKEN="fixture-token"
+CLOUDFLARE_ACCOUNT_ID="fixture-account"
+VERCEL_TOKEN="fixture-token"
+VERCEL_ORG_ID="team_fixture"
+VERCEL_PROJECT_ID="prj_fixture"
+ci_artifact_capability_is_current() { return 0; }
+require_bearer_token() { return 0; }
+require_live_variable() { return 0; }
+curl_with_bearer() {
+  case "\${!#}" in
+    */v9/projects/*) printf '%s' '{"id":"prj_fixture"}' ;;
+    */v7/deployments\\?*) printf '%s' "$BASELINES" ;;
+    *) return 91 ;;
+  esac
+}
+bunx() {
+  case "$3" in
+    deploy) printf '%s' "$DEPLOY_OUTPUT" ;;
+    inspect) printf '%s' "$4" > "$trace"; return 93 ;;
+    *) return 92 ;;
+  esac
+}
+${pipelineFunctionSource("web_deploy", "safe_receipt_field")}
+web_deploy
+`,
+          "web-deploy-preview-fixture",
+          REPO_ROOT,
+          paths.artifactDirectory,
+          paths.tracePath,
+        ],
+        {
+          env: { ...HELPER_ENV, BASELINES: JSON.stringify({ deployments }), DEPLOY_OUTPUT: output },
+          encoding: "utf8",
+          timeout: 10_000,
+        },
+      );
+      expect(result.status, `${label}: ${result.stderr}`).toBe(exit);
+      if (expectedOrigin) {
+        expect(readFileSync(paths.tracePath, "utf8")).toBe(expectedOrigin);
+        expect(
+          JSON.parse(
+            readFileSync(join(paths.artifactDirectory, "vercel-preview-baseline.json"), "utf8"),
+          ),
+        ).toEqual({
+          deployment_id: preview.uid,
+          project_id: preview.projectId,
+          target: "preview",
+        });
+      } else {
+        expect(existsSync(paths.tracePath)).toBe(false);
+      }
+    }
   });
 
   test("signal bookkeeping retains an explicit inter-stage terminal path", () => {

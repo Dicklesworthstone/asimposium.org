@@ -266,10 +266,10 @@ that preview to production. It also re-observes Cloudflare's active deployment,
 including the expected Worker version and revision message, after Worker
 readiness and again after the Vercel preview reaches ready.
 
-Vercel's deployment APIs encode Preview as a null provider `target`, while
-`vercel inspect --json` normalizes it to `"preview"`. The pipeline requires each
-surface's exact representation and emits `"preview"` in its own bounded safe
-receipts. Named `production` or `staging` API targets are refused.
+Vercel's deployment APIs use a null `target` for ordinary Preview and for
+custom environments such as staging. The pipeline also checks for the absence
+of a custom environment and requires `vercel inspect --json` to report
+`"preview"` before it records the deployment.
 
 Before activating this trigger, disconnect the Vercel project's Git integration.
 Otherwise Vercel can start a web build directly from the push and race the
@@ -279,15 +279,12 @@ operator assertion cannot bypass that provider-state check. This ordered CLI
 preview path supersedes the earlier native-Git preview plan. Launch promotion
 remains a separately owned gate.
 
-The web stage also requires a read-only API observation of at least one existing
-Preview deployment for the exact project before it mutates anything. This
-fails closed for a newly initialized project because a post-deploy target check
-cannot undo a first deployment that a provider classified as Production despite
-Preview intent. The CLI also uses `--skip-domain` as a second containment layer,
-so an incorrect provider classification cannot assign a production domain while
-the final check is pending. The new deployment is still checked independently
-through the v13 API for exact project, exact Preview target, ready state, and
-revision metadata.
+Before requesting a deployment, the web stage requires an existing, ready
+ordinary Preview for the exact project. The pinned CLI receives an explicit
+`--target preview`. Vercel reserves `--skip-domain` for Production and rejects
+that option before a Preview request can run. The v13 API independently confirms
+the result belongs to the expected project and has the ordinary Preview target,
+ready state, and exact revision metadata.
 
 Each run retains ignored evidence under `e2e/artifacts/<run-id>/`: the exact Git
 revision, runner label, ordered stage statuses, safe Cloudflare/Vercel deployment
