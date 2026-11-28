@@ -409,6 +409,8 @@ export async function runAgoraSupportSurfacesE2e(): Promise<void> {
       title: "P-SP4D / C-1 — Critical Strip Distribution",
       kind: "claim" as const,
       status: "strongly-supported" as const,
+      version: 1,
+      cursor: 105,
       settled_at: "2026-08-12T14:00:00.000Z",
       sequence: 105,
       statement:
