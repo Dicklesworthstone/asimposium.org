@@ -381,9 +381,6 @@ export async function readClaimRelations(
         row.dispute_seq <= row.through
           ? await checkedBody(row.dispute_json, row.dispute_sha256)
           : null;
-      const disputeNotice = payload
-        ? relationNotice(row.dispute_screening_provenance_json)
-        : undefined;
       if (
         payload &&
         edgePayload(payload, row.object_id) &&
@@ -398,6 +395,7 @@ export async function readClaimRelations(
             /^E-[A-Za-z0-9][A-Za-z0-9._:-]*$/.exec(payload.refuting_evidence_id)?.[0] ===
               payload.refuting_evidence_id))
       ) {
+        const disputeNotice = relationNotice(row.dispute_screening_provenance_json);
         status = "disputed";
         dispute = {
           event: row.dispute_id,

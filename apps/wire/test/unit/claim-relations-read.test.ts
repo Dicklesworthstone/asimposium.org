@@ -628,6 +628,29 @@ test("invalid query cursors fail before any database call", async () => {
   assert.equal(f.queries.length, 0);
 });
 
+test("invalid dispute payloads degrade to unavailable even when their screening receipt is corrupt", async () => {
+  const f = fixture(),
+    edge = await f.pair(),
+    d = await f.dispute(edge, { disputed_by: "F-impostor" });
+  f.warn(edge.id, assertionNotice);
+  f.warn(d.id);
+  f.sqlite.exec("DROP TRIGGER screening_publications_no_update");
+  f.sqlite.exec("PRAGMA ignore_check_constraints = ON");
+  try {
+    f.sqlite
+      .prepare("UPDATE screening_publications SET provenance_json=? WHERE event_id=?")
+      .run("{", d.id);
+  } finally {
+    f.sqlite.exec("PRAGMA ignore_check_constraints = OFF");
+  }
+  const read = await f.read();
+  assert.equal(read.relations.length, 1);
+  assert.equal(read.relations[0]?.status, "unavailable");
+  assert.equal(read.relations[0]?.dispute, undefined);
+  assert.deepEqual(read.relations[0]?.screening_notice, assertionNotice);
+  assert.ok(read.omitted.some((entry) => entry.detail === `typed-relations:${edge.id}:dispute-state`));
+});
+
 test("database failures are visible rather than reported as an empty graph", async () => {
   const f = fixture();
   await f.pair();
