@@ -280,7 +280,7 @@ export async function runClaimPageE2e(): Promise<void> {
       status_basis: {
         kind: "transition",
         cause: "claim-created",
-        from: "open",
+        from: "draft",
         to: "open",
         event_id: "EVT-100",
         seq: 1,
@@ -334,9 +334,8 @@ export async function runClaimPageE2e(): Promise<void> {
       throw new Error("Created claim page missing 'Why this status?' honesty panel");
     }
     if (
-      !createdHtml.includes(
-        "Claim is open and unchallenged; no refutation attempts have been logged.",
-      )
+      !createdHtml.includes("Canonical standing: open · unchallenged.") ||
+      !createdHtml.includes("The claim publication established this standing.")
     ) {
       throw new Error(
         "Created claim page missing open unchallenged explanation in 'Why this status?'",
@@ -345,7 +344,7 @@ export async function runClaimPageE2e(): Promise<void> {
     if (!createdHtml.includes("What remains unverified?")) {
       throw new Error("Created claim page missing 'What remains unverified?' honesty panel");
     }
-    if (!createdHtml.includes("No independent cross-family (Tier 2) reviews")) {
+    if (!createdHtml.includes("No displayed cross-family (T2/T3) review")) {
       throw new Error("Created claim page missing review gap in 'What remains unverified?'");
     }
 
@@ -450,6 +449,14 @@ export async function runClaimPageE2e(): Promise<void> {
       disposition: "disputed",
       unchallenged: false,
       recorded_refutation_attempts: 1,
+      status_basis: {
+        kind: "transition",
+        cause: "refuting-evidence",
+        from: "open",
+        to: "disputed",
+        event_id: "EVT-103",
+        seq: 2,
+      },
       extraItems: [
         {
           kind: "claim-evidence",
@@ -497,10 +504,13 @@ export async function runClaimPageE2e(): Promise<void> {
     if (!disputedHtml.includes("refutation-tested")) {
       throw new Error("Disputed claim missing 'refutation-tested' facet badge");
     }
-    if (!disputedHtml.includes("Disputed by one or more active refutation attempts")) {
+    if (
+      !disputedHtml.includes("Canonical standing: disputed.") ||
+      !disputedHtml.includes("Recorded counterevidence triggered this status step")
+    ) {
       throw new Error("Disputed claim 'Why this status?' missing dispute explanation");
     }
-    if (!disputedHtml.includes("Refuting evidence E-101")) {
+    if (!disputedHtml.includes("EVT-103")) {
       throw new Error(
         "Disputed claim 'Why this status?' missing triggering refuting evidence item",
       );
@@ -533,6 +543,14 @@ export async function runClaimPageE2e(): Promise<void> {
       disposition: "refuted",
       unchallenged: false,
       recorded_refutation_attempts: 1,
+      status_basis: {
+        kind: "transition",
+        cause: "refuting-evidence",
+        from: "disputed",
+        to: "refuted",
+        event_id: "EVT-104",
+        seq: 3,
+      },
       extraItems: [
         {
           kind: "claim-evidence",
@@ -568,10 +586,13 @@ export async function runClaimPageE2e(): Promise<void> {
     if (!refutedHtml.includes('data-disposition="refuted"')) {
       throw new Error("Refuted claim missing data-disposition='refuted'");
     }
-    if (!refutedHtml.includes("Grounded refutation recorded and verified on the public ledger.")) {
+    if (
+      !refutedHtml.includes("Canonical standing: refuted.") ||
+      !refutedHtml.includes("Recorded counterevidence triggered this status step")
+    ) {
       throw new Error("Refuted claim 'Why this status?' missing refutation summary");
     }
-    if (!refutedHtml.includes("Decisive refutation evidence E-102")) {
+    if (!refutedHtml.includes("EVT-104")) {
       throw new Error("Refuted claim 'Why this status?' missing triggering refutation item");
     }
 
@@ -752,6 +773,14 @@ export async function runClaimPageE2e(): Promise<void> {
       latest_version: 1,
       disposition: "withdrawn",
       unchallenged: false,
+      status_basis: {
+        kind: "transition",
+        cause: "claim-retracted",
+        from: "open",
+        to: "withdrawn",
+        event_id: "EVT-107",
+        seq: 4,
+      },
       statement: "Premature claim statement subsequently retracted by the research author.",
       cursor: 107,
     });
@@ -766,7 +795,7 @@ export async function runClaimPageE2e(): Promise<void> {
     if (!withdrawnHtml.includes('data-disposition="withdrawn"')) {
       throw new Error("Withdrawn claim missing data-disposition='withdrawn'");
     }
-    if (!withdrawnHtml.includes("Statement was withdrawn by its authoring team.")) {
+    if (!withdrawnHtml.includes("The author withdrew this statement through a recorded retraction.")) {
       throw new Error("Withdrawn claim missing withdrawal explanation in 'Why this status?'");
     }
 
@@ -847,8 +876,8 @@ export async function runClaimPageE2e(): Promise<void> {
     if (!depsHtml.includes("C-1@2") || !depsHtml.includes("C-2@1")) {
       throw new Error("Dependency table missing premise target IDs");
     }
-    if (!depsHtml.includes("Bounded by 2 premise(s)")) {
-      throw new Error("Missing 'Bounded by 2 premise(s)' ceiling badge");
+    if (!depsHtml.includes("2 declared premise(s) displayed")) {
+      throw new Error("Missing '2 declared premise(s) displayed' premise-bounded gap");
     }
 
     logOps2a({
