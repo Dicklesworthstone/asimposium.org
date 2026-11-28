@@ -124,6 +124,7 @@ function makeMockClaimFace(overrides: {
   recorded_refutation_attempts?: number;
   certified_artifact?: boolean;
   legacy_reviews?: number;
+  status_basis?: ClaimFaceResponse["claim_state"]["status_basis"];
   statement?: string;
   falsifier?: string;
   extraItems?: ClaimFaceResponse["items"];
@@ -192,6 +193,7 @@ function makeMockClaimFace(overrides: {
       recorded_refutation_attempts: overrides.recorded_refutation_attempts ?? 0,
       certified_artifact: overrides.certified_artifact ?? false,
       legacy_reviews: overrides.legacy_reviews ?? 0,
+      ...(overrides.status_basis === undefined ? {} : { status_basis: overrides.status_basis }),
     },
     items,
     omitted: [
@@ -216,6 +218,11 @@ function makeMockClaimFace(overrides: {
         method: "GET",
         url: `/p/${problem}/claims/${claimId}@${version}.bib`,
         why: "canonical BibTeX citation",
+      },
+      {
+        method: "GET",
+        url: `/p/${problem}/claims/${claimId}@${version}.csl.json`,
+        why: "canonical CSL-JSON citation",
       },
     ],
   };
@@ -270,6 +277,14 @@ export async function runClaimPageE2e(): Promise<void> {
       disposition: "open",
       unchallenged: true,
       recorded_refutation_attempts: 0,
+      status_basis: {
+        kind: "transition",
+        cause: "claim-created",
+        from: "open",
+        to: "open",
+        event_id: "EVT-100",
+        seq: 1,
+      },
       statement: "For all integers n >= 2, there exists a prime between n and 2n.",
       falsifier: "An integer n >= 2 with no prime between n and 2n.",
     });
