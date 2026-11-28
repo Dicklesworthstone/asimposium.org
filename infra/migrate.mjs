@@ -3397,15 +3397,8 @@ function remoteDatabaseInfoOrRefuse(result, resolvedDatabaseId, expectedName) {
   return { database_id: uuid, database_name: name };
 }
 
-function remotePrimaryRowsOrRefuse(result) {
-  const results = remoteCommandResultsOrRefuse(result);
-  if (results.length !== 1) {
-    fail(
-      "REMOTE_D1_TRANSPORT_FAILED",
-      "The staging D1 read transport returned multiple result sets.",
-    );
-  }
-  const meta = ownDataValue(results[0], "meta", "REMOTE_D1_TRANSPORT_FAILED");
+function remotePrimaryResultMetaOrRefuse(result) {
+  const meta = ownDataValue(result, "meta", "REMOTE_D1_TRANSPORT_FAILED");
   if (
     meta === null ||
     typeof meta !== "object" ||
@@ -3417,7 +3410,30 @@ function remotePrimaryRowsOrRefuse(result) {
       "The staging D1 operation was not confirmed by the primary database.",
     );
   }
+  return meta;
+}
+
+function remotePrimaryRowsOrRefuse(result) {
+  const results = remoteCommandResultsOrRefuse(result);
+  if (results.length !== 1) {
+    fail(
+      "REMOTE_D1_TRANSPORT_FAILED",
+      "The staging D1 read transport returned multiple result sets.",
+    );
+  }
+  remotePrimaryResultMetaOrRefuse(results[0]);
   return results[0].results;
+}
+
+function remotePrimaryMutationResultsOrRefuse(result) {
+  // D1 confirms each statement in the SQL and journal transaction separately.
+  // The journal INSERT is last and must record exactly one migration.
+  const results = remoteCommandResultsOrRefuse(result);
+  const metadata = results.map(remotePrimaryResultMetaOrRefuse);
+  const journalMeta = metadata.at(-1);
+  if (ownSafeInteger(journalMeta, "changes", "REMOTE_D1_TRANSPORT_FAILED") !== 1) {
+    fail("REMOTE_D1_TRANSPORT_FAILED", "The staging D1 journal append was not confirmed.");
+  }
 }
 
 /**
@@ -3556,7 +3572,7 @@ export function createWranglerRemoteTransport({
       // A successful result envelope is insufficient: REST reads can be served
       // by replicas, and the apply receipt must not claim a forward write unless
       // Wrangler's result metadata confirms the primary.
-      remotePrimaryRowsOrRefuse(
+      remotePrimaryMutationResultsOrRefuse(
         await run(
           ["d1", "execute", databaseId, "--remote", "--yes", "--json", "--command", sql],
           signal,
@@ -3845,9 +3861,12 @@ export async function applyPendingRemoteMigrationsOrRefuse(
   }
   const targetId = assertResolvedDatabaseId(resolvedDatabaseId);
   assertRemoteApplyTransport(transport);
-  const budget = createRemoteBudget(deadlineMs);
   const applied = [];
   for (const migration of pending) {
+    // A forward backlog can contain many independent transactions. Give each
+    // write its own bounded execution and cleanup window, and stop on the
+    // first uncertain result before sending another write.
+    const budget = createRemoteBudget(deadlineMs);
     const response = await awaitBoundedRemote(
       budget,
       (signal, timeoutMs) =>

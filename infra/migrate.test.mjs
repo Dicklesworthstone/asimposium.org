@@ -4597,6 +4597,88 @@ writeFileSync(1, ${JSON.stringify(`${JSON.stringify({ uuid: STAGING_DATABASE_ID,
     },
   },
   {
+    name: "PLANTED-D1-writes-verify-all-statement-receipts-and-the-final-journal-append",
+    async execute() {
+      const environment = stagingEnvironment();
+      const root = defaultRemoteTransportRoot("migration-batch-receipts");
+      const ddl = { success: true, results: [], meta: { served_by_primary: true, changes: 0 } };
+      const journal = { success: true, results: [], meta: { served_by_primary: true, changes: 1 } };
+      let receipts = [ddl, journal];
+      const transport = createWranglerRemoteTransport({
+        root,
+        environmentName: "staging",
+        environment,
+        resolvedDatabaseId: STAGING_DATABASE_ID,
+        runCommand: async ({ cmd }) => {
+          assert.equal(cmd.includes(STAGING_DATABASE_ID), true);
+          assert.equal(cmd.includes("--command"), true);
+          assert.equal(cmd.includes("--file"), false);
+          return { ...successfulRemoteCommand([]), stdout: JSON.stringify(receipts) };
+        },
+      });
+      const request = {
+        database_id: STAGING_DATABASE_ID,
+        sql: "CREATE TABLE sample (id TEXT); INSERT INTO _asimposium_migrations VALUES ('fixture', 1, 'digest', 'time');",
+      };
+      assert.deepEqual(await transport.execute(request), { database_id: STAGING_DATABASE_ID });
+      await expectAsyncFailure("multiple read sets", "REMOTE_D1_TRANSPORT_FAILED", () =>
+        transport.query({ ...request, sql: "SELECT 1" }),
+      );
+
+      receipts = [{ ...ddl, success: false }, journal];
+      await expectAsyncFailure("failed earlier statement", "REMOTE_D1_TRANSPORT_FAILED", () =>
+        transport.execute(request),
+      );
+      receipts = [{ ...ddl, meta: { ...ddl.meta, served_by_primary: false } }, journal];
+      await expectAsyncFailure("replica before journal", "REMOTE_D1_REPLICA_REFUSED", () =>
+        transport.execute(request),
+      );
+      receipts = [ddl, { ...journal, meta: { ...journal.meta, served_by_primary: false } }];
+      await expectAsyncFailure("replica journal", "REMOTE_D1_REPLICA_REFUSED", () =>
+        transport.execute(request),
+      );
+      receipts = [ddl, { ...journal, meta: { ...journal.meta, changes: 0 } }];
+      await expectAsyncFailure("journal append not confirmed", "REMOTE_D1_TRANSPORT_FAILED", () =>
+        transport.execute(request),
+      );
+    },
+  },
+  {
+    name: "PLANTED-each-sequential-migration-receives-a-fresh-deadline-and-uncertainty-stops-the-batch",
+    async execute() {
+      const environment = stagingEnvironment();
+      const migrations = [16, 17, 18].map((sequence) => ({
+        id: `00${sequence}_bounded_${sequence}.sql`,
+        sequence,
+        sql: `CREATE TABLE bounded_${sequence} (id TEXT);`,
+        digest: digestOf(`bounded-${sequence}`),
+      }));
+      const transport = recordingRemoteApplyTransport({
+        async onExecute({ sql }) {
+          if (sql.includes("bounded_16")) {
+            await new Promise((resolve) => setTimeout(resolve, 250));
+            return { database_id: STAGING_DATABASE_ID };
+          }
+          throw new Error("Uncertain result from D1");
+        },
+      });
+      await expectAsyncFailure("uncertain second write", "REMOTE_D1_APPLY_FAILED", () =>
+        applyPendingRemoteMigrationsOrRefuse(
+          environment,
+          transport,
+          STAGING_DATABASE_ID,
+          migrations,
+          "2026-08-17T00:00:00.000Z",
+          { deadlineMs: 1_000 },
+        ),
+      );
+      assert.equal(transport.executions.length, 2);
+      assert.ok(transport.executions[0].sql.includes("bounded_16"));
+      assert.ok(transport.executions[1].sql.includes("bounded_17"));
+      assert.ok(transport.executions[1].timeoutMs > 450, "second write inherited a spent budget");
+    },
+  },
+  {
     name: "PLANTED-remote-apply-is-forward-only-transaction-capability-gated-and-records-the-journal-in-the-same-command",
     async execute() {
       const environment = stagingEnvironment();
