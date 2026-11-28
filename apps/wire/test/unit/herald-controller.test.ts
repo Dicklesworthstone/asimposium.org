@@ -1,9 +1,7 @@
 import { Database } from "bun:sqlite";
 import { describe, test } from "bun:test";
 import assert from "node:assert/strict";
-import {
-  HERALD_ROOM_LIMITS as LIMITS,
-} from "../../../../packages/contracts/src/herald-room-model.ts";
+import { HERALD_ROOM_LIMITS as LIMITS } from "../../../../packages/contracts/src/herald-room-model.ts";
 import type { HeraldDatabase } from "../../src/herald/outbox.ts";
 import {
   HeraldRoomController,
@@ -528,7 +526,10 @@ describe("Herald production controller ports", () => {
       f.setPing(NOW + LIMITS.revalidateMs - 1000);
       await f.controller.alarm();
       assert.equal(socket.closed, undefined);
-      assert.deepEqual(socket.sent.map((frame) => JSON.parse(frame).through), [1, 3]);
+      assert.deepEqual(
+        socket.sent.map((frame) => JSON.parse(frame).through),
+        [1, 3],
+      );
       assert.equal(roomAttachment(socket)?.acknowledged, 1);
       assert.equal(roomAttachment(socket)?.pending, true);
       await f.controller.webSocketMessage(socket, '{"ack":3}');
@@ -556,7 +557,10 @@ describe("Herald production controller ports", () => {
       assert.equal(roomAttachment(socket)?.dirty, true);
       f.setNow(NOW + 2000);
       await f.controller.webSocketMessage(socket, '{"ack":1}');
-      assert.deepEqual(socket.sent.map((frame) => JSON.parse(frame).through), [1, 3]);
+      assert.deepEqual(
+        socket.sent.map((frame) => JSON.parse(frame).through),
+        [1, 3],
+      );
       f.setIdentity(undefined);
       f.sql.exec("UPDATE problems SET public_seq=4 WHERE id='P-DEMO'");
       await f.controller.alarm();
@@ -632,7 +636,10 @@ describe("Herald production controller ports", () => {
         releaseRead({ cursor: 2 });
         assert.equal((await olderWake).status, 204);
         if (outcome === "newer-head") {
-          assert.deepEqual(socket.sent.map((frame) => JSON.parse(frame).workshop_cursor), [3]);
+          assert.deepEqual(
+            socket.sent.map((frame) => JSON.parse(frame).workshop_cursor),
+            [3],
+          );
           assert.equal(workshopRoomAttachment(socket)?.cursor, 3);
           assert.equal(socket.closed, undefined);
         } else {

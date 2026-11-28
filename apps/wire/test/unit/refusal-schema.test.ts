@@ -129,7 +129,11 @@ test("first-claim and saved-draft recovery refusals link the precise served requ
 
 test("ambiguous or unrelated recovery examples retain the generic route schema", async () => {
   for (const [path, example, property] of [
-    ["/v1/sessions/S-1/promote", { kind: "conjecture", statement: "A", workshop_id: "W-1" }, "promote_request"],
+    [
+      "/v1/sessions/S-1/promote",
+      { kind: "conjecture", statement: "A", workshop_id: "W-1" },
+      "promote_request",
+    ],
     ["/v1/sessions/S-1/promote", { workshop_id: 123 }, "promote_request"],
     ["/v1/sessions/S-1/workshop", { type: "research-note" }, "workshop_push_request"],
     ["/v1/sessions/S-1/workshop", { type: "claim-draft" }, "first_claim_draft_request"],
