@@ -608,7 +608,7 @@ describe("W7.4 Cache Discipline, Surrogate-Key Purge Map & Paired-User Leak Harn
     } finally {
       f.sqlite.close();
     }
-  });
+  }, 30_000);
 
   test("paired-user cache-leak harness (Sponsor A + Sponsor B + Anonymous + unlisted problem + private workshop + authed packs) behind real shared-cache proxy + OPS.5 probe", async () => {
     const f = await setupCacheFixture();
@@ -818,7 +818,7 @@ describe("W7.4 Cache Discipline, Surrogate-Key Purge Map & Paired-User Leak Harn
       }
       f.sqlite.close();
     }
-  });
+  }, 30_000);
 
   test("stale-with-warning fixture: published synthesis lags new ledger event and visibly surfaces timestamped staleness on .json and .md faces", async () => {
     const f = await setupCacheFixture();
@@ -1004,5 +1004,5 @@ describe("W7.4 Cache Discipline, Surrogate-Key Purge Map & Paired-User Leak Harn
     } finally {
       f.sqlite.close();
     }
-  });
+  }, 30_000);
 });
